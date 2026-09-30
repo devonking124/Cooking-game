@@ -1300,7 +1300,12 @@ class Thermo {
     if (pan) { let j = this.pans.indexOf(pan); if (j < 0) { j = this.pans.length; this.pans.push(pan); this.panJ.push(0); } f.contact = pan; f.contactHA = (f.contactHA || 0) + h * A; f.panIndex = j; }
   }
   // Radiative exposure: emitter at Tsrc (°C), effective emissivity × view factor × area.
-  exposeRad(face, epsA, Tsrc) { const f = this.faces[face]; f.radT = f.radEpsA > 0 ? (f.radT * f.radEpsA + Tsrc * epsA) / (f.radEpsA + epsA) : Tsrc; f.radEpsA += epsA; }
+  // Several emitters combine as a T⁴-weighted effective temperature (a glowing broil element dominates cool walls).
+  exposeRad(face, epsA, Tsrc) {
+    const f = this.faces[face], k = Tsrc + 273.15, k4 = k * k * k * k;
+    f.rad4 = (f.radEpsA > 0 ? f.rad4 : 0) + epsA * k4; f.radEpsA += epsA;
+    f.radT = Math.pow(f.rad4 / f.radEpsA, 0.25) - 273.15;
+  }
   // Open air on a face: natural convection + radiation to the room.
   exposeAir(face, Tair = THERMO.Tamb) { const A = this.faces[face].area; if (A <= 0) return; this.expose(face, THERMO.hAir, A, Tair); this.exposeRad(face, THERMO.foodEmissivity * A, THERMO.Tamb); }
   // Evaporable water held in each surface layer (the "drying front"): while it lasts the layer
@@ -4088,6 +4093,9 @@ const Oven = {
     this.body.setNextKinematicRotation(this._q);
     for (const r of this.racks) {
       if (this.angle < 1.2 && r.out > 0) r.out = Math.max(0, r.out - dt * 0.8);
+      // Anything resting on a moving rack must be awake to be carried along by friction.
+      if (Math.abs(r.out - (r.lastOut ?? r.out)) > 1e-5) for (const p of Props.list) if (p.alive && Math.abs(p.currPos.y - r.y) < 0.12 && Oven.contains(p.currPos, 0.35)) p.body.wakeUp();
+      r.lastOut = r.out;
       r.pos.set(this.O.cx, r.y, this.zc + r.out);
       r.body.setNextKinematicTranslation(r.pos);
       _m1.makeTranslation(r.pos.x, r.pos.y, r.pos.z); this.rackMesh.setMatrixAt(r.i, _m1);
