@@ -26,20 +26,34 @@ WebXR needs a secure context, so the page must be served over **HTTPS** (or `loc
 | Point teleport | Hold grip + trigger on an empty hand |
 | Force grab | Point at a distant item, hold grip, flick your wrist |
 | Wrist menu | Turn your non-dominant palm toward your face; **Y/B** pins it in front of you |
+| Cut | Hold a knife and push the edge down through food (sawing helps; serrated knife saws skins). Tiny pieces become a minced pile; keep chopping it to mince finer |
+| Crush garlic | Press the flat of the blade down onto a clove |
+| Stove | Grip a knob and twist your wrist: OFF → click-click → HI → LO |
+| Peel onion / crack egg | Pull the skin off with your second hand (or press trigger); tap an egg on a pan rim (or press trigger) |
+| Tongs | Hold trigger to close them on food |
+| Pat dry | Wipe food with a paper towel |
 
 Every stick function (Move / Teleport / Turn / Teleport+Turn / None) can be assigned to either hand
 independently in **Menu → Comfort**. The panel shows the resolved axis layout, including auto-assigned turning.
 
 **Desktop:** `WASD` move · mouse look · hold `LMB` to grab, release to drop/throw · `RMB` use ·
 wheel = hold distance · `R` + mouse rotates the held item · `1`–`9` tools, `0` empty hand · `F` force-grab ·
-hold `T` to aim a teleport · `Q`/`E` snap turn · `C` crouch · `M`/`Tab` menu · `P` perf HUD.
+hold `T` to aim a teleport · `Q`/`E` snap turn · `C` crouch · `M`/`Tab` menu · `P` perf HUD ·
+`RMB` with a knife chops at the crosshair (`Shift`+`RMB` crushes with the flat) · `LMB`-drag a stove knob to twist it ·
+hold `RMB` with tongs to grip · `X` toggles Chef's Eye.
+
+**Test mode:** open the page with `?test` (e.g. `index.html?test`) to run the headless thermal scenarios and show
+a pass/fail table.
 
 ## Milestone status
 
 - [x] **M1**: kitchen blockout, XR session, physics hands, grabbing/throwing, two-handed items, force grab,
   per-hand locomotion (smooth / teleport / snap & smooth turn, vignette, blink, seated, recalibrate, recenter,
   dominant hand), wrist menu, desktop fallback, settings persistence.
-- [ ] M2: tools & cutting, cookware, stovetop, thermal simulation (steak, egg, onion), sizzle audio, cut-face gradient
+- [x] **M2**: tools & plane-slicing with inherited thermal state, minced piles, garlic crush, two-node pan
+  thermals (cast iron / stainless / nonstick / saucepan), gas range with twist knobs and flames, 1D thermal sim
+  with evaporation, crust formation and carryover, ribeye / egg / onion / garlic, Maillard browning and char,
+  smoke and steam, sizzle audio, Chef's Eye, `?test` mode
 - [ ] M3: browning/char/evaporation/carryover, thermometer, oven, boiling, pasta, liquids & pouring
 - [ ] M4: remaining foods & appliances, seasoning, eating & taste cards
 - [ ] M5: Sandbox complete, Challenge mode, scoring, mentor
@@ -48,7 +62,11 @@ hold `T` to aim a teleport · `Q`/`E` snap turn · `C` crouch · `M`/`Tab` menu 
 ## Code map (inside `index.html`)
 
 Search for the banner comments: `[CONFIG] [UTIL] [SAVE] [RENDERER] [TEXTURES] [AUDIO] [HAPTICS] [PHYSICS]
-[KITCHEN] [PROPS] [INPUT] [HANDS] [GRAB] [LOCOMOTION] [UI] [SIM] [DESKTOP] [PERFHUD] [XR SESSION] [MAIN]`.
+[THERMAL] [KITCHEN] [PROPS] [FOOD] [STOVE] [SIZZLE] [PARTICLES] [CHEF'S EYE] [TEST MODE] [INPUT] [HANDS] [GRAB]
+[LOCOMOTION] [UI] [SIM] [DESKTOP] [PERFHUD] [XR SESSION] [MAIN]`.
+
+- `[THERMAL]` is pure JS (no rendering or physics): `THERMO` constants, data-driven `FOOD_DEFS` and `PAN_DEFS`,
+  the `Thermo` finite-volume food model, the two-node `PanThermo` and the test scenarios.
 
 - All tunables live in `CONFIG`, with units in comments. Player settings are in `DEFAULT_SETTINGS` and are saved to
   `localStorage`.

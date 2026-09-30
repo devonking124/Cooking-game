@@ -185,6 +185,36 @@ const CONFIG = {
     impactMinForce: 1.5,    // N·(scaled) — contact force event threshold
     impactCooldown: 0.07,   // s — per-body sound cooldown
   },
+  cut: {
+    baseSpeed: 0.12,        // m/s — edge speed into food needed at hardness 0
+    hardSpeed: 0.55,        // m/s — extra edge speed per unit hardness (÷ knife sharpness)
+    sawFactor: 0.25,        // × — how much a sawing stroke counts toward cutting (plain edge)
+    serratedSaw: 0.8,       // × — same for serrated blades (they saw through skins)
+    cooldown: 0.13,         // s — between cuts from one knife
+    grazeFrac: 0.04,        // × — cuts removing less than this share of volume are ignored
+    minVolume: 0.8e-6,      // m³ — slices smaller than this (≈0.8 cm³) fall into a minced pile
+    minceVolume: 2.2e-6,    // m³ — chopping a piece smaller than this minces it (rock-chop)
+    maxPieces: 150,         // live food pieces (the smallest merge into piles beyond this)
+    crushSpeed: 0.45,       // m/s — downward speed of a flat blade that crushes garlic
+    hapticBase: 0.25,       // haptic strength at hardness 0 (scales up to 1 with hardness)
+  },
+  stove: {
+    burnerW: [4000, 2600, 2600, 1500], // W — front-left power burner, front-right, back-left, back-right simmer
+    knobMax: 4.71,          // rad — full knob travel (270°)
+    offAngle: 0.35,         // rad — below this the burner is off
+    hiAngle: 1.4,           // rad — HI position (gas knobs run OFF → HI → LO)
+    lowFrac: 0.12,          // × — power at the LO end of travel
+    igniteTime: 0.45,       // s — igniter clicking before the flame catches
+    panReach: 0.1,          // m — horizontal distance from a burner centre that still heats a pan
+    panGap: 0.07,           // m — max height of a pan bottom above the grate
+  },
+  sizzle: {
+    evapRef: 2.5e-4,        // kg/s — evaporation rate that gives full sizzle
+    dryRef: 0.35,           // share of loudness from hot dry contact (fat sputter)
+    maxGain: 0.55,
+  },
+  particles: { max: 500 },
+  chefsEye: { redrawHz: 5, size: [0.26, 0.2] },
   desktop: {
     mouseSens: 0.0022,      // rad/px
     reach: 3.0,             // m — click-to-grab reach
@@ -221,6 +251,8 @@ const DEFAULT_SETTINGS = {
   perfHud: false,
   refresh: 72,              // Hz — requested XR refresh rate
   glove: 0,                 // palette index
+  chefsEye: false,          // X-ray food overlay
+  tempUnit: 'C',            // 'C' | 'F'
 };
 
 const GLOVE_COLORS = [0x23324a, 0x1d1d22, 0x3c6e71, 0x7a2e2e, 0xd8d2c4];
@@ -268,6 +300,7 @@ const _m1 = new THREE.Matrix4(), _m2 = new THREE.Matrix4();
 const _e1 = new THREE.Euler();
 const UP = new THREE.Vector3(0, 1, 0);
 const SIDES = ['left', 'right'];
+let frameDt = 1 / 72; // s — last render-frame delta (set by the main loop)
 const FWD = new THREE.Vector3(0, 0, -1);
 const _r1 = { x: 0, y: 0, z: 0 }, _r2 = { x: 0, y: 0, z: 0 }, _rq = { x: 0, y: 0, z: 0, w: 1 }; // Rapier scratch
 
@@ -694,7 +727,7 @@ function buildMaterials() {
     plastic: spec(0x1c1c1e, 0.5), red: spec(0xc0231d, 0.35, 0.1), cardboard: spec(0xe8a33a, 0.8), silicone: spec(0xc8553d, 0.6),
     tomato: spec(0xffffff, 0.28, 0, 'tomato'), onion: spec(0xffffff, 0.6, 0, 'onion'), lemon: spec(0xffffff, 0.4, 0, 'lemon'),
     apple: spec(0xffffff, 0.3, 0, 'apple'), potato: spec(0xffffff, 0.85, 0, 'potato'), carrot: spec(0xffffff, 0.55, 0, 'carrot'),
-    egg: spec(0xffffff, 0.5, 0, 'egg'), leaf: spec(0x3d7a2a, 0.6),
+    egg: spec(0xffffff, 0.5, 0, 'egg'), leaf: spec(0x3d7a2a, 0.6), paper: spec(0xf3f0ea, 0.95), onionSkin: spec(0xb07a42, 0.85),
   });
   // Real (non-uber) materials
   MAT.sky = new THREE.MeshBasicMaterial({ map: TEX.sky, color: 0xffffff });
@@ -812,6 +845,20 @@ const AudioSys = {
         this.osc(v, 'sine', 115 * j, t, 0.08, 0.4 * s, 0.08);
     }
   },
+  knobTick(pos) { const v = this.voice(pos, 0.05, 0.12); if (!v) return; const t = this.ctx.currentTime; this.burst(v, t, 0.012, 0.6, 'highpass', 5000, 0.7); },
+  igniterClick(pos) { const v = this.voice(pos, 0.06, 0.35); if (!v) return; const t = this.ctx.currentTime; this.burst(v, t, 0.008, 1.0, 'highpass', 3500, 0.5); this.osc(v, 'square', 2400, t, 0.01, 0.2, 0.01); },
+  ignite(pos) { const v = this.voice(pos, 0.7, 0.45); if (!v) return; const t = this.ctx.currentTime; this.burst(v, t, 0.5, 0.9, 'lowpass', 300, 0.7, 1400); this.burst(v, t + 0.02, 0.35, 0.3, 'bandpass', 900, 0.6); },
+  flameOff(pos) { const v = this.voice(pos, 0.25, 0.25); if (!v) return; const t = this.ctx.currentTime; this.burst(v, t, 0.18, 0.6, 'lowpass', 500, 0.8, 150); },
+  pop(pos, s) { const v = this.voice(pos, 0.06, 0.08 + 0.18 * s); if (!v) return; const t = this.ctx.currentTime; this.burst(v, t, 0.008 + Math.random() * 0.01, 0.8, 'bandpass', 2500 + Math.random() * 3500, 1.2); },
+  crack(pos) { const v = this.voice(pos, 0.2, 0.5); if (!v) return; const t = this.ctx.currentTime; this.burst(v, t, 0.02, 1, 'highpass', 2500, 0.7); this.burst(v, t + 0.025, 0.05, 0.6, 'bandpass', 1400, 2); this.burst(v, t + 0.06, 0.12, 0.3, 'lowpass', 600, 0.7); },
+  rustle(pos) { const v = this.voice(pos, 0.4, 0.3); if (!v) return; const t = this.ctx.currentTime; for (let i = 0; i < 5; i++) this.burst(v, t + i * 0.05, 0.04, 0.5, 'bandpass', 3000 + i * 400, 1.5); },
+  crunch(pos, s = 0.6) { const v = this.voice(pos, 0.2, 0.3 + 0.4 * s); if (!v) return; const t = this.ctx.currentTime; for (let i = 0; i < 3; i++) this.burst(v, t + i * 0.018, 0.02, 0.8, 'bandpass', 1800 + Math.random() * 1500, 1.4); },
+  // Knife through food: crisp snap for firm veg, soft for meat, plus the board "tock".
+  chop(pos, hardness) {
+    const v = this.voice(pos, 0.2, 0.45); if (!v) return; const t = this.ctx.currentTime;
+    if (hardness > 0.4) this.burst(v, t, 0.025, 0.9, 'bandpass', 2600 + hardness * 1500, 1.8); else this.burst(v, t, 0.05, 0.5, 'lowpass', 900, 0.8);
+    this.burst(v, t + 0.03, 0.03, 0.6, 'bandpass', 1100, 1.5); this.osc(v, 'sine', 320, t + 0.03, 0.05, 0.35, 0.05);
+  },
   ring(pos, seconds = 3) {
     const v = this.voice(pos, seconds, 0.35); if (!v) return;
     const t = this.ctx.currentTime;
@@ -843,17 +890,23 @@ function haptic(side, intensity, ms) {
 }
 
 /* ===================================== [PHYSICS] ==================================== */
-const G = { STATIC: 1, PROP: 2, HAND: 4, PLAYER: 8, HELD: 16 };
+// Food has its own group so knife blades (which exclude FOOD) pass through food yet still hit the board.
+const G = { STATIC: 1, PROP: 2, HAND: 4, PLAYER: 8, HELD: 16, FOOD: 32 };
 const groups = (member, filter) => (((member & 0xffff) << 16) | (filter & 0xffff)) >>> 0;
 const GROUPS = {
-  static: groups(G.STATIC, G.PROP | G.HAND | G.PLAYER | G.HELD),
-  prop: groups(G.PROP, G.STATIC | G.PROP | G.HAND | G.HELD),
-  held: groups(G.HELD, G.STATIC | G.PROP | G.HELD),
-  hand: groups(G.HAND, G.STATIC | G.PROP),
+  static: groups(G.STATIC, G.PROP | G.HAND | G.PLAYER | G.HELD | G.FOOD),
+  prop: groups(G.PROP, G.STATIC | G.PROP | G.HAND | G.HELD | G.FOOD),
+  held: groups(G.HELD, G.STATIC | G.PROP | G.HELD | G.FOOD),
+  blade: groups(G.PROP, G.STATIC | G.PROP | G.HAND | G.HELD),        // free knife blade: no food contact
+  bladeHeld: groups(G.HELD, G.STATIC | G.PROP | G.HELD),              // held knife blade: no food contact
+  food: groups(G.FOOD, G.STATIC | G.PROP | G.HAND | G.HELD | G.FOOD),
+  foodHeld: groups(G.FOOD, G.STATIC | G.PROP | G.HELD | G.FOOD),      // held food keeps FOOD membership (blades still pass)
+  hand: groups(G.HAND, G.STATIC | G.PROP | G.FOOD),
   player: groups(G.PLAYER, G.STATIC),
-  qStatic: groups(G.PLAYER, G.STATIC),          // teleport arcs & movement
-  qGrab: groups(G.HELD, G.PROP | G.HELD),       // grab sphere (includes items held by the other hand)
-  qPoint: groups(G.HELD, G.PROP | G.STATIC),    // force-grab & desktop pointing (walls occlude)
+  qStatic: groups(G.PLAYER, G.STATIC),                                 // teleport arcs & movement
+  qGrab: groups(G.HELD, G.PROP | G.HELD | G.FOOD),                     // grab sphere (includes items held by the other hand)
+  qPoint: groups(G.HELD, G.PROP | G.STATIC | G.FOOD),                  // force-grab & desktop pointing (walls occlude)
+  qFood: groups(G.HELD, G.FOOD),                                       // food-only queries
 };
 let world = null, eventQueue = null;
 const Phys = {
@@ -893,6 +946,374 @@ const Phys = {
     return hit;
   },
 };
+
+/* ===================================== [THERMAL] ==================================== */
+// Pure thermal / chemical core (no rendering, no physics) so TEST MODE can run it headless.
+// Foods are 1D finite-volume grids (slab: through the thickness; sphere: radial shells).
+// Cookware is a lumped node. Units: SI (m, kg, s, W, J) and °C.
+const THERMO = {
+  Tamb: 21,               // °C — kitchen air
+  Lv: 2.257e6,            // J/kg — latent heat of vaporisation of water
+  sigma: 5.670e-8,        // W/m²K⁴ — Stefan–Boltzmann
+  hAir: 10,               // W/m²K — still-air natural convection on food
+  hAirPan: 12,            // W/m²K — convection off a hot pan's exposed metal
+  hBoard: 40,             // W/m²K — food resting on a board / plate (juice-wetted contact)
+  hFood: 120,             // W/m²K — food resting on other food
+  airEvap: 7e-4,        // kg/m²s — evaporation rate of a wet surface at 100°C in air (scaled below 100°C)
+  foodEmissivity: 0.9,    // — moist food surfaces radiate almost like a black body
+  stabilitySafety: 0.45,  // × — substep dt uses 45% of the explicit stability limit
+  maxSubsteps: 400,
+  wetDryLevel: 0.012,     // kg/m² — below this a surface counts as "dry" for browning
+  resFrac: 3,             // × — surface-layer water reservoir (× the layer's own water, i.e. incl. moisture wicked from deeper) —
+                          //     large, so a seared layer stays water-bound near 100°C and only the crust skin runs hot
+  layerEvap: 0.6,         // × — evaporation from a surface layer without a free film, relative to a wet film
+  skinMin: 0.00008,       // m — skin thickness on a fresh surface
+  skinMax: 0.0015,        // m — maximum dried-crust thickness (series resistance between surface and tissue)
+  crustAvg: 0.0,          // × — share of the crust's excess temperature carried by the surface-layer average (0 = layer stays ~100°C)
+};
+
+// Data-driven foods. Adding a food = adding an entry here (plus optional visuals).
+// rho kg/m³, c J/kgK, k W/mK, water/fat mass fractions, wet0 kg/m² initial surface water,
+// brown: Maillard onset °C + rate, char: onset °C + rate, expel: juice release window (°C) + rate.
+const FOOD_DEFS = {
+  ribeye: { name: 'Ribeye Steak', look: 'beef', rho: 1050, c: 3400, k: 0.48, water: 0.70, fat: 0.17, nodes: 8, wet0: 0.10, T0: 4, hardness: 0.35,
+    brown: { T0: 140, k: 0.006 }, char: { T0: 205, k: 0.012 }, expel: { T0: 45, T1: 85, k: 0.0022 }, contactQ: 1.0, doneness: 'beef', protein: true },
+  eggShell: { name: 'Egg', look: 'egg', rho: 1035, c: 3300, k: 0.5, water: 0.75, fat: 0.1, nodes: 6, wet0: 0, T0: 4, hardness: 0.9,
+    brown: { T0: 999, k: 0 }, char: { T0: 999, k: 0 }, expel: null, contactQ: 0.3, egg: true },
+  eggWhite: { name: 'Egg White', look: 'eggWhite', rho: 1035, c: 3700, k: 0.56, water: 0.88, fat: 0.0, nodes: 5, wet0: 0.03, T0: 4, hardness: 0.15,
+    brown: { T0: 130, k: 0.006 }, char: { T0: 195, k: 0.015 }, expel: { T0: 70, T1: 100, k: 0.0006 }, contactQ: 1.15, protein: true, egg: true },
+  eggYolk: { name: 'Egg Yolk', look: 'eggYolk', rho: 1030, c: 2800, k: 0.34, water: 0.5, fat: 0.3, nodes: 5, wet0: 0, T0: 4, hardness: 0.1,
+    brown: { T0: 999, k: 0 }, char: { T0: 999, k: 0 }, expel: null, contactQ: 1.0, protein: true, egg: true },
+  onion: { name: 'Onion', look: 'onion', rho: 960, c: 3770, k: 0.5, water: 0.89, fat: 0.0, sugar: 0.06, nodes: 6, wet0: 0.0, T0: 21, hardness: 0.5,
+    brown: { T0: 108, k: 0.0019 }, char: { T0: 175, k: 0.014 }, expel: { T0: 70, T1: 100, k: 0.004 }, contactQ: 0.9 },
+  garlic: { name: 'Garlic Clove', look: 'garlic', rho: 1100, c: 3000, k: 0.45, water: 0.6, fat: 0.0, sugar: 0.1, nodes: 5, wet0: 0, T0: 21, hardness: 0.45,
+    brown: { T0: 115, k: 0.004 }, char: { T0: 165, k: 0.02 }, expel: { T0: 70, T1: 100, k: 0.002 }, contactQ: 0.8 },
+};
+
+// Cookware (lumped). mass kg, c J/kgK, coupling = fraction of burner power absorbed,
+// hContact W/m²K to food, emissivity, exposed area m², maxSafe °C (above → damage/smoke).
+// Two-node pan: body (heated by the burner) + cooking surface under the food (surfFrac of the mass),
+// linked by gSpread W/K — low for cast iron (poor lateral conductivity → slow recovery), high for aluminium.
+const PAN_DEFS = {
+  castIron: { name: 'Cast iron', mass: 2.4, c: 460, coupling: 0.40, hContact: 440, emissivity: 0.85, area: 0.12, maxSafe: 400, bottomR: 0.115, surfFrac: 0.3, gSpread: 22 },
+  sautePan: { name: 'Stainless', mass: 1.3, c: 500, coupling: 0.50, hContact: 390, emissivity: 0.3, area: 0.11, maxSafe: 450, bottomR: 0.11, surfFrac: 0.3, gSpread: 55 },
+  nonstick: { name: 'Nonstick', mass: 0.95, c: 900, coupling: 0.52, hContact: 340, emissivity: 0.9, area: 0.11, maxSafe: 260, bottomR: 0.1, surfFrac: 0.3, gSpread: 80 },
+  saucepan: { name: 'Saucepan', mass: 1.1, c: 500, coupling: 0.50, hContact: 380, emissivity: 0.3, area: 0.08, maxSafe: 450, bottomR: 0.085, surfFrac: 0.3, gSpread: 55 },
+};
+
+const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+const sstep = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t); };
+
+// Doneness labels (beef) from a node's peak temperature.
+function beefDoneness(t) {
+  if (t < 46) return 'raw'; if (t < 53) return 'rare'; if (t < 58) return 'medium-rare';
+  if (t < 64) return 'medium'; if (t < 69) return 'medium-well'; return 'well-done';
+}
+
+class PanThermo {
+  constructor(def) {
+    this.def = def; const C = def.mass * def.c;
+    this.Cs = C * def.surfFrac; this.Cb = C - this.Cs;
+    this.T = THERMO.Tamb; this.Tb = THERMO.Tamb; // T = cooking-surface temperature (what food and IR thermometers see)
+    this.power = 0; this.foodW = 0; this.damage = 0; this.smoke = 0; this.evap = 0; this.contactArea = 0;
+  }
+  get mean() { return (this.T * this.Cs + this.Tb * this.Cb) / (this.Cs + this.Cb); }
+  set temp(v) { this.T = v; this.Tb = v; }
+  loss(T, A) { const Tk = T + 273.15, Ta = THERMO.Tamb + 273.15; return THERMO.hAirPan * A * (T - THERMO.Tamb) + this.def.emissivity * THERMO.sigma * A * (Tk * Tk * Tk * Tk - Ta * Ta * Ta * Ta); }
+  // dt s, burnerW = raw burner output under this pan, foodJ = energy the food drew from the surface this step.
+  step(dt, burnerW, foodJ) {
+    const d = this.def, sub = Math.max(1, Math.ceil(dt / 0.05)), h = dt / sub;
+    this.power = burnerW * d.coupling;
+    for (let i = 0; i < sub; i++) {
+      const flow = d.gSpread * (this.Tb - this.T);
+      this.Tb += h * (this.power - flow - this.loss(this.Tb, d.area * (1 - d.surfFrac))) / this.Cb;
+      this.T += (h * (flow - this.loss(this.T, d.area * d.surfFrac)) - foodJ / sub) / this.Cs;
+    }
+    this.foodW = foodJ / dt;
+    if (this.T > d.maxSafe) this.damage = Math.min(1, this.damage + dt * (this.T - d.maxSafe) / 3000);
+    this.smoke = clamp01((this.T - d.maxSafe) / 40);
+  }
+}
+
+// 1D food thermal state.
+class Thermo {
+  // geo: { shape:'slab', L, A, As } or { shape:'sphere', R }
+  constructor(def, geo, T0 = def.T0, N = def.nodes) {
+    this.def = def; this.N = N; this.T = new Float64Array(N).fill(T0); this.Tmax = new Float64Array(N).fill(T0);
+    this.faces = [0, 1, 2].map(() => ({ wet: def.wet0, brown: 0, char: 0, Ts: T0, evap: 0, hA: 0, hAT: 0, rad: 0, area: 0, contact: null, contactT: T0, dry: 0 }));
+    this.cook = { sweat: 0, soft: 0, set: 0 }; // food-specific progress (0..1)
+    this.pans = []; this.panJ = []; // per-step energy bookkeeping for cookware in contact
+    this.salt = 0; this.age = 0;
+    this.setGeometry(geo, true);
+    this.mass0 = this.mass; this.water0 = this.waterMass;
+  }
+  setGeometry(geo, init = false) {
+    const N = this.N, d = this.def;
+    this.geo = geo;
+    this.vol = new Float64Array(N); this.G = new Float64Array(Math.max(1, N - 1));
+    if (geo.shape === 'slab') {
+      const dx = geo.L / (N - 1);
+      for (let i = 0; i < N; i++) this.vol[i] = geo.A * dx * (i === 0 || i === N - 1 ? 0.5 : 1);
+      for (let i = 0; i < N - 1; i++) this.G[i] = d.k * geo.A / dx;
+      this.dx = dx; this.faceNode = [0, N - 1, -1];
+      this.faces[0].area = geo.A; this.faces[1].area = geo.A; this.faces[2].area = geo.As || 0;
+      this.volume = geo.A * geo.L;
+    } else {
+      const R = geo.R, dr = R / (N - 1);
+      const shellV = (r0, r1) => (4 / 3) * Math.PI * (r1 * r1 * r1 - r0 * r0 * r0);
+      for (let i = 0; i < N; i++) { const r0 = Math.max(0, (i - 0.5) * dr), r1 = Math.min(R, (i + 0.5) * dr); this.vol[i] = shellV(r0, r1); }
+      for (let i = 0; i < N - 1; i++) { const r = (i + 0.5) * dr; this.G[i] = d.k * 4 * Math.PI * r * r / dr; }
+      this.dx = dr; this.faceNode = [N - 1, -1, -1];
+      this.faces[0].area = 4 * Math.PI * R * R; this.faces[1].area = 0; this.faces[2].area = 0;
+      this.volume = (4 / 3) * Math.PI * R * R * R;
+    }
+    this.C = new Float64Array(N); for (let i = 0; i < N; i++) this.C[i] = d.rho * d.c * this.vol[i];
+    if (init) { this.mass = this.volume * d.rho; this.waterMass = this.mass * d.water; }
+    else if (this.faces[0].res0 !== undefined) this.initReservoir();
+    // Explicit stability limit (interior diffusion); boundary limit is checked per step.
+    const alpha = d.k / (d.rho * d.c);
+    this.dtDiff = this.dx * this.dx / (2 * alpha) * (geo.shape === 'sphere' ? 1 / 3 : 1);
+  }
+  // Geometric centre (what a probe in the middle reads): slab mid-plane (interpolated for even N), sphere centre.
+  get core() { return this.geo.shape === 'slab' ? this.sample(0.5) : this.T[0]; }
+  get coreMax() { return this.geo.shape === 'slab' ? this.sample(0.5, true) : this.Tmax[0]; }
+  // Temperature (or peak) at normalised position s ∈ [0,1] across the thermal axis (sphere: centre→surface).
+  sample(s, peak = false) {
+    const a = peak ? this.Tmax : this.T, x = clamp01(s) * (this.N - 1), i = Math.min(this.N - 2, Math.floor(x)), f = x - i;
+    return a[i] * (1 - f) + a[i + 1] * f;
+  }
+  // Remap nodes onto new geometry (after a cut): old profile sampled along the new axis.
+  remap(geo, sampler) {
+    const N = this.N, T = new Float64Array(N), Tm = new Float64Array(N);
+    for (let i = 0; i < N; i++) { const r = sampler(i / (N - 1)); T[i] = r[0]; Tm[i] = r[1]; }
+    this.T = T; this.Tmax = Tm; this.setGeometry(geo);
+  }
+  clearExposure() { for (const f of this.faces) { f.hA = 0; f.hAT = 0; f.radEpsA = 0; f.contact = null; } this.pans.length = 0; this.panJ.length = 0; this.submerged = false; }
+  // Convective/conductive exposure of a face to a medium at temperature T through area A (m²) with coefficient h.
+  expose(face, h, A, T, pan = null) {
+    const f = this.faces[face]; if (A <= 0) return;
+    f.hA += h * A; f.hAT += h * A * T;
+    if (pan) { let j = this.pans.indexOf(pan); if (j < 0) { j = this.pans.length; this.pans.push(pan); this.panJ.push(0); } f.contact = pan; f.contactHA = (f.contactHA || 0) + h * A; f.panIndex = j; }
+  }
+  // Radiative exposure: emitter at Tsrc (°C), effective emissivity × view factor × area.
+  exposeRad(face, epsA, Tsrc) { const f = this.faces[face]; f.radT = f.radEpsA > 0 ? (f.radT * f.radEpsA + Tsrc * epsA) / (f.radEpsA + epsA) : Tsrc; f.radEpsA += epsA; }
+  // Open air on a face: natural convection + radiation to the room.
+  exposeAir(face, Tair = THERMO.Tamb) { const A = this.faces[face].area; if (A <= 0) return; this.expose(face, THERMO.hAir, A, Tair); this.exposeRad(face, THERMO.foodEmissivity * A, THERMO.Tamb); }
+  // Evaporable water held in each surface layer (the "drying front"): while it lasts the layer
+  // cannot exceed 100°C; as it dries, a crust skin of growing thickness forms on that face.
+  initReservoir() {
+    for (let fi = 0; fi < 2; fi++) {
+      const n = this.faceNode[fi], f = this.faces[fi];
+      if (n < 0 || f.area <= 0) { f.res0 = f.res = 0; continue; }
+      const r0 = this.vol[n] * this.def.rho * this.def.water * THERMO.resFrac;
+      const frac = f.res0 > 0 ? f.res / f.res0 : 1; f.res0 = r0; f.res = r0 * frac;
+    }
+  }
+  step(dt) {
+    const N = this.N, d = this.def, T = this.T, F = this.faces;
+    if (F[0].res0 === undefined) this.initReservoir();
+    let lim = this.dtDiff;
+    for (let fi = 0; fi < 3; fi++) {
+      const f = F[fi], n = this.faceNode[fi]; if (f.hA <= 0) continue;
+      const cap = n >= 0 ? this.C[n] : this.C.reduce((a, b) => a + b, 0), g = n === 0 ? this.G[0] : n > 0 ? this.G[n - 1] : 0;
+      lim = Math.min(lim, cap / (g + f.hA + 1e-9));
+    }
+    const sub = Math.min(THERMO.maxSubsteps, Math.max(1, Math.ceil(dt / (lim * THERMO.stabilitySafety))));
+    const h = dt / sub;
+    this.lastSubsteps = sub;
+    for (const f of F) f.evap = 0;
+    const q = this._q || (this._q = new Float64Array(N));
+    let Ctot = 0; for (let i = 0; i < N; i++) Ctot += this.C[i];
+    const kc = d.kCrust || 0.25;
+    for (let s = 0; s < sub; s++) {
+      for (let i = 0; i < N; i++) q[i] = 0;
+      for (let i = 0; i < N - 1; i++) { const w = this.G[i] * (T[i + 1] - T[i]); q[i] += w; q[i + 1] -= w; }
+      for (let fi = 0; fi < 3; fi++) {
+        const f = F[fi], n = this.faceNode[fi];
+        if (f.area <= 0) continue;
+        const Tn = n >= 0 ? T[n] : this.sideT();
+        let w = 0, Ts = Tn;
+        if (f.hA > 0) {
+          const Te = f.hAT / f.hA;
+          // Crust skin in series with the surface coefficient.
+          // Crust thickness = depth of fully dried tissue (evaporated mass / (area·ρ·water)), capped.
+          const crust = f.res0 > 0 ? Math.min(THERMO.skinMax, (f.res0 - f.res) / (f.area * d.rho * d.water)) : 0;
+          f.crust = crust;
+          const Gs = n >= 0 ? kc / (THERMO.skinMin + crust) * f.area : 1e9;
+          w = (Te - Tn) / (1 / f.hA + 1 / Gs);
+          Ts = Tn + w / Gs;
+          if (f.wet > 0 && Ts > 100 && !this.submerged) {
+            // Surface film boils: the face sits at 100°C and the surplus flux evaporates the film.
+            const win = f.hA * (Te - 100), cond = Gs * (100 - Tn), avail = Math.max(0, win - cond) * h;
+            if (f.wet * f.area * THERMO.Lv <= avail) {
+              // Film flashes off within this substep: pay its latent heat, keep the normal series flux.
+              const m = f.wet * f.area; f.wet = 0; f.evap += m; w -= m * THERMO.Lv / h;
+              if (f.contact) this.panJ[f.panIndex] += f.contactHA * (f.contactT - Ts) * h;
+            } else {
+              const m = avail / THERMO.Lv; f.wet -= m / f.area; f.evap += m; w = cond; Ts = 100;
+              if (f.contact) this.panJ[f.panIndex] += f.contactHA * (f.contactT - 100) * h;
+            }
+          } else if (f.contact) this.panJ[f.panIndex] += f.contactHA * (f.contactT - Ts) * h;
+        }
+        if (f.radEpsA > 0) { const a = f.radT + 273.15, b = Ts + 273.15; w += f.radEpsA * THERMO.sigma * (a * a * a * a - b * b * b * b); }
+        if (!this.submerged && Ts < 100 && f.hA > 0) {
+          const pot = THERMO.airEvap * f.area * Math.exp((Ts - 100) / 19);
+          if (f.wet > 0) {                       // free film evaporates first
+            const rate = Math.min(f.wet * f.area / h, pot);
+            f.wet -= rate * h / f.area; f.evap += rate * h; w -= rate * THERMO.Lv;
+          } else if (f.res > 0 && !f.contact) {  // then the surface layer itself keeps drying (slower)
+            const rate = Math.min(f.res / h, pot * THERMO.layerEvap);
+            f.res -= rate * h; f.evap += rate * h; w -= rate * THERMO.Lv;
+          }
+        }
+        f.TsLive = Ts;
+        if (n >= 0) q[n] += w; else for (let i = 0; i < N; i++) q[i] += w * this.C[i] / Ctot;
+      }
+      for (let i = 0; i < N; i++) T[i] += h * q[i] / this.C[i];
+      // Drying front: while the surface layer still holds water it stays near 100°C. Only its dried crust
+      // fraction may run hotter (layer average = water-bound tissue at 100°C + crust between 100°C and Ts).
+      for (let fi = 0; fi < 2; fi++) {
+        const f = F[fi], n = this.faceNode[fi];
+        if (n < 0 || f.area <= 0 || f.res <= 0) continue;
+        const layer = this.vol[n] / f.area, frac = Math.min(1, (f.crust || 0) / layer);
+        const cap = 100 + THERMO.crustAvg * frac * Math.max(0, (f.TsLive || 100) - 100);
+        if (T[n] <= cap) continue;
+        const excess = this.C[n] * (T[n] - cap), m = Math.min(f.res, excess / THERMO.Lv);
+        f.res -= m; f.evap += m; T[n] = cap + (excess - m * THERMO.Lv) / this.C[n];
+      }
+    }
+    for (const f of F) f.contactHA = 0;
+    let lost = 0; for (const f of F) { lost += f.evap; f.evap /= dt; }
+    this.waterMass = Math.max(0, this.waterMass - lost); this.mass = Math.max(this.mass0 * 0.3, this.mass - lost);
+    for (let i = 0; i < N; i++) if (T[i] > this.Tmax[i]) this.Tmax[i] = T[i];
+    this.chemistry(dt);
+    this.age += dt;
+  }
+  sideT() { let a = 0; for (let i = 0; i < this.N; i++) a += this.T[i]; return a / this.N; }
+  // Juice release, Maillard browning, char, food-specific transformations.
+  chemistry(dt) {
+    const d = this.def, N = this.N, T = this.T;
+    // Juices expelled by contracting proteins / ruptured cells migrate to the nearest surface.
+    if (d.expel && this.waterMass > this.water0 * 0.35) {
+      const e = d.expel;
+      for (let i = 0; i < N; i++) {
+        const x = (T[i] - e.T0) / (e.T1 - e.T0); if (x <= 0) continue;
+        const m = e.k * Math.min(1.5, x) * this.vol[i] * d.rho * d.water * dt / 60;
+        const fi = this.geo.shape === 'sphere' ? 0 : (i < N / 2 ? 0 : 1), f = this.faces[fi];
+        if (f.area > 0) { f.wet += m / f.area; this.waterMass -= m; this.mass -= m; }
+      }
+    }
+    for (let fi = 0; fi < 3; fi++) {
+      const f = this.faces[fi]; if (f.area <= 0) continue;
+      const n = this.faceNode[fi], Ts = f.hA > 0 && f.TsLive !== undefined ? f.TsLive : (n >= 0 ? T[n] : this.sideT()); f.Ts = Ts;
+      const dry = 1 - sstep(0, THERMO.wetDryLevel, f.wet); f.dry = dry;
+      if (Ts > d.brown.T0 && dry > 0) {
+        const x = (Ts - d.brown.T0) / 40, rate = d.brown.k * x * Math.exp((Ts - d.brown.T0 - 20) / 30);
+        f.brown = Math.min(1, f.brown + dt * rate * dry * (1.05 - f.brown));
+      }
+      if (Ts > d.char.T0) { const x = (Ts - d.char.T0) / 40; f.char = Math.min(1, f.char + dt * d.char.k * x * x * (0.4 + f.brown)); }
+    }
+    const c = this.cook, peak = this.Tmax;
+    if (d.look === 'onion' || d.look === 'garlic') {
+      let s = 0; for (let i = 0; i < N; i++) s += sstep(68, 92, T[i]); s /= N;
+      c.sweat = Math.min(1, c.sweat + dt * s / 90);       // ~1.5 min of sweating at temperature
+      c.soft = Math.min(1, c.soft + dt * s / 360);        // fully soft after ~6 min
+    }
+    if (d.egg) { let s = 0; for (let i = 0; i < N; i++) s += d.look === 'eggYolk' ? sstep(65, 72, peak[i]) : sstep(62, 66, peak[i]); c.set = s / N; }
+  }
+  // Summary for Chef's Eye / scoring
+  surfaceT(face) { const n = this.faceNode[face]; return n >= 0 ? this.T[n] : this.sideT(); }
+  juiciness() { return this.water0 > 0 ? this.waterMass / this.water0 : 1; }
+}
+
+/* ---------- TEST MODE scenarios (pure; run with ?test) ---------- */
+// A scenario helper: food lying on a pan face-down (face 0), flipping swaps which face touches.
+function simPanCook(food, pan, opts) {
+  const { burnerW, seconds, flipEvery = 0, stopWhen = null, dt = 0.1, onTick = null } = opts;
+  let down = 0, t = 0, k = 0; const flipK = flipEvery ? Math.round(flipEvery / dt) : 0;
+  for (; t < seconds; t += dt, k++) {
+    if (flipK && k > 0 && k % flipK === 0) down = 1 - down;
+    food.clearExposure();
+    const hc = pan.def.hContact * food.def.contactQ, A = food.faces[down].area;
+    food.faces[down].contactT = pan.T;
+    food.expose(down, hc, A, pan.T, pan);
+    const airT = THERMO.Tamb + (pan.T - THERMO.Tamb) * 0.12;
+    food.exposeAir(1 - down, airT); food.exposeAir(2, airT);
+    food.step(dt);
+    const foodJ = food.panJ.length ? food.panJ[0] : 0;
+    pan.step(dt, burnerW, foodJ);
+    if (onTick) onTick(t, down);
+    if (stopWhen && stopWhen(food, t)) break;
+  }
+  return t;
+}
+function simRest(food, seconds, dt = 0.1) {
+  for (let t = 0; t < seconds; t += dt) {
+    food.clearExposure();
+    food.expose(0, THERMO.hBoard, food.faces[0].area, THERMO.Tamb);
+    food.exposeAir(1); food.exposeAir(2);
+    food.step(dt);
+  }
+}
+function preheat(pan, burnerW, target, maxS = 900) { let t = 0; for (; t < maxS && pan.T < target; t += 0.1) pan.step(0.1, burnerW, 0); return t; }
+const STEAK_GEO = () => ({ shape: 'slab', L: 0.035, A: 0.0102, As: 0.36 * 0.035 });
+
+const TEST_SCENARIOS = [
+  { id: '13.1a', name: 'Cold WET steak, barely-warm pan (2 min/side) → steams gray, no crust', run() {
+    const pan = new PanThermo(PAN_DEFS.castIron); preheat(pan, 900, 95);
+    const s = new Thermo(FOOD_DEFS.ribeye, STEAK_GEO(), 4); s.faces[0].wet = s.faces[1].wet = 0.14;
+    simPanCook(s, pan, { burnerW: 900, seconds: 240, flipEvery: 120 });
+    const b = Math.max(s.faces[0].brown, s.faces[1].brown), surf = Math.min(s.Tmax[0], s.Tmax[s.N - 1]);
+    return { pass: b < 0.12 && surf > 60, detail: `max crust ${(b * 100).toFixed(0)}% (need <12%), surface peak ${surf.toFixed(0)}°C (gray > 60), pan ${pan.T.toFixed(0)}°C` }; } },
+  { id: '13.1b', name: 'Patted-DRY steak, ripping-hot cast iron → deep crust ≤ ~2 min/side', run() {
+    const pan = new PanThermo(PAN_DEFS.castIron); const tPre = preheat(pan, 4000, 260);
+    const s = new Thermo(FOOD_DEFS.ribeye, STEAK_GEO(), 4); s.faces[0].wet = s.faces[1].wet = 0.008;
+    simPanCook(s, pan, { burnerW: 2600, seconds: 240, flipEvery: 120 });
+    const b0 = s.faces[0].brown, b1 = s.faces[1].brown, ch = Math.max(s.faces[0].char, s.faces[1].char);
+    return { pass: b0 >= 0.6 && b1 >= 0.6 && ch < 0.35, detail: `crust ${(b0 * 100).toFixed(0)}% / ${(b1 * 100).toFixed(0)}% (need ≥60%), char ${(ch * 100).toFixed(0)}%, preheat ${(tPre / 60).toFixed(1)} min` }; } },
+  { id: '13.2', name: '3.5 cm steak pulled at 52°C core, 5 min rest → 55–57°C, medium-rare gradient', run() {
+    const pan = new PanThermo(PAN_DEFS.castIron); preheat(pan, 4000, 230);
+    const s = new Thermo(FOOD_DEFS.ribeye, STEAK_GEO(), 4); s.faces[0].wet = s.faces[1].wet = 0.01;
+    const tCook = simPanCook(s, pan, { burnerW: 2600, seconds: 1800, flipEvery: 60, stopWhen: (f) => f.core >= 52 });
+    const pulled = s.core; let peak = s.core;
+    for (let t = 0; t < 300; t += 1) { simRest(s, 1); peak = Math.max(peak, s.core); }
+    const coreRead = s.core, label = beefDoneness(s.coreMax), band = s.Tmax[0] > 70 && s.Tmax[s.N - 1] > 70;
+    return { pass: coreRead >= 54.5 && coreRead <= 58.0 && label === 'medium-rare' && band,
+      detail: `cooked ${(tCook / 60).toFixed(1)} min, pulled ${pulled.toFixed(1)}°C → after rest ${coreRead.toFixed(1)}°C (peak ${peak.toFixed(1)}), cut face: ${label} core, gray band ${band ? 'yes' : 'no'}` }; } },
+  { id: 'egg', name: 'Egg white sets at 62–65°C (yolk later at 65–70°C)', run() {
+    const w = new Thermo(FOOD_DEFS.eggWhite, { shape: 'slab', L: 0.005, A: 0.012, As: 0.002 }, 20);
+    const setAt = (T) => { w.T.fill(T); w.Tmax.fill(T); w.chemistry(0); return w.cook.set; };
+    const s60 = setAt(60), s63 = setAt(63.5), s66 = setAt(66);
+    const y = new Thermo(FOOD_DEFS.eggYolk, { shape: 'sphere', R: 0.014 }, 20); y.T.fill(64); y.Tmax.fill(64); y.chemistry(0); const y64 = y.cook.set;
+    // Pan scenario: egg in a 150°C nonstick sets its white in a realistic time.
+    const pan = new PanThermo(PAN_DEFS.nonstick); preheat(pan, 1500, 150);
+    const e = new Thermo(FOOD_DEFS.eggWhite, { shape: 'slab', L: 0.005, A: 0.012, As: 0.002 }, 4);
+    const t = simPanCook(e, pan, { burnerW: 1500, seconds: 600, stopWhen: (f) => f.cook.set >= 0.99 });
+    return { pass: s60 === 0 && s63 > 0.2 && s63 < 0.9 && s66 === 1 && y64 === 0 && t > 45 && t < 240,
+      detail: `white set @60°C ${(s60 * 100).toFixed(0)}%, @63.5 ${(s63 * 100).toFixed(0)}%, @66 ${(s66 * 100).toFixed(0)}%; yolk @64 ${(y64 * 100).toFixed(0)}%; fried white sets in ${t.toFixed(0)} s` }; } },
+  { id: 'pans', name: 'Cast iron heats slower than stainless; cold steak drops the pan temperature', run() {
+    const ci = new PanThermo(PAN_DEFS.castIron), ss = new PanThermo(PAN_DEFS.sautePan);
+    const tci = preheat(ci, 2600, 200), tss = preheat(ss, 2600, 200);
+    const s = new Thermo(FOOD_DEFS.ribeye, STEAK_GEO(), 4); s.faces[0].wet = 0.01; const T0 = ci.T;
+    let minT = T0; simPanCook(s, ci, { burnerW: 2600, seconds: 60, onTick: () => { minT = Math.min(minT, ci.T); } });
+    return { pass: tci > tss * 1.3 && T0 - minT > 8, detail: `to 200°C: cast iron ${tci.toFixed(0)} s vs stainless ${tss.toFixed(0)} s; steak dropped cast iron by ${(T0 - minT).toFixed(1)}°C` }; } },
+  { id: 'onion', name: 'Onion slices sweat, then caramelize on medium heat without burning', run() {
+    const pan = new PanThermo(PAN_DEFS.sautePan); preheat(pan, 900, 140);
+    const o = new Thermo(FOOD_DEFS.onion, { shape: 'slab', L: 0.005, A: 0.02, As: 0.004 }, 21);
+    let sweatAt = -1;
+    simPanCook(o, pan, { burnerW: 900, seconds: 1200, flipEvery: 60, onTick: (t) => { if (sweatAt < 0 && o.cook.sweat > 0.5) sweatAt = t; } });
+    const b = (o.faces[0].brown + o.faces[1].brown) / 2, ch = Math.max(o.faces[0].char, o.faces[1].char);
+    return { pass: sweatAt > 0 && sweatAt < 300 && b > 0.5 && ch < 0.2, detail: `sweated at ${(sweatAt / 60).toFixed(1)} min, caramelization ${(b * 100).toFixed(0)}% after 20 min, char ${(ch * 100).toFixed(0)}%` }; } },
+  { id: 'stable', name: 'Thin piece at 10× time-scale stays stable (substeps, no NaN)', run() {
+    const pan = new PanThermo(PAN_DEFS.castIron); pan.T = 300;
+    const g = new Thermo(FOOD_DEFS.garlic, { shape: 'slab', L: 0.0015, A: 0.0004, As: 0.0001 }, 21);
+    let ok = true, maxSub = 0;
+    simPanCook(g, pan, { burnerW: 4000, seconds: 120, dt: 1.0, onTick: () => { maxSub = Math.max(maxSub, g.lastSubsteps); for (const t of g.T) if (!Number.isFinite(t) || t > 600 || t < -50) ok = false; } });
+    return { pass: ok && maxSub > 1, detail: `max substeps per 1 s tick: ${maxSub}, temps finite & bounded: ${ok}` }; } },
+];
+function runThermalTests() {
+  return TEST_SCENARIOS.map((s) => { let r; const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now()); try { r = s.run(); } catch (e) { r = { pass: false, detail: 'EXCEPTION ' + e.message }; } r.ms = ((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0); return { id: s.id, name: s.name, ...r }; });
+}
 
 /* ===================================== [KITCHEN] ==================================== */
 // Static geometry is authored as primitives, baked with world-space UVs + vertex-colour AO,
@@ -1440,19 +1861,19 @@ function lumpySphere(r, sx, sy, sz, amp, seed, wSeg = 20, hSeg = 14) {
 const TOOL_GRIP = { zone: 1.0 };   // always snap to the authored grip
 const PROP_DEFS = {
   /* ---------- Knives & tools ---------- */
-  chefKnife: { name: "Chef's Knife", cat: 'Tools', mass: 0.22, sound: 'metal', grip: TOOL_GRIP, size: 0.18,
+  chefKnife: { name: "Chef's Knife", cat: 'Tools', mass: 0.22, sound: 'metal', grip: TOOL_GRIP, size: 0.18, knife: { heel: -0.065, tip: -0.265, edgeY: -0.039, serrated: false, sharp: 1.0 },
     build() { const P = Parts(); knifeHandle(P, 0.12); P.add(MAT.knife, bladeGeo(0.21, 0.045, 0.0022), [0, 0.004, -0.06]);
-      return { parts: P.done(), shapes: [Shp.box(0.011, 0.015, 0.06, 0, -0.002, 0.012), Shp.box(0.003, 0.021, 0.105, 0, -0.017, -0.165)] }; } },
-  paringKnife: { name: 'Paring Knife', cat: 'Tools', mass: 0.07, sound: 'metal', grip: TOOL_GRIP, size: 0.1,
+      return { parts: P.done(), shapes: [Shp.box(0.011, 0.015, 0.06, 0, -0.002, 0.012), { ...Shp.box(0.003, 0.021, 0.105, 0, -0.017, -0.165), blade: true }] }; } },
+  paringKnife: { name: 'Paring Knife', cat: 'Tools', mass: 0.07, sound: 'metal', grip: TOOL_GRIP, size: 0.1, knife: { heel: -0.055, tip: -0.138, edgeY: -0.017, serrated: false, sharp: 1.1 },
     build() { const P = Parts(); knifeHandle(P, 0.1, false); P.add(MAT.knife, bladeGeo(0.09, 0.022, 0.0018), [0, 0.004, -0.05]);
-      return { parts: P.done(), shapes: [Shp.box(0.011, 0.014, 0.05, 0, -0.002, 0.012), Shp.box(0.003, 0.011, 0.045, 0, -0.006, -0.095)] }; } },
-  breadKnife: { name: 'Bread Knife', cat: 'Tools', mass: 0.16, sound: 'metal', grip: TOOL_GRIP, size: 0.2,
+      return { parts: P.done(), shapes: [Shp.box(0.011, 0.014, 0.05, 0, -0.002, 0.012), { ...Shp.box(0.003, 0.011, 0.045, 0, -0.006, -0.095), blade: true }] }; } },
+  breadKnife: { name: 'Serrated Knife', cat: 'Tools', mass: 0.16, sound: 'metal', grip: TOOL_GRIP, size: 0.2, knife: { heel: -0.065, tip: -0.285, edgeY: -0.023, serrated: true, sharp: 0.9 },
     build() { const P = Parts(); knifeHandle(P, 0.12); P.add(MAT.knife, bladeGeo(0.23, 0.028, 0.002, { serrated: true, tipDrop: 0.01 }), [0, 0.004, -0.06]);
-      return { parts: P.done(), shapes: [Shp.box(0.011, 0.015, 0.06, 0, -0.002, 0.012), Shp.box(0.003, 0.014, 0.115, 0, -0.01, -0.175)] }; } },
-  cleaver: { name: 'Cleaver', cat: 'Tools', mass: 0.55, sound: 'metal', grip: TOOL_GRIP, size: 0.16,
+      return { parts: P.done(), shapes: [Shp.box(0.011, 0.015, 0.06, 0, -0.002, 0.012), { ...Shp.box(0.003, 0.014, 0.115, 0, -0.01, -0.175), blade: true }] }; } },
+  cleaver: { name: 'Cleaver', cat: 'Tools', mass: 0.55, sound: 'metal', grip: TOOL_GRIP, size: 0.16, knife: { heel: -0.065, tip: -0.235, edgeY: -0.085, serrated: false, sharp: 0.85 },
     build() { const P = Parts(); knifeHandle(P, 0.12); P.add(MAT.knife, bladeGeo(0.18, 0.09, 0.005, { square: true }), [0, 0.004, -0.06]);
       P.add(MAT.darkSteel, new THREE.CylinderGeometry(0.009, 0.009, 0.0055, 16), [0, -0.012, -0.215], [0, 0, Math.PI / 2]);
-      return { parts: P.done(), shapes: [Shp.box(0.011, 0.015, 0.06, 0, -0.002, 0.012), Shp.box(0.004, 0.045, 0.09, 0, -0.04, -0.15)] }; } },
+      return { parts: P.done(), shapes: [Shp.box(0.011, 0.015, 0.06, 0, -0.002, 0.012), { ...Shp.box(0.004, 0.045, 0.09, 0, -0.04, -0.15), blade: true }] }; } },
   spatula: { name: 'Fish Spatula', cat: 'Tools', mass: 0.12, sound: 'metal', grip: TOOL_GRIP, size: 0.15,
     build() { const P = Parts();
       P.add(MAT.handle, new THREE.CapsuleGeometry(0.012, 0.13, 4, 12), [0, 0, 0.02], [Math.PI / 2, 0, 0], [0.8, 1, 1]);
@@ -1462,7 +1883,7 @@ const PROP_DEFS = {
       const bg = new THREE.ExtrudeGeometry(bl, { depth: 0.0018, bevelEnabled: false }); bg.rotateX(-Math.PI / 2);
       P.add(MAT.knife, bg, [0, -0.026, -0.115], [-0.12, 0, 0]);
       return { parts: P.done(), shapes: [Shp.box(0.011, 0.011, 0.075, 0, 0, 0.02), Shp.box(0.037, 0.004, 0.058, 0, -0.035, -0.17)] }; } },
-  tongs: { name: 'Tongs', cat: 'Tools', mass: 0.14, sound: 'metal', grip: TOOL_GRIP, size: 0.16,
+  tongs: { name: 'Tongs', cat: 'Tools', mass: 0.14, sound: 'metal', grip: TOOL_GRIP, size: 0.16, tongs: { tip: [0, 0, -0.175], reach: 0.04 },
     build() { const P = Parts();
       for (const s of [1, -1]) {
         P.add(MAT.knife, new THREE.BoxGeometry(0.018, 0.0025, 0.27), [0, s * 0.014, -0.05], [s * 0.05, 0, 0]);
@@ -1494,7 +1915,7 @@ const PROP_DEFS = {
       return { parts: P.done(), shapes: [Shp.cyl(0.15, 0.028, 0, 0, 0, 0, 0, Math.PI / 2), Shp.cap(0.035, 0.014, 0.205, 0, 0, 0, 0, Math.PI / 2), Shp.cap(0.035, 0.014, -0.205, 0, 0, 0, 0, Math.PI / 2)] }; } },
 
   /* ---------- Cookware ---------- */
-  castIron: { name: 'Cast-Iron Skillet', cat: 'Cookware', mass: 2.4, sound: 'metal', grip: { zone: 0.1 }, twoHanded: true, size: 0.3,
+  castIron: { name: 'Cast-Iron Skillet', cat: 'Cookware', mass: 2.4, sound: 'metal', grip: { zone: 0.1 }, twoHanded: true, size: 0.3, pan: { key: 'castIron', c: [0, -0.044, -0.19], r: 0.118, rim: 0.05 },
     build() { const P = Parts(), R = 0.13, cz = -0.06 - R;
       P.add(MAT.castIron, vesselGeo([[0.118, -0.05], [0.124, -0.048], [0.132, 0.0]], 0.006), [0, 0, cz]);
       P.add(MAT.castIron, new THREE.BoxGeometry(0.03, 0.018, 0.15), [0, -0.006, 0.0], [0.12, 0, 0]);
@@ -1503,7 +1924,7 @@ const PROP_DEFS = {
       const s = [Shp.cyl(0.004, 0.12, 0, -0.046, cz), Shp.box(0.015, 0.009, 0.075, 0, -0.006, 0, 0.12, 0, 0), Shp.box(0.025, 0.006, 0.018, 0, -0.006, cz - R - 0.012)];
       Shp.ring(s, 0.127, -0.024, 0.024, 0.008, 12, 0, cz);
       return { parts: P.done(), shapes: s }; } },
-  nonstick: { name: 'Nonstick Pan', cat: 'Cookware', mass: 0.95, sound: 'metal', grip: { zone: 0.1 }, size: 0.28,
+  nonstick: { name: 'Nonstick Pan', cat: 'Cookware', mass: 0.95, sound: 'metal', grip: { zone: 0.1 }, size: 0.28, pan: { key: 'nonstick', c: [0, -0.042, -0.2], r: 0.105, rim: 0.045 },
     build() { const P = Parts(), R = 0.125, cz = -0.075 - R;
       P.add(MAT.nonstick, vesselGeo([[0.1, -0.045], [0.11, -0.042], [0.126, 0.0]], 0.003), [0, 0, cz]);
       P.add(MAT.plastic, new THREE.CapsuleGeometry(0.012, 0.15, 4, 10), [0, 0.0, 0.02], [Math.PI / 2 - 0.12, 0, 0], [1.3, 1, 0.8]);
@@ -1511,12 +1932,20 @@ const PROP_DEFS = {
       const s = [Shp.cyl(0.003, 0.105, 0, -0.043, cz), Shp.box(0.015, 0.01, 0.1, 0, 0, 0.0)];
       Shp.ring(s, 0.118, -0.022, 0.022, 0.006, 12, 0, cz);
       return { parts: P.done(), shapes: s }; } },
-  saucepan: { name: 'Saucepan', cat: 'Cookware', mass: 1.1, sound: 'metal', grip: { zone: 0.1 }, size: 0.2,
+  saucepan: { name: 'Saucepan', cat: 'Cookware', mass: 1.1, sound: 'metal', grip: { zone: 0.1 }, size: 0.2, pan: { key: 'saucepan', c: [0, -0.097, -0.17], r: 0.085, rim: 0.1 },
     build() { const P = Parts(), R = 0.09, cz = -0.08 - R;
       P.add(MAT.potSteel, vesselGeo([[0.088, -0.1], [0.09, -0.095], [0.09, 0.0]], 0.003), [0, 0.0, cz]);
       P.add(MAT.potSteel, new THREE.BoxGeometry(0.022, 0.01, 0.19), [0, -0.01, 0.0], [0.15, 0, 0]);
       const s = [Shp.cyl(0.003, 0.088, 0, -0.098, cz), Shp.box(0.012, 0.008, 0.095, 0, -0.01, 0, 0.15, 0, 0)];
       Shp.ring(s, 0.09, -0.05, 0.05, 0.006, 12, 0, cz);
+      return { parts: P.done(), shapes: s }; } },
+  sautePan: { name: 'Stainless Sauté Pan', cat: 'Cookware', mass: 1.3, sound: 'metal', grip: { zone: 0.1 }, twoHanded: true, size: 0.28, pan: { key: 'sautePan', c: [0, -0.052, -0.2], r: 0.112, rim: 0.06 },
+    build() { const P = Parts(), R = 0.12, cz = -0.08 - R;
+      P.add(MAT.potSteel, vesselGeo([[0.114, -0.055], [0.118, -0.052], [0.12, 0.0]], 0.003), [0, 0, cz]);
+      P.add(MAT.potSteel, new THREE.BoxGeometry(0.024, 0.012, 0.2), [0, -0.004, 0.02], [0.14, 0, 0]);
+      P.add(MAT.potSteel, new THREE.TorusGeometry(0.022, 0.005, 6, 12, Math.PI), [0, -0.01, cz - R - 0.01], [Math.PI / 2, 0, Math.PI]);
+      const s = [Shp.cyl(0.003, 0.114, 0, -0.052, cz), Shp.box(0.013, 0.008, 0.1, 0, -0.004, 0.02, 0.14, 0, 0), Shp.box(0.02, 0.005, 0.015, 0, -0.01, cz - R - 0.015)];
+      Shp.ring(s, 0.12, -0.028, 0.028, 0.006, 12, 0, cz);
       return { parts: P.done(), shapes: s }; } },
   stockPot: { name: 'Stock Pot (6 L)', cat: 'Cookware', mass: 1.9, sound: 'metal', twoHanded: true, size: 0.3,
     build() { const P = Parts();
@@ -1562,9 +1991,6 @@ const PROP_DEFS = {
       const c = new THREE.ConeGeometry(0.016, 0.006, 5); P.add(MAT.leaf, c, [0, 0.03, 0]);
       P.add(MAT.leaf, new THREE.CylinderGeometry(0.002, 0.0025, 0.012, 6), [0, 0.037, 0]);
       return { parts: P.done(), shapes: [Shp.ball(0.032)] }; } },
-  onion: { name: 'Onion', cat: 'Produce', mass: 0.16, angDamp: 1.0, sound: 'produce', size: 0.045,
-    build() { const P = Parts(); P.add(MAT.onion, lathe([[0, -0.04], [0.02, -0.036], [0.038, -0.018], [0.041, 0.004], [0.032, 0.026], [0.012, 0.042], [0.003, 0.055], [0, 0.057]], 24));
-      return { parts: P.done(), shapes: [Shp.ball(0.039, 0, 0.0, 0)] }; } },
   lemon: { name: 'Lemon', cat: 'Produce', mass: 0.1, angDamp: 1.0, sound: 'produce', size: 0.04,
     build() { const P = Parts(); const g = lumpySphere(0.03, 1, 1, 1.35, 0.06, 203); P.add(MAT.lemon, g);
       P.add(MAT.lemon, new THREE.ConeGeometry(0.008, 0.01, 8), [0, 0, 0.043], [Math.PI / 2, 0, 0]);
@@ -1581,12 +2007,17 @@ const PROP_DEFS = {
       const g = lathe([[0, -0.09], [0.004, -0.085], [0.011, -0.04], [0.016, 0.03], [0.017, 0.08], [0.012, 0.09], [0, 0.092]], 16); P.add(MAT.carrot, g, [0, 0, 0], [Math.PI / 2, 0, 0]);
       for (let i = 0; i < 4; i++) P.add(MAT.leaf, new THREE.ConeGeometry(0.004, 0.05, 5), [Math.cos(i * 1.6) * 0.004, Math.sin(i * 1.6) * 0.004, 0.115], [Math.PI / 2 - 0.1 * (i - 1.5), 0, 0]);
       return { parts: P.done(), shapes: [Shp.cap(0.07, 0.015, 0, 0, 0, Math.PI / 2, 0, 0)] }; } },
-  egg: { name: 'Egg', cat: 'Produce', mass: 0.06, angDamp: 2.0, sound: 'ceramic', size: 0.03,
-    build() { const P = Parts(); const pts = []; for (let i = 0; i <= 14; i++) { const t = i / 14, a = Math.PI * t; const y = -Math.cos(a) * 0.029; const r = Math.sin(a) * 0.0215 * (1 - 0.12 * (y / 0.029)); pts.push([Math.max(r, 0), y]); }
-      P.add(MAT.egg, lathe(pts, 20));
-      return { parts: P.done(), shapes: [Shp.cap(0.008, 0.021)] }; } },
 
   /* ---------- Misc ---------- */
+  paperTowel: { name: 'Paper Towel', cat: 'Tools', mass: 0.012, sound: 'produce', size: 0.07, towel: true, linDamp: 0.6, angDamp: 0.8,
+    build() { const P = Parts(); P.add(MAT.paper, new THREE.BoxGeometry(0.13, 0.006, 0.13), [0, 0.003, 0]);
+      return { parts: P.done(), shapes: [Shp.box(0.065, 0.003, 0.065, 0, 0.003, 0)] }; } },
+  shellHalf: { name: 'Egg Shell', cat: 'Hidden', mass: 0.004, sound: 'ceramic', size: 0.02, lifetime: 25,
+    build() { const P = Parts(); const g = new THREE.SphereGeometry(0.021, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.55); g.scale(1, 1.25, 1); P.add(MAT.egg, g);
+      return { parts: P.done(), shapes: [Shp.cyl(0.01, 0.018, 0, 0.012, 0)] }; } },
+  onionSkin: { name: 'Onion Skin', cat: 'Hidden', mass: 0.003, sound: 'produce', size: 0.03, lifetime: 30, linDamp: 1.5, angDamp: 1.5,
+    build() { const P = Parts(); const g = new THREE.SphereGeometry(0.041, 12, 8, 0, Math.PI * 1.1, Math.PI * 0.25, Math.PI * 0.5); P.add(MAT.onionSkin, g); P.add(MAT.onionSkin, g.clone().scale(-0.98, 0.98, -0.98));
+      return { parts: P.done(), shapes: [Shp.box(0.03, 0.02, 0.012, 0, 0, 0.02)] }; } },
   timer: { name: 'Kitchen Timer', cat: 'Misc', mass: 0.12, sound: 'produce', size: 0.05,
     build() { const P = Parts();
       P.add(MAT.red, new THREE.CylinderGeometry(0.042, 0.045, 0.045, 24), [0, 0.0225, 0]);
@@ -1661,18 +2092,20 @@ const INITIAL_PROPS = (() => {
     ['paringKnife', -0.5, BD + 0.015, -0.08, 90, 90],
     ['breadKnife', 0.45, IB + 0.015, -0.34, 90, 90],
     ['cleaver', 0.8, IB + 0.015, -0.34, 90, 90],
-    ['tomato', 0.3, IB + 0.03, 0.05, 0, 0], ['tomato', 0.37, IB + 0.03, 0.12, 0, 0],
-    ['onion', 0.47, IB + 0.042, 0.02, 0, 0], ['lemon', 0.57, IB + 0.032, 0.14, 30, 0],
-    ['apple', 0.67, IB + 0.04, 0.0, 0, 0], ['potato', 0.8, IB + 0.035, 0.15, 20, 0], ['carrot', 0.88, IB + 0.018, -0.07, 70, 0],
-    ['egg', 0.24, IB + 0.023, 0.3, 0, 90], ['egg', 0.3, IB + 0.023, 0.33, 0, 90], ['egg', 0.36, IB + 0.023, 0.3, 0, 90],
+    ['tomato', 0.62, IB + 0.03, 0.3, 0, 0], ['tomato', 0.69, IB + 0.03, 0.34, 0, 0],
+    ['lemon', 0.8, IB + 0.032, 0.3, 30, 0],
+    ['apple', 0.9, IB + 0.04, 0.2, 0, 0], ['potato', 0.9, IB + 0.035, 0.05, 20, 0], ['carrot', 0.9, IB + 0.018, -0.12, 70, 0],
+    ['paperTowel', -0.05, CT + 0.004, 0.05, 15, 0], ['paperTowel', -0.05, CT + 0.012, 0.05, 25, 0],
+    ['plate', -0.2, CT + 0.005, -0.2, 0, 0],
     ['rollingPin', -0.72, CT + 0.03, 0.3, 0, 0],
     ['mixingBowl', -0.8, CT, -0.22, 0, 0],
-    ['whisk', -0.2, CT + 0.037, -0.3, 100, 0], ['ladle', -0.12, CT + 0.08, 0.12, 80, 0],
+    ['whisk', -0.75, CT + 0.037, 0.12, 100, 0], ['ladle', -0.85, CT + 0.08, -0.05, 80, 0],
     ['timer', -0.15, CT, 0.36, 0, 0],
     ['castIron', -0.41, CT + 0.092, -1.83, 0, 0],
     ['stockPot', -0.41, CT + 0.04, -2.33, 0, 0], ['potLid', -0.41, CT + 0.235, -2.33, 0, 0],
     ['saucepan', -0.03, CT + 0.142, -2.16, 0, 0],
-    ['nonstick', 0.36, CT + 0.05, -1.9, 0, 0],
+    ['sautePan', -0.03, CT + 0.097, -1.82, 0, 0],
+    ['nonstick', 0.4, CT + 0.05, -1.9, 0, 0],
     ['spatula', 0.66, CT + 0.04, -1.98, 100, 0], ['tongs', 0.66, CT + 0.03, -2.3, 95, 0],
     ['woodenSpoon', 0.8, CT + 0.022, -2.14, 80, 0],
     ['bakingSoda', -0.75, CT, -2.3, 10, 0],
@@ -1686,11 +2119,12 @@ const INITIAL_PROPS = (() => {
 })();
 
 class Prop {
-  constructor(key, pos, quat, spawned) {
-    const def = PROP_DEFS[key], built = Props.built(key);
-    this.key = key; this.def = def; this.spawned = spawned; this.alive = true;
+  // custom = { def, parts, shapes, volume } for per-instance geometry (food pieces); otherwise the cached PROP_DEFS build.
+  constructor(key, pos, quat, spawned, custom = null) {
+    const def = custom ? custom.def : PROP_DEFS[key], built = custom || Props.built(key);
+    this.key = key; this.def = def; this.spawned = spawned; this.alive = true; this.isFood = !!def.food;
     this.group = new THREE.Group(); this.meshes = [];
-    for (const part of built.parts) { const m = new THREE.Mesh(part.geo, part.mat); m.castShadow = true; m.receiveShadow = true; m.userData.baseMat = part.mat; this.group.add(m); this.meshes.push(m); }
+    for (const part of built.parts) { const m = new THREE.Mesh(part.geo, part.mat); m.castShadow = part.cast !== false; m.receiveShadow = true; m.userData.baseMat = part.mat; this.group.add(m); this.meshes.push(m); }
     this.group.position.copy(pos); this.group.quaternion.copy(quat);
     scene.add(this.group);
     this.body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
@@ -1702,16 +2136,21 @@ class Prop {
       if (s.t === 'box') d = RAPIER.ColliderDesc.cuboid(s.a[0], s.a[1], s.a[2]);
       else if (s.t === 'ball') d = RAPIER.ColliderDesc.ball(s.a[0]);
       else if (s.t === 'cyl') d = RAPIER.ColliderDesc.cylinder(s.a[0], s.a[1]);
+      else if (s.t === 'hull') d = RAPIER.ColliderDesc.convexHull(s.pts) || RAPIER.ColliderDesc.cuboid(s.a[0], s.a[1], s.a[2]);
       else d = RAPIER.ColliderDesc.capsule(s.a[0], s.a[1]);
-      d.setTranslation(s.p[0], s.p[1], s.p[2]);
-      if (s.r[0] || s.r[1] || s.r[2]) { _q1.setFromEuler(_e1.set(s.r[0], s.r[1], s.r[2], 'ZYX')); d.setRotation({ x: _q1.x, y: _q1.y, z: _q1.z, w: _q1.w }); }
-      d.setMass(def.mass * s.vol / built.volume).setFriction(def.friction ?? 0.75).setRestitution(def.restitution ?? 0.08)
-        .setCollisionGroups(GROUPS.prop).setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS)
+      const sp = s.p || [0, 0, 0], sr = s.r || [0, 0, 0];
+      d.setTranslation(sp[0], sp[1], sp[2]);
+      if (sr[0] || sr[1] || sr[2]) { _q1.setFromEuler(_e1.set(sr[0], sr[1], sr[2], 'ZYX')); d.setRotation({ x: _q1.x, y: _q1.y, z: _q1.z, w: _q1.w }); }
+      const kind = s.blade ? 'blade' : this.isFood ? 'food' : 'normal';
+      d.setMass(Math.max(1e-4, def.mass * s.vol / built.volume)).setFriction(def.friction ?? 0.75).setRestitution(def.restitution ?? 0.08)
+        .setCollisionGroups(Prop.groupsFor(kind, false)).setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS)
         .setContactForceEventThreshold(def.mass * 9.81 * 2.5);
-      const c = world.createCollider(d, this.body);
+      const c = world.createCollider(d, this.body); c.__kind = kind;
       this.colliders.push(c); Phys.propByCollider.set(c.handle, this);
     }
     this.mass = def.mass;
+    if (def.pan) this.thermo = new PanThermo(PAN_DEFS[def.pan.key]);
+    this.born = Sim.clock;
     this.prevPos = pos.clone(); this.currPos = pos.clone(); this.prevQuat = quat.clone(); this.currQuat = quat.clone();
     this.renderPos = pos.clone(); this.renderQuat = quat.clone();
     this.targetPos = new THREE.Vector3(); this.targetQuat = new THREE.Quaternion(); this.hasTarget = false;
@@ -1720,7 +2159,12 @@ class Prop {
     this.incoming = null; // force-grab flight
     if (def.init) def.init(this);
   }
-  setGroups(g) { for (const c of this.colliders) c.setCollisionGroups(g); }
+  static groupsFor(kind, held) {
+    if (kind === 'blade') return held ? GROUPS.bladeHeld : GROUPS.blade;
+    if (kind === 'food') return held ? GROUPS.foodHeld : GROUPS.food;
+    return held ? GROUPS.held : GROUPS.prop;
+  }
+  setHeld(held) { for (const c of this.colliders) c.setCollisionGroups(Prop.groupsFor(c.__kind, held)); }
   setHighlight(on) {
     if (on === this.highlighted) return; this.highlighted = on;
     for (const m of this.meshes) m.material = on ? highlightOf(m.userData.baseMat) : m.userData.baseMat;
@@ -1777,24 +2221,1187 @@ const Props = {
   resetKitchen() {
     for (const p of this.list.slice()) this.remove(p);
     this.spawnInitial();
+    Foods.initial();
+    for (const k of Stove.knobs) Stove.setAngle(k, 0);
   },
   // Clean up: remove spawned extras, return the original items home.
   cleanUp() {
+    Foods.removeAll();
     for (const p of this.list.slice()) {
       if (p.spawned) { this.remove(p); continue; }
       for (const h of p.holders.slice()) Grab.release(h, false);
       p.teleport(p.homePos, p.homeQuat);
+      if (p.thermo) p.thermo.temp = THERMO.Tamb;
     }
+    Foods.initial();
   },
   capture() { for (let i = 0; i < this.list.length; i++) this.list[i].capture(); },
   render(alpha) { for (let i = 0; i < this.list.length; i++) this.list[i].render(alpha); },
-  tick(dt) { for (let i = 0; i < this.list.length; i++) { const p = this.list[i]; if (p.def.tick) p.def.tick(p, dt); } },
+  tick(dt) {
+    for (let i = 0; i < this.list.length; i++) { const p = this.list[i]; if (p.def.tick) p.def.tick(p, dt); }
+    for (let i = this.list.length - 1; i >= 0; i--) { const p = this.list[i]; if (p.def.lifetime && !p.holders.length && Sim.clock - p.born > p.def.lifetime) this.remove(p); }
+  },
   // Keep things from falling out of the world.
   rescue() {
     for (const p of this.list) {
       const y = p.currPos.y;
       if (y < -1 || Math.abs(p.currPos.x) > 4 || Math.abs(p.currPos.z) > 4) p.teleport(p.homePos, p.homeQuat);
     }
+  },
+};
+
+/* ======================================= [FOOD] ===================================== */
+// Food pieces are Props with per-instance geometry, a Thermo (1D finite-volume state) and a procedural
+// shader that reads the thermal state: per-face browning/char/moisture and the peak-temperature profile
+// across the thermal axis (so any cut face shows the real doneness gradient).
+const FOOD_LOOK = { beef: 0, onion: 1, egg: 2, eggWhite: 3, eggYolk: 4, garlic: 5 };
+
+const FoodVis = {
+  patch(shader, mat) {
+    Object.assign(shader.uniforms, mat.userData.u);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute vec4 fd;\nvarying vec4 vFd;\nvarying vec3 vLoc;\nvarying vec3 vLN;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvLoc = transformed; vFd = fd; vLN = objectNormal;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>
+uniform int uLook; uniform float uShape; uniform float uTm[8]; uniform float uN; uniform vec3 uAxO; uniform vec3 uAx; uniform float uL;
+uniform vec3 uBr; uniform vec3 uCh; uniform vec3 uWt; uniform vec4 uX; uniform mat4 uOp; uniform float uSeed; uniform float uHi;
+uniform float uTm2[8]; uniform float uN2; uniform vec3 uAxO2; uniform vec3 uAx2; uniform float uL2; uniform float uShape2; uniform float uHas2;
+varying vec4 vFd; varying vec3 vLoc; varying vec3 vLN;
+float fh31(vec3 p){ p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+float fvn(vec3 x){ vec3 i = floor(x), f = fract(x); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(fh31(i), fh31(i + vec3(1,0,0)), f.x), mix(fh31(i + vec3(0,1,0)), fh31(i + vec3(1,1,0)), f.x), f.y),
+             mix(mix(fh31(i + vec3(0,0,1)), fh31(i + vec3(1,0,1)), f.x), mix(fh31(i + vec3(0,1,1)), fh31(i + vec3(1,1,1)), f.x), f.y), f.z); }
+float ffbm(vec3 p){ return 0.5 * fvn(p) + 0.25 * fvn(p * 2.03) + 0.125 * fvn(p * 4.01); }
+float tmArr(float a[8], float n, float s){ float x = clamp(s, 0.0, 1.0) * (n - 1.0); float r = a[0];
+  for (int i = 0; i < 7; i++) { float fi = float(i); if (x >= fi && x <= fi + 1.0) r = mix(a[i], a[i + 1], x - fi); } return r; }
+vec3 beefCol(float t){
+  vec3 c = vec3(0.50, 0.06, 0.08);
+  c = mix(c, vec3(0.68, 0.10, 0.11), smoothstep(40.0, 50.0, t));
+  c = mix(c, vec3(0.82, 0.27, 0.28), smoothstep(51.0, 56.0, t));
+  c = mix(c, vec3(0.80, 0.45, 0.41), smoothstep(57.0, 62.0, t));
+  c = mix(c, vec3(0.62, 0.45, 0.38), smoothstep(63.0, 67.0, t));
+  return mix(c, vec3(0.46, 0.35, 0.29), smoothstep(68.0, 74.0, t)); }
+vec3 brownCol(float b){ vec3 c = mix(vec3(0.80, 0.58, 0.30), vec3(0.52, 0.28, 0.11), smoothstep(0.2, 0.6, b)); return mix(c, vec3(0.27, 0.13, 0.05), smoothstep(0.6, 1.0, b)); }
+`)
+      .replace('#include <map_fragment>', `
+  vec3 op = (uOp * vec4(vLoc, 1.0)).xyz;
+  // Peak temperature at this fragment from the piece's thermal field (+ a frozen legacy field when a cut
+  // re-oriented the thermal axis), evaluated per fragment so cut faces show the true gradient.
+  float fs = uShape < 0.5 ? dot(vLoc - uAxO, uAx) / uL + 0.5 : length(vLoc - uAxO) / uL;
+  float tm = tmArr(uTm, uN, fs);
+  if (uHas2 > 0.5) { float fs2 = uShape2 < 0.5 ? dot(vLoc - uAxO2, uAx2) / uL2 + 0.5 : length(vLoc - uAxO2) / uL2; tm = max(tm, tmArr(uTm2, uN2, fs2)); }
+  float ad = dot(normalize(vLN), uAx);
+  float br, chr, wt;
+  if (uShape > 0.5) { br = uBr.x; chr = uCh.x; wt = uWt.x; }
+  else if (ad < -0.5) { br = uBr.x; chr = uCh.x; wt = uWt.x; }
+  else if (ad > 0.5) { br = uBr.y; chr = uCh.y; wt = uWt.y; }
+  else { br = uBr.z; chr = uCh.z; wt = uWt.z; }
+  br = max(br, vFd.z); chr = max(chr, vFd.w);
+  bool cutFace = vFd.x > 0.5 && vFd.x < 1.5;
+  vec3 col = vec3(0.8); float frough = 0.55; vec3 femis = vec3(0.0); float falpha = 1.0;
+  if (uLook == 0) {
+    float marb = ffbm(op * 55.0 + uSeed);
+    float vein = smoothstep(0.6, 0.68, marb);
+    float cap = smoothstep(0.044, 0.052, op.x) * (1.0 - smoothstep(0.02, 0.03, abs(op.z - 0.005)) * 0.0);
+    vec3 fat = mix(vec3(0.94, 0.88, 0.80), vec3(0.95, 0.80, 0.52), smoothstep(55.0, 90.0, tm));
+    col = mix(beefCol(tm), fat, max(vein * 0.85, cap));
+    if (!cutFace) col *= 0.93;
+    femis = col * vec3(0.10, 0.015, 0.015) * (1.0 - smoothstep(45.0, 60.0, tm));
+    frough = mix(0.62, 0.28, clamp(wt * 25.0, 0.0, 1.0));
+  } else if (uLook == 1) {
+    float r = length(op * vec3(1.0, 0.82, 1.0));
+    float ring = smoothstep(0.3, 0.5, abs(fract(r * 190.0) - 0.5) * 2.0);
+    vec3 raw = vec3(0.94, 0.91, 0.81) * (0.9 + 0.1 * ring);
+    col = mix(raw, vec3(0.84, 0.80, 0.60), uX.y);
+    frough = mix(0.42, 0.25, uX.y);
+    if (vFd.x < 0.5 && uX.x < 0.5) { float st = ffbm(op * vec3(45.0, 7.0, 45.0)); col = mix(vec3(0.58, 0.34, 0.15), vec3(0.80, 0.55, 0.30), st); frough = 0.85; }
+  } else if (uLook == 2) {
+    float sp = ffbm(op * 320.0);
+    col = mix(vec3(0.93, 0.85, 0.72), vec3(0.78, 0.64, 0.48), smoothstep(0.6, 0.75, sp)); frough = 0.55;
+  } else if (uLook == 3) {
+    float st = smoothstep(61.5, 66.0, tm);
+    col = mix(vec3(0.70, 0.70, 0.64), vec3(0.97, 0.96, 0.93), st); frough = mix(0.06, 0.5, st); falpha = mix(0.5, 1.0, st);
+  } else if (uLook == 4) {
+    float st = smoothstep(65.0, 74.0, tm);
+    col = mix(vec3(0.98, 0.60, 0.07), vec3(0.97, 0.80, 0.36), st); frough = mix(0.1, 0.6, st);
+  } else {
+    col = vec3(0.95, 0.93, 0.84); frough = 0.4;
+    if (vFd.x < 0.5 && uX.x < 0.5) { col = vec3(0.90, 0.83, 0.74); frough = 0.75; }
+    col = mix(col, vec3(0.93, 0.86, 0.62), uX.y * 0.6);
+  }
+  float bw = smoothstep(0.02, 0.45, br);
+  col = mix(col, brownCol(br), bw);
+  frough = mix(frough, 0.78, bw * 0.6);
+  col = mix(col, vec3(0.05, 0.04, 0.035), smoothstep(0.05, 0.9, chr));
+  col = pow(col, vec3(2.2)); femis = pow(femis, vec3(2.2)); // palette above is authored in sRGB
+  femis += vec3(1.0, 0.55, 0.2) * uHi * 0.1;
+  diffuseColor = vec4(col, falpha);`)
+      .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = frough;')
+      .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += femis;');
+  },
+  make(look, transparent = false) {
+    const m = new THREE.MeshStandardMaterial({ roughness: 0.5, metalness: 0, transparent, depthWrite: !transparent });
+    m.userData.u = {
+      uLook: { value: FOOD_LOOK[look] ?? 0 }, uShape: { value: 0 }, uTm: { value: new Float32Array(8) }, uN: { value: 2 },
+      uAxO: { value: new THREE.Vector3() }, uAx: { value: new THREE.Vector3(0, 1, 0) }, uL: { value: 0.02 },
+      uBr: { value: new THREE.Vector3() }, uCh: { value: new THREE.Vector3() }, uWt: { value: new THREE.Vector3() },
+      uX: { value: new THREE.Vector4() }, uOp: { value: new THREE.Matrix4() }, uSeed: { value: Math.random() * 50 }, uHi: { value: 0 },
+      uTm2: { value: new Float32Array(8) }, uN2: { value: 2 }, uAxO2: { value: new THREE.Vector3() }, uAx2: { value: new THREE.Vector3(0, 1, 0) }, uL2: { value: 0.02 }, uShape2: { value: 0 }, uHas2: { value: 0 },
+    };
+    m.onBeforeCompile = (sh) => FoodVis.patch(sh, m);
+    m.customProgramCacheKey = () => 'food-v2' + (transparent ? 't' : '');
+    return m;
+  },
+  // Push a piece's thermal state into its material uniforms.
+  sync(mat, th, frame, opM, extra, legacy = null) {
+    const u = mat.userData.u, N = th.N;
+    if (legacy) {
+      for (let i = 0; i < 8; i++) u.uTm2.value[i] = legacy.Tmax[Math.min(i, legacy.N - 1)];
+      u.uN2.value = legacy.N; u.uAxO2.value.copy(legacy.frame.o); u.uAx2.value.copy(legacy.frame.ax); u.uL2.value = legacy.frame.L; u.uShape2.value = legacy.frame.shape === 'sphere' ? 1 : 0; u.uHas2.value = 1;
+    } else u.uHas2.value = 0;
+    for (let i = 0; i < 8; i++) u.uTm.value[i] = th.Tmax[Math.min(i, N - 1)];
+    u.uN.value = N; u.uShape.value = frame.shape === 'sphere' ? 1 : 0;
+    u.uAxO.value.copy(frame.o); u.uAx.value.copy(frame.ax); u.uL.value = frame.L;
+    const F = th.faces;
+    u.uBr.value.set(F[0].brown, F[1].brown, F[2].brown); u.uCh.value.set(F[0].char, F[1].char, F[2].char); u.uWt.value.set(F[0].wet, F[1].wet, F[2].wet);
+    if (extra) u.uX.value.copy(extra);
+    if (opM) u.uOp.value.copy(opM);
+  },
+};
+
+/* ---------- geometry helpers ---------- */
+// Food geometry is non-indexed with position, normal and fd = (region, bakedTmax, bakedBrown, bakedChar).
+// region: 0 exterior skin, 1 cut interior, 2 yolk skin.
+function foodGeo(g, region = 0) {
+  g = g.index ? g.toNonIndexed() : g;
+  g.computeVertexNormals();
+  const n = g.attributes.position.count, fd = new Float32Array(n * 4);
+  for (let i = 0; i < n; i++) fd[i * 4] = region;
+  for (const k of Object.keys(g.attributes)) if (k !== 'position' && k !== 'normal') g.deleteAttribute(k);
+  g.setAttribute('fd', new THREE.BufferAttribute(fd, 4));
+  return g;
+}
+// Signed volume + centroid (divergence theorem over triangles, origin-based tetrahedra).
+function meshVolume(g, outC = null) {
+  const p = g.attributes.position.array; let V = 0, cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < p.length; i += 9) {
+    const ax = p[i], ay = p[i + 1], az = p[i + 2], bx = p[i + 3], by = p[i + 4], bz = p[i + 5], qx = p[i + 6], qy = p[i + 7], qz = p[i + 8];
+    const v = (ax * (by * qz - bz * qy) - ay * (bx * qz - bz * qx) + az * (bx * qy - by * qx)) / 6;
+    V += v; cx += v * (ax + bx + qx) / 4; cy += v * (ay + by + qy) / 4; cz += v * (az + bz + qz) / 4;
+  }
+  if (outC) { if (Math.abs(V) > 1e-12) outC.set(cx / V, cy / V, cz / V); else outC.set(0, 0, 0); }
+  return Math.abs(V);
+}
+function meshArea(g) {
+  const p = g.attributes.position.array; let A = 0;
+  for (let i = 0; i < p.length; i += 9) {
+    const ux = p[i + 3] - p[i], uy = p[i + 4] - p[i + 1], uz = p[i + 5] - p[i + 2], wx = p[i + 6] - p[i], wy = p[i + 7] - p[i + 1], wz = p[i + 8] - p[i + 2];
+    A += 0.5 * Math.hypot(uy * wz - uz * wy, uz * wx - ux * wz, ux * wy - uy * wx);
+  }
+  return A;
+}
+function extentAlong(g, ax) {
+  const p = g.attributes.position.array; let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < p.length; i += 3) { const d = p[i] * ax.x + p[i + 1] * ax.y + p[i + 2] * ax.z; if (d < lo) lo = d; if (d > hi) hi = d; }
+  return [lo, hi];
+}
+// Convex-hull collider points (subsampled).
+function hullShape(g, vol) {
+  const p = g.attributes.position.array, n = p.length / 3, step = Math.max(1, Math.floor(n / 90)), pts = [];
+  for (let i = 0; i < n; i += step) pts.push(p[i * 3], p[i * 3 + 1], p[i * 3 + 2]);
+  g.computeBoundingBox(); const b = g.boundingBox;
+  return { t: 'hull', pts: new Float32Array(pts), a: [(b.max.x - b.min.x) / 2, (b.max.y - b.min.y) / 2, (b.max.z - b.min.z) / 2], vol };
+}
+
+const FoodShapes = {
+  ribeye() {
+    // Ribeye outline (13 × 10 cm) with the fat cap on +X, extruded 3.5 cm and rounded.
+    const s = new THREE.Shape(), pts = [];
+    for (let i = 0; i < 28; i++) {
+      const a = (i / 28) * Math.PI * 2, r = 1 + 0.08 * Math.sin(a * 3 + 0.6) + 0.05 * Math.cos(a * 5);
+      pts.push(new THREE.Vector2(Math.cos(a) * 0.062 * r, Math.sin(a) * 0.047 * r));
+    }
+    s.setFromPoints(pts);
+    const g = new THREE.ExtrudeGeometry(s, { depth: 0.027, bevelEnabled: true, bevelThickness: 0.004, bevelSize: 0.004, bevelSegments: 2, curveSegments: 6 });
+    g.rotateX(-Math.PI / 2); g.translate(0, -0.0135, 0);
+    return foodGeo(g);
+  },
+  onion() {
+    const pts = [[0, -0.04], [0.014, -0.038], [0.028, -0.03], [0.038, -0.016], [0.042, 0.002], [0.038, 0.02], [0.026, 0.034], [0.012, 0.044], [0.004, 0.052], [0, 0.055]];
+    return foodGeo(new THREE.LatheGeometry(pts.map(([x, y]) => new THREE.Vector2(x, y)), 22));
+  },
+  egg() {
+    const pts = []; for (let i = 0; i <= 14; i++) { const a = Math.PI * i / 14, y = -Math.cos(a) * 0.029, r = Math.sin(a) * 0.0215 * (1 - 0.12 * (y / 0.029)); pts.push(new THREE.Vector2(Math.max(r, 0), y)); }
+    return foodGeo(new THREE.LatheGeometry(pts, 18));
+  },
+  garlic() {
+    const g = new THREE.SphereGeometry(0.011, 12, 9), p = g.attributes.position;
+    for (let i = 0; i < p.count; i++) { const x = p.getX(i), y = p.getY(i), z = p.getZ(i), t = (y / 0.011 + 1) / 2; p.setXYZ(i, x * (1.0 - 0.45 * t) + 0.004 * t * t, y * 1.55, z * 0.85 * (1.0 - 0.3 * t)); }
+    return foodGeo(g);
+  },
+  // Egg puddle: unit-radius flat white disc (scaled by the spread radius) + separate yolk dome.
+  eggWhite() {
+    const pts = [[0, -0.0025], [0.9, -0.0025], [0.985, -0.0018], [1.0, 0.0], [0.97, 0.0022], [0.6, 0.003], [0, 0.0034]];
+    return foodGeo(new THREE.LatheGeometry(pts.map(([x, y]) => new THREE.Vector2(x, y)), 36));
+  },
+  eggYolk() { const g = new THREE.SphereGeometry(0.0145, 20, 12, 0, Math.PI * 2, 0, Math.PI * 0.55); g.scale(1, 0.62, 1); return foodGeo(g, 2); },
+};
+
+/* ---------- thermal frame of a piece ---------- */
+// { shape:'slab'|'sphere', o: origin (local), ax: unit axis (local), L: thickness or radius }
+function frameSample(frame, th, p, peak) {
+  const s = frame.shape === 'sphere' ? _fv1.subVectors(p, frame.o).length() / frame.L : _fv1.subVectors(p, frame.o).dot(frame.ax) / frame.L + 0.5;
+  return th.sample(s, peak);
+}
+const _fv1 = new THREE.Vector3(), _fv2 = new THREE.Vector3(), _fv3 = new THREE.Vector3();
+
+/* ---------- food pieces ---------- */
+class FoodPiece extends Prop {
+  // opts: { th, frame, opM, spawned, T0, extra:{peeled,…}, massScale }
+  constructor(foodKey, geo, pos, quat, opts = {}) {
+    const fdef = FOOD_DEFS[foodKey];
+    const vol = opts.volume ?? Math.max(1e-8, meshVolume(geo));
+    const transparent = fdef.look === 'eggWhite';
+    const mat = FoodVis.make(fdef.look, transparent);
+    geo.computeBoundingSphere();
+    const massKg = opts.mass ?? vol * fdef.rho;
+    const def = { name: fdef.name, cat: 'Food', food: true, mass: massKg, sound: fdef.look === 'egg' ? 'ceramic' : 'produce', size: opts.size ?? geo.boundingSphere.radius,
+      linDamp: 0.3, angDamp: fdef.look === 'egg' || fdef.look === 'onion' ? 1.2 : 0.6, friction: 0.85, restitution: 0.02,
+      // Trigger / right-click on held food: peel an onion, crack an egg.
+      use: fdef.look === 'onion' ? (p) => Foods.peel(p, null) : fdef.look === 'egg' ? (p) => Foods.crackEgg(p) : undefined };
+    const shapes = opts.shapes || [hullShape(geo, vol)];
+    super(foodKey, pos, quat, opts.spawned ?? true, { def, parts: [{ mat, geo, cast: vol > 3e-5 }], shapes, volume: vol });
+    this.foodKey = foodKey; this.fdef = fdef; this.mat = mat; this.geo = geo; this.volume = vol;
+    this.extra = new THREE.Vector4(opts.peeled ? 1 : 0, 0, 0, 0);
+    this.peeled = !!opts.peeled; this.crushed = !!opts.crushed; this.whole = !!opts.whole;
+    this.opM = opts.opM ? opts.opM.clone() : new THREE.Matrix4();
+    this.frame = opts.frame || FoodPiece.autoFrame(geo, opts.sphere);
+    this.th = opts.th || new Thermo(fdef, FoodPiece.thermGeo(this.frame, geo, vol), opts.T0 ?? fdef.T0);
+    this.shrink0 = 1; this.inPan = null; this.downFace = 0; this.smokeAcc = 0; this.steamAcc = 0;
+    Foods.pieces.push(this); Props.list.push(this);
+    FoodVis.sync(mat, this.th, this.frame, this.opM, this.extra);
+  }
+  static autoFrame(geo, sphere) {
+    if (sphere) { const v = meshVolume(geo); return { shape: 'sphere', o: new THREE.Vector3(), ax: new THREE.Vector3(0, 1, 0), L: Math.cbrt(3 * v / (4 * Math.PI)) }; }
+    let best = null;
+    for (const ax of [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)]) {
+      const [lo, hi] = extentAlong(geo, ax); if (!best || hi - lo < best.L) best = { shape: 'slab', ax, L: hi - lo, o: ax.clone().multiplyScalar((lo + hi) / 2) };
+    }
+    return best;
+  }
+  static thermGeo(frame, geo, vol) {
+    if (frame.shape === 'sphere') return { shape: 'sphere', R: frame.L };
+    const L = Math.max(0.0015, frame.L), A = vol / L, As = Math.max(0, meshArea(geo) - 2 * A);
+    return { shape: 'slab', L, A, As };
+  }
+  setHighlight(on) { this.highlighted = on; this.mat.userData.u.uHi.value = on ? 1 : 0; }
+  // Point in local coords → peak temperature of the thermal field there.
+  tmaxAt(p) { return frameSample(this.frame, this.th, p, true); }
+  syncVisual() {
+    this.extra.x = this.peeled ? 1 : 0; this.extra.y = this.th.cook.sweat || 0;
+    FoodVis.sync(this.mat, this.th, this.frame, this.opM, this.extra, this.legacy);
+    // Meat shrinks as it loses water (10–25% by well-done).
+    if (this.fdef.protein && this.fdef.look === 'beef') { const s = Math.cbrt(clamp(this.th.mass / this.th.mass0, 0.7, 1)); this.meshes[0].scale.setScalar(s); }
+  }
+  destroy() { super.destroy(); const i = Foods.pieces.indexOf(this); if (i >= 0) Foods.pieces.splice(i, 1); this.mat.dispose(); this.geo.dispose(); }
+}
+
+// Egg puddle: white slab (spreads until set) + yolk sphere with its own state.
+class EggPuddle extends FoodPiece {
+  constructor(pos, quat, T0) {
+    const geo = FoodShapes.eggWhite(), r0 = 0.03;
+    const vol = Math.PI * 0.0215 * 0.0215 * 0.0055; // ≈ one egg white (34 ml) spread
+    super('eggWhite', geo, pos, quat, {
+      T0, frame: { shape: 'slab', o: new THREE.Vector3(), ax: new THREE.Vector3(0, 1, 0), L: 0.0055 },
+      th: new Thermo(FOOD_DEFS.eggWhite, { shape: 'slab', L: 0.0055, A: Math.PI * r0 * r0, As: 2 * Math.PI * r0 * 0.0055 }, T0),
+      shapes: [{ t: 'cyl', a: [0.003, 0.03], p: [0, 0, 0], r: [0, 0, 0], vol: 3.4e-5 }], mass: 0.05, size: 0.04, volume: 3.4e-5,
+    });
+    this.radius = r0; this.rMax = 0.068; this.isPuddle = true; this.noCut = true;
+    this.meshes[0].scale.set(r0, 1, r0);
+    const yg = FoodShapes.eggYolk(); this.yolkMat = FoodVis.make('eggYolk');
+    this.yolkMesh = new THREE.Mesh(yg, this.yolkMat); this.yolkMesh.position.set(0.004, 0.0028, -0.003); this.yolkMesh.castShadow = true;
+    this.group.add(this.yolkMesh);
+    this.yolk = new Thermo(FOOD_DEFS.eggYolk, { shape: 'sphere', R: 0.0135 }, T0);
+    this.yolkFrame = { shape: 'sphere', o: new THREE.Vector3(), ax: new THREE.Vector3(0, 1, 0), L: 0.0135 };
+  }
+  spread(dt) {
+    // Liquid white flows outward until it sets (hot pans set the edge fast → smaller, lacy egg).
+    const set = this.th.cook.set || 0, rate = 2.2 * (1 - set) * (1 - set);
+    const r = this.radius + (this.rMax - this.radius) * Math.min(1, dt * rate);
+    if (r - this.radius > 0.0004) {
+      this.radius = r; this.meshes[0].scale.set(r, 1, r);
+      const A = Math.PI * r * r, L = Math.max(0.003, 0.034 / 1035 / A);
+      this.th.setGeometry({ shape: 'slab', L, A, As: 2 * Math.PI * r * L }); this.frame.L = L;
+      if (this.colliders[0]) this.colliders[0].setRadius(r);
+    }
+  }
+  syncVisual() {
+    super.syncVisual();
+    FoodVis.sync(this.yolkMat, this.yolk, this.yolkFrame, null, null);
+  }
+  destroy() { super.destroy(); this.yolkMat.dispose(); }
+}
+
+/* ---------- minced piles (instanced bits) ---------- */
+const PileBits = {
+  mesh: null, max: 2400, count: 0, color: new THREE.Color(),
+  init() {
+    const g = new THREE.IcosahedronGeometry(1, 0);
+    this.mesh = new THREE.InstancedMesh(g, new THREE.MeshStandardMaterial({ roughness: 0.55 }), this.max);
+    this.mesh.count = 0; this.mesh.castShadow = false; this.mesh.frustumCulled = false;
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    for (let i = 0; i < this.max; i++) this.mesh.setColorAt(i, this.color.set(1, 1, 1));
+    scene.add(this.mesh);
+  },
+  // Rebuild all bit matrices from piles (called each frame; piles are few).
+  update() {
+    let k = 0;
+    for (const p of Foods.piles) {
+      if (!p.alive) continue;
+      _m2.compose(p.renderPos, p.renderQuat, _v8.set(1, 1, 1));
+      const col = p.bitColor, n = p.bits.length / 5;
+      for (let i = 0; i < n && k < this.max; i++) {
+        const b = p.bits, j = i * 5;
+        _m1.makeRotationY(b[j + 4]); _m1.scale(_v7.set(b[j + 3], b[j + 3] * 0.6, b[j + 3] * 0.8)); _m1.setPosition(b[j], b[j + 1], b[j + 2]);
+        _m1.premultiply(_m2);
+        this.mesh.setMatrixAt(k, _m1); this.mesh.setColorAt(k, col); k++;
+      }
+    }
+    this.mesh.count = k; this.mesh.instanceMatrix.needsUpdate = true; if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+  },
+};
+class FoodPile extends Prop {
+  constructor(foodKey, pos, volume, T, Tmax, spawned = true) {
+    const fdef = FOOD_DEFS[foodKey];
+    const def = { name: 'Minced ' + fdef.name.toLowerCase(), cat: 'Food', food: true, mass: volume * fdef.rho, sound: 'produce', size: 0.04, linDamp: 2, angDamp: 4, friction: 1.0, restitution: 0 };
+    const r = FoodPile.radiusFor(volume, 0);
+    super(foodKey + 'Pile', pos, new THREE.Quaternion(), spawned, { def, parts: [], shapes: [{ t: 'cyl', a: [0.004, r], p: [0, 0.002, 0], r: [0, 0, 0], vol: volume }], volume });
+    this.foodKey = foodKey; this.fdef = fdef; this.isPile = true; this.volume = volume; this.fineness = 0; this.radius = r;
+    this.th = new Thermo(fdef, FoodPile.geoFor(volume, 0), T);
+    if (Tmax !== undefined) this.th.Tmax.fill(Math.max(T, Tmax));
+    this.frame = { shape: 'slab', o: new THREE.Vector3(), ax: new THREE.Vector3(0, 1, 0), L: this.th.geo.L };
+    this.bitColor = new THREE.Color(); this.bits = null; this.rebuildBits();
+    Foods.piles.push(this); Props.list.push(this);
+  }
+  static radiusFor(v, fine) { const L = lerp(0.006, 0.003, fine); return clamp(Math.sqrt(v / L / Math.PI) * 1.1, 0.015, 0.09); }
+  static geoFor(v, fine) { const L = lerp(0.006, 0.003, fine), A = v / L; return { shape: 'slab', L, A, As: 2 * Math.sqrt(Math.PI * A) * L }; }
+  rebuildBits() {
+    const bitSize = lerp(0.0055, 0.0026, this.fineness), bitVol = bitSize * bitSize * bitSize * 0.5;
+    const n = clamp(Math.round(this.volume / bitVol), 8, 90), r = rng(this.volume * 1e9 | 0), R = this.radius * 0.85, a = [];
+    for (let i = 0; i < n; i++) { const ang = r() * Math.PI * 2, d = Math.sqrt(r()) * R; a.push(Math.cos(ang) * d, 0.002 + r() * 0.004 * (1 - d / R + 0.3), Math.sin(ang) * d, bitSize * (0.7 + r() * 0.6), r() * 6.28); }
+    this.bits = new Float32Array(a);
+  }
+  add(volume, T, Tmax) {
+    const w = volume / (this.volume + volume);
+    for (let i = 0; i < this.th.N; i++) { this.th.T[i] = lerp(this.th.T[i], T, w); this.th.Tmax[i] = Math.max(this.th.Tmax[i], Tmax ?? T); }
+    this.volume += volume; this.th.mass += volume * this.fdef.rho; this.th.mass0 += volume * this.fdef.rho;
+    this.th.waterMass += volume * this.fdef.rho * this.fdef.water; this.th.water0 += volume * this.fdef.rho * this.fdef.water;
+    this.reshape();
+  }
+  reshape() {
+    this.th.setGeometry(FoodPile.geoFor(this.volume, this.fineness)); this.frame.L = this.th.geo.L;
+    this.radius = FoodPile.radiusFor(this.volume, this.fineness);
+    if (this.colliders[0]) this.colliders[0].setRadius(this.radius);
+    this.rebuildBits();
+  }
+  chop() { if (this.fineness >= 1) return false; this.fineness = Math.min(1, this.fineness + 0.12); this.reshape(); return true; }
+  setHighlight(on) { this.highlighted = on; }
+  syncVisual() {
+    const th = this.th, F = th.faces, br = Math.max(F[0].brown, F[1].brown), ch = Math.max(F[0].char, F[1].char), c = this.bitColor;
+    const look = this.fdef.look;
+    if (look === 'beef') { const t = th.coreMax; c.setRGB(0.55, 0.1, 0.1).lerp(_c3.setRGB(0.5, 0.38, 0.32), smoothstep(45, 70, t)); }
+    else if (look === 'garlic') c.setRGB(0.95, 0.92, 0.8).lerp(_c3.setRGB(0.92, 0.84, 0.6), th.cook.sweat || 0);
+    else c.setRGB(0.94, 0.91, 0.8).lerp(_c3.setRGB(0.84, 0.78, 0.55), th.cook.sweat || 0);
+    c.lerp(_c3.setRGB(0.5, 0.27, 0.1), smoothstep(0.02, 0.8, br)).lerp(_c3.setRGB(0.05, 0.04, 0.035), smoothstep(0.05, 0.9, ch));
+  }
+  destroy() { super.destroy(); const i = Foods.piles.indexOf(this); if (i >= 0) Foods.piles.splice(i, 1); }
+}
+const _c3 = new THREE.Color();
+
+/* ---------- slicing ---------- */
+// Split a non-indexed food geometry by the plane n·p = d (local coords). Returns { pos, neg, caps } where
+// pos/neg are attribute arrays (position, normal, fd) and caps are the cut-edge segments.
+const Slicer = {
+  split(geo, n, d) {
+    const P = geo.attributes.position.array, Nn = geo.attributes.normal.array, F = geo.attributes.fd.array;
+    const out = { pos: { p: [], n: [], f: [] }, neg: { p: [], n: [], f: [] }, segs: [] };
+    const vtx = (i) => ({ p: [P[i * 3], P[i * 3 + 1], P[i * 3 + 2]], n: [Nn[i * 3], Nn[i * 3 + 1], Nn[i * 3 + 2]], f: [F[i * 4], F[i * 4 + 1], F[i * 4 + 2], F[i * 4 + 3]] });
+    const lerpV = (a, b, t) => ({ p: a.p.map((x, k) => x + (b.p[k] - x) * t), n: a.n.map((x, k) => x + (b.n[k] - x) * t), f: a.f.map((x, k) => x + (b.f[k] - x) * t) });
+    const emit = (dst, poly) => { for (let k = 1; k < poly.length - 1; k++) for (const v of [poly[0], poly[k], poly[k + 1]]) { dst.p.push(...v.p); dst.n.push(...v.n); dst.f.push(...v.f); } };
+    const count = P.length / 3;
+    for (let t = 0; t < count; t += 3) {
+      const V = [vtx(t), vtx(t + 1), vtx(t + 2)], s = V.map((v) => v.p[0] * n.x + v.p[1] * n.y + v.p[2] * n.z - d);
+      if (s[0] >= 0 && s[1] >= 0 && s[2] >= 0) { emit(out.pos, V); continue; }
+      if (s[0] <= 0 && s[1] <= 0 && s[2] <= 0) { emit(out.neg, V); continue; }
+      const A = [], B = [], cut = [];
+      for (let k = 0; k < 3; k++) {
+        const a = V[k], b = V[(k + 1) % 3], sa = s[k], sb = s[(k + 1) % 3];
+        if (sa >= 0) A.push(a); if (sa <= 0) B.push(a);
+        if ((sa > 0 && sb < 0) || (sa < 0 && sb > 0)) { const m = lerpV(a, b, sa / (sa - sb)); A.push(m); B.push(m); cut.push(m.p); }
+      }
+      if (A.length >= 3) emit(out.pos, A); if (B.length >= 3) emit(out.neg, B);
+      if (cut.length === 2) out.segs.push(cut[0], cut[1]);
+    }
+    return out;
+  },
+  // Chain segments into closed loops (by quantised endpoints) and triangulate each on the plane.
+  cap(segs, n) {
+    const key = (p) => `${Math.round(p[0] * 2e4)},${Math.round(p[1] * 2e4)},${Math.round(p[2] * 2e4)}`;
+    const adj = new Map(), used = new Uint8Array(segs.length / 2);
+    for (let i = 0; i < segs.length; i += 2) for (const e of [0, 1]) { const k = key(segs[i + e]); if (!adj.has(k)) adj.set(k, []); adj.get(k).push(i / 2); }
+    const loops = [];
+    for (let s0 = 0; s0 < used.length; s0++) {
+      if (used[s0]) continue; used[s0] = 1;
+      const loop = [segs[s0 * 2]]; let cur = segs[s0 * 2 + 1], guard = 0;
+      while (guard++ < 4000) {
+        loop.push(cur); const list = adj.get(key(cur)) || []; let next = -1;
+        for (const si of list) if (!used[si]) { next = si; break; }
+        if (next < 0) break; used[next] = 1;
+        const a = segs[next * 2], b = segs[next * 2 + 1]; cur = key(a) === key(cur) ? b : a;
+        if (key(cur) === key(loop[0])) break;
+      }
+      if (loop.length >= 3) loops.push(loop);
+    }
+    // Plane basis
+    const u = Math.abs(n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+    u.sub(_fv2.copy(n).multiplyScalar(u.dot(n))).normalize(); const v = new THREE.Vector3().crossVectors(n, u);
+    const tris = [];
+    for (const loop of loops) {
+      const c2 = loop.map((p) => new THREE.Vector2(p[0] * u.x + p[1] * u.y + p[2] * u.z, p[0] * v.x + p[1] * v.y + p[2] * v.z));
+      let faces;
+      try { faces = THREE.ShapeUtils.triangulateShape(c2, []); } catch (e) { faces = null; }
+      if (!faces || !faces.length) { faces = []; for (let k = 1; k < loop.length - 1; k++) faces.push([0, k, k + 1]); }
+      for (const [a, b, c] of faces) {
+        const A2 = c2[a], B2 = c2[b], C2 = c2[c], area = (B2.x - A2.x) * (C2.y - A2.y) - (B2.y - A2.y) * (C2.x - A2.x);
+        tris.push(area >= 0 ? [loop[a], loop[b], loop[c]] : [loop[a], loop[c], loop[b]]); // CCW in (u,v) ⇒ normal +n
+      }
+    }
+    return tris;
+  },
+  // Build a BufferGeometry for one side, adding its cap (normal sign s·n) with baked interior data.
+  build(side, capTris, n, sgn, bake) {
+    const p = side.p.slice(), nn = side.n.slice(), f = side.f.slice();
+    for (const tri of capTris) {
+      const t = sgn > 0 ? tri : [tri[0], tri[2], tri[1]];
+      for (const q of t) { p.push(q[0], q[1], q[2]); nn.push(n.x * sgn, n.y * sgn, n.z * sgn); f.push(1, bake(q), 0, 0); }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(p, 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(nn, 3));
+    g.setAttribute('fd', new THREE.Float32BufferAttribute(f, 4));
+    return g;
+  },
+};
+
+/* ---------- Foods manager ---------- */
+const Foods = {
+  pieces: [], piles: [], _extra: new THREE.Vector4(),
+  init() { PileBits.init(); },
+  count() { return this.pieces.length + this.piles.length; },
+  spawn(key, pos, quat = new THREE.Quaternion(), spawned = true, T0) {
+    switch (key) {
+      case 'ribeye': return new FoodPiece('ribeye', FoodShapes.ribeye(), pos, quat, { spawned, T0: T0 ?? 4, whole: true });
+      case 'egg': return new FoodPiece('eggShell', FoodShapes.egg(), pos, quat, { spawned, T0: T0 ?? 4, sphere: true, whole: true });
+      case 'onion': return new FoodPiece('onion', FoodShapes.onion(), pos, quat, { spawned, T0: T0 ?? 21, sphere: true, whole: true });
+      case 'garlic': return new FoodPiece('garlic', FoodShapes.garlic(), pos, quat, { spawned, T0: T0 ?? 21, sphere: true, whole: true });
+    }
+    return null;
+  },
+  catalog: [
+    { key: 'ribeye', name: 'Ribeye Steak (4°C)' }, { key: 'egg', name: 'Egg (4°C)' }, { key: 'onion', name: 'Onion' }, { key: 'garlic', name: 'Garlic Clove' },
+  ],
+  initial() {
+    const CT = CONFIG.kitchen.counterTop, IB = CT + 0.02, q = (y) => new THREE.Quaternion().setFromEuler(new THREE.Euler(0, y * DEG, 0));
+    const add = (p) => { if (p) { p.homePos.copy(p.currPos); this.homes.push({ key: p.foodKey === 'eggShell' ? 'egg' : p.foodKey, pos: p.currPos.clone(), quat: p.currQuat.clone() }); } };
+    this.homes = [];
+    add(this.spawn('ribeye', new THREE.Vector3(-0.2, CT + 0.04, -0.2), q(20), false));
+    add(this.spawn('onion', new THREE.Vector3(0.35, IB + 0.042, 0.05), q(0), false));
+    add(this.spawn('garlic', new THREE.Vector3(0.48, IB + 0.012, -0.05), new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, Math.PI / 2)), false));
+    add(this.spawn('garlic', new THREE.Vector3(0.52, IB + 0.012, -0.02), new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 1, Math.PI / 2)), false));
+    for (let i = 0; i < 3; i++) add(this.spawn('egg', new THREE.Vector3(0.22 + i * 0.06, IB + 0.023, 0.3), new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, Math.PI / 2)), false));
+  },
+  removeAll() { for (const p of this.pieces.slice()) Props.remove(p); for (const p of this.piles.slice()) Props.remove(p); },
+  restoreInitial() { this.removeAll(); this.initial(); },
+
+  /* ----- cutting ----- */
+  // Slice piece by a world-space plane. Returns true if a cut happened.
+  cut(piece, pointW, normalW) {
+    if (piece.noCut || !piece.alive) return false;
+    // Plane → piece local
+    _q3.copy(piece.renderQuat).invert();
+    const n = _fv3.copy(normalW).applyQuaternion(_q3).normalize().clone();
+    const pl = _v8.copy(pointW).sub(piece.renderPos).applyQuaternion(_q3);
+    const d = n.dot(pl);
+    const sp = Slicer.split(piece.geo, n, d);
+    if (sp.pos.p.length < 9 || sp.neg.p.length < 9) return false;
+    const tris = Slicer.cap(sp.segs, n);
+    const bake = () => 0; // temperatures are sampled per fragment from the thermal fields
+    const gA = Slicer.build(sp.pos, tris, n, -1, bake), gB = Slicer.build(sp.neg, tris, n, 1, bake);
+    const vA = meshVolume(gA), vB = meshVolume(gB), vT = vA + vB;
+    if (vA < vT * CONFIG.cut.grazeFrac || vB < vT * CONFIG.cut.grazeFrac) { gA.dispose(); gB.dispose(); return false; }
+    const parent = piece, results = [];
+    for (const [g, v, capSign] of [[gA, vA, -1], [gB, vB, 1]]) {
+      const c = new THREE.Vector3(); meshVolume(g, c);
+      g.translate(-c.x, -c.y, -c.z);
+      const wpos = c.clone().applyQuaternion(parent.renderQuat).add(parent.renderPos);
+      if (v < CONFIG.cut.minVolume) { this.toPile(parent, wpos, v, c); g.dispose(); continue; }
+      results.push(this.makeChild(parent, g, v, c, wpos, n, capSign));
+    }
+    // carry velocity; remove parent
+    const lv = parent.body.linvel();
+    for (const r of results) r.body.setLinvel(lv, true);
+    Props.remove(parent);
+    this.enforceCap();
+    return true;
+  },
+  makeChild(parent, g, v, c, wpos, cutN, capSign) {
+    const pf = parent.frame, th0 = parent.th;
+    // Candidate thermal axes: parent axis, cut normal, local X/Y/Z — keep the parent's unless another is much thinner.
+    const cands = [pf.shape === 'slab' ? pf.ax.clone() : null, cutN.clone(), new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)].filter(Boolean);
+    let best = null;
+    for (const ax of cands) { const [lo, hi] = extentAlong(g, ax); const L = hi - lo; if (!best || L < best.L - 1e-6) best = { ax, L, mid: (lo + hi) / 2 }; }
+    let keep = null;
+    if (pf.shape === 'slab') { const [lo, hi] = extentAlong(g, pf.ax); if (hi - lo <= best.L * 1.6) keep = { ax: pf.ax.clone(), L: hi - lo, mid: (lo + hi) / 2 }; }
+    const ch = keep || best;
+    const frame = { shape: 'slab', ax: ch.ax.clone().normalize(), L: Math.max(0.0015, ch.L), o: ch.ax.clone().normalize().multiplyScalar(ch.mid) };
+    const fdef = parent.fdef;
+    const geoT = FoodPiece.thermGeo(frame, g, v);
+    const th = new Thermo(fdef, geoT, 20, fdef.nodes);
+    // Remap nodes from the parent's field sampled along the new axis (through the child's centre).
+    th.remap(geoT, (s) => {
+      _fv2.copy(frame.ax).multiplyScalar((s - 0.5) * frame.L).add(frame.o).add(c); // parent-local point
+      return [frameSample(pf, th0, _fv2, false), frameSample(pf, th0, _fv2, true)];
+    });
+    // Faces: fresh cut faces are raw & wet; others inherit the parent's matching face.
+    const capDir = cutN.clone().multiplyScalar(capSign);
+    const inherit = (dir) => {
+      if (dir.dot(capDir) > 0.8) return { wet: fdef.look === 'beef' ? 0.02 : 0.03, brown: 0, char: 0, fresh: true };
+      if (pf.shape === 'sphere') return th0.faces[0];
+      const dd = dir.dot(pf.ax); return Math.abs(dd) > 0.8 ? th0.faces[dd > 0 ? 1 : 0] : th0.faces[2];
+    };
+    const f0 = inherit(frame.ax.clone().negate()), f1 = inherit(frame.ax), f2 = pf.shape === 'sphere' ? th0.faces[0] : th0.faces[2];
+    [[th.faces[0], f0], [th.faces[1], f1], [th.faces[2], f2]].forEach(([dst, src]) => { dst.wet = src.wet; dst.brown = src.brown; dst.char = src.char; });
+    th.initReservoir();
+    const share = v / Math.max(1e-9, parent.volume);
+    th.mass0 = th0.mass0 * share; th.mass = th0.mass * share; th.water0 = th0.water0 * share; th.waterMass = th0.waterMass * share;
+    Object.assign(th.cook, th0.cook); th.salt = th0.salt;
+    // Bake current per-face browning into vertices (keeps crusts when the axis changes).
+    const P = g.attributes.position.array, Nn = g.attributes.normal.array, Fd = g.attributes.fd.array;
+    for (let i = 0; i < P.length / 3; i++) {
+      _fv1.set(Nn[i * 3], Nn[i * 3 + 1], Nn[i * 3 + 2]);
+      let fb; if (pf.shape === 'sphere') fb = th0.faces[0]; else { const dd = _fv1.dot(pf.ax); fb = dd < -0.5 ? th0.faces[0] : dd > 0.5 ? th0.faces[1] : th0.faces[2]; }
+      if (Fd[i * 4] !== 1) { Fd[i * 4 + 2] = Math.max(Fd[i * 4 + 2], fb.brown); Fd[i * 4 + 3] = Math.max(Fd[i * 4 + 3], fb.char); }
+    }
+    // Doneness field: if the thermal axis changed, freeze the parent's peak field (shifted into child coords)
+    // so the cut faces keep showing the real gradient; otherwise inherit the parent's legacy field.
+    const shift = (fr) => ({ shape: fr.shape, ax: fr.ax.clone(), L: fr.L, o: fr.o.clone().sub(c) });
+    let legacy = null;
+    if (!keep) legacy = { frame: shift(pf), Tmax: Float32Array.from(th0.Tmax), N: th0.N };
+    else if (parent.legacy) legacy = { frame: shift(parent.legacy.frame), Tmax: parent.legacy.Tmax, N: parent.legacy.N };
+    const opM = parent.opM.clone().multiply(new THREE.Matrix4().makeTranslation(c.x, c.y, c.z));
+    const child = new FoodPiece(parent.foodKey, g, wpos, parent.renderQuat.clone(), { th, frame, opM, spawned: true, peeled: parent.peeled, crushed: parent.crushed });
+    child.volume = v; child.legacy = legacy;
+    child.syncVisual();
+    return child;
+  },
+  // Turn a piece (or a tiny sliver) into minced pile volume near worldPos.
+  toPile(src, worldPos, volume, localC) {
+    const T = src.th ? (localC ? frameSample(src.frame, src.th, localC, false) : src.th.core) : 21;
+    const Tm = src.th ? (localC ? frameSample(src.frame, src.th, localC, true) : src.th.coreMax) : T;
+    let best = null, bd = 0.07;
+    for (const p of this.piles) { if (p.foodKey !== src.foodKey || !p.alive) continue; const d = p.renderPos.distanceTo(worldPos); if (d < bd) { bd = d; best = p; } }
+    if (best) { best.add(volume, T, Tm); return best; }
+    const pos = worldPos.clone(); pos.y += 0.01;
+    return new FoodPile(src.foodKey, pos, volume, T, Tm);
+  },
+  mince(piece) {
+    const pile = this.toPile(piece, piece.renderPos, piece.volume, null);
+    if (pile) pile.chop();
+    Props.remove(piece);
+  },
+  enforceCap() {
+    while (this.count() > CONFIG.cut.maxPieces && this.pieces.length) {
+      let s = null; for (const p of this.pieces) if (!p.holders.length && !p.isPuddle && (!s || p.volume < s.volume)) s = p;
+      if (!s) break; this.mince(s);
+    }
+  },
+
+  /* ----- specials ----- */
+  crackEgg(egg, impactPoint) {
+    if (!egg.alive || egg.foodKey !== 'eggShell') return;
+    const pos = egg.currPos.clone(); pos.y -= 0.012;
+    const T = egg.th.core;
+    for (const h of egg.holders.slice()) Grab.release(h, false);
+    const pud = new EggPuddle(pos, new THREE.Quaternion(), T);
+    pud.body.setLinvel({ x: 0, y: -0.4, z: 0 }, true);
+    for (let i = 0; i < 2; i++) {
+      const sh = Props.spawn('shellHalf', pos.clone().add(new THREE.Vector3((i - 0.5) * 0.05, 0.03, 0)), new THREE.Quaternion().setFromEuler(new THREE.Euler(i ? 0.4 : 2.7, 0, 0)), true);
+      if (sh) sh.body.setLinvel({ x: (i - 0.5) * 0.6, y: 0.4, z: 0 }, true);
+    }
+    AudioSys.crack(pos);
+    Props.remove(egg);
+  },
+  peel(piece, hand) {
+    if (!piece.alive || piece.peeled || piece.fdef.look !== 'onion') return;
+    piece.peeled = true; piece.syncVisual();
+    const skin = Props.spawn('onionSkin', piece.renderPos.clone().add(new THREE.Vector3(0, 0.03, 0)), piece.renderQuat.clone(), true);
+    AudioSys.rustle(piece.renderPos);
+    if (hand && skin) { if (hand.held === piece) Grab.release(hand, false); Grab.attach(hand, skin); }
+    else if (skin) skin.body.setLinvel({ x: 0.2, y: 0.8, z: 0 }, true);
+  },
+  crush(piece, upW) {
+    if (!piece.alive || piece.crushed || piece.fdef.look !== 'garlic') return;
+    // Flatten along the local direction that is currently world-up.
+    _q3.copy(piece.renderQuat).invert(); const u = _fv1.copy(upW).applyQuaternion(_q3).normalize();
+    const P = piece.geo.attributes.position;
+    for (let i = 0; i < P.count; i++) { _fv2.fromBufferAttribute(P, i); const dd = _fv2.dot(u); _fv2.addScaledVector(u, -dd * 0.62); _fv2.multiplyScalar(1.12); P.setXYZ(i, _fv2.x, _fv2.y, _fv2.z); }
+    P.needsUpdate = true; piece.geo.computeVertexNormals(); piece.geo.computeBoundingSphere();
+    piece.crushed = true; piece.peeled = true;
+    const vol = meshVolume(piece.geo);
+    piece.frame = FoodPiece.autoFrame(piece.geo, false);
+    const T = piece.th.core, Tm = piece.th.coreMax, cook = { ...piece.th.cook };
+    piece.th = new Thermo(piece.fdef, FoodPiece.thermGeo(piece.frame, piece.geo, vol), T); piece.th.Tmax.fill(Tm); Object.assign(piece.th.cook, cook);
+    piece.th.faces.forEach((f) => { f.wet = 0.02; });
+    piece.syncVisual();
+    AudioSys.crunch(piece.renderPos, 0.8);
+  },
+
+  /* ----- simulation tick (fixed step) ----- */
+  // Contact boundary conditions: which face touches which surface, and how much area.
+  applyContacts(p) {
+    const th = p.th; th.clearExposure();
+    const up = _fv1.set(0, 1, 0);
+    // Face pointing down (slab: ±axis in world vs up)
+    let down = 2;
+    if (p.frame.shape === 'sphere') down = 0;
+    else { const aw = _fv2.copy(p.frame.ax).applyQuaternion(p.renderQuat); const a = aw.dot(up); down = a > 0.55 ? 0 : a < -0.55 ? 1 : 2; }
+    p.downFace = down;
+    let pan = null, gap = 1;
+    if (!p.holders.length) {
+      // Lowest point of the piece in world (approx from bounding radius along the thermal axis)
+      const halfDown = p.frame.shape === 'sphere' ? p.frame.L : (down === 2 ? Math.min(p.def.size, 0.05) * 0.8 : p.frame.L / 2);
+      const lowY = p.renderPos.y - halfDown;
+      for (const pp of Stove.pans) {
+        if (!pp.alive) continue;
+        const pd = pp.def.pan;
+        _fv3.set(pd.c[0], pd.c[1], pd.c[2]).applyQuaternion(pp.renderQuat).add(pp.renderPos); // inner bottom centre (world)
+        const upP = _fv2.set(0, 1, 0).applyQuaternion(pp.renderQuat);
+        if (upP.y < 0.75) continue;
+        const dx = p.renderPos.x - _fv3.x, dz = p.renderPos.z - _fv3.z;
+        if (dx * dx + dz * dz > pd.r * pd.r) continue;
+        const g = lowY - _fv3.y;
+        if (g > -0.02 && g < 0.018 && g < gap) { gap = g; pan = pp; }
+      }
+    }
+    p.inPan = pan;
+    const F = th.faces;
+    // Contact area of the down face
+    let Ac = F[down].area;
+    if (p.frame.shape === 'sphere') Ac = F[0].area * (p.isPuddle ? 0.5 : 0.08);
+    else if (down === 2) Ac = Math.min(F[2].area * 0.25, p.frame.L * Math.sqrt(F[0].area) * 0.9);
+    if (pan) {
+      const pt = pan.thermo, h = pt.def.hContact * p.fdef.contactQ;
+      F[down].contactT = pt.T;
+      th.expose(down, h, Ac, pt.T, pt);
+      pan.contactArea += Ac;
+      const airT = THERMO.Tamb + (pt.T - THERMO.Tamb) * 0.12;
+      for (let fi = 0; fi < 3; fi++) if (fi !== down) th.exposeAir(fi, airT);
+      if (p.frame.shape === 'sphere') th.exposeAir(0, airT);
+    } else if (p.holders.length || !this.resting(p)) {
+      for (let fi = 0; fi < 3; fi++) th.exposeAir(fi);
+    } else {
+      th.expose(down, THERMO.hBoard, Ac, THERMO.Tamb);
+      for (let fi = 0; fi < 3; fi++) if (fi !== down) th.exposeAir(fi);
+      if (p.frame.shape === 'sphere') th.exposeAir(0);
+    }
+  },
+  resting(p) { const v = p.body.linvel(); return p.body.isSleeping() || (v.x * v.x + v.y * v.y + v.z * v.z) < 0.01; },
+  simTick(dt) {
+    for (const pp of Stove.pans) { pp.contactArea = 0; pp.foodJ = 0; pp.evap = 0; }
+    const all = this._all || (this._all = []); all.length = 0;
+    for (const p of this.pieces) all.push(p); for (const p of this.piles) all.push(p);
+    for (const p of all) {
+      if (!p.alive) continue;
+      this.applyContacts(p);
+      if (p.isPuddle) {
+        // Yolk sits on the white: warmed from below by the white, air above.
+        const y = p.yolk; y.clearExposure();
+        y.expose(0, 160, y.faces[0].area * 0.45, p.th.sample(0.7)); y.exposeAir(0, p.inPan ? THERMO.Tamb + (p.inPan.thermo.T - THERMO.Tamb) * 0.12 : THERMO.Tamb);
+        y.step(dt);
+        if (p.inPan || this.resting(p)) p.spread(dt);
+      }
+      p.th.step(dt);
+      if (p.inPan) {
+        const pt = p.inPan.thermo; let j = 0;
+        for (let k = 0; k < p.th.pans.length; k++) if (p.th.pans[k] === pt) j += p.th.panJ[k];
+        p.inPan.foodJ += j;
+        p.inPan.evap += p.th.faces[0].evap + p.th.faces[1].evap + p.th.faces[2].evap;
+      }
+      p.syncVisual();
+      this.emitFx(p, dt);
+    }
+    this.towels(dt);
+  },
+  // Steam from evaporation, smoke from charring surfaces.
+  emitFx(p, dt) {
+    const F = p.th.faces, evap = F[0].evap + F[1].evap + F[2].evap;
+    p.steamAcc += evap * dt * 900;
+    while (p.steamAcc > 1) { p.steamAcc -= 1; Particles.emit('steam', p.renderPos.x + (Math.random() - 0.5) * 0.06, p.renderPos.y + 0.02, p.renderPos.z + (Math.random() - 0.5) * 0.06); }
+    let burn = 0;
+    for (let fi = 0; fi < 3; fi++) { const f = F[fi]; if (f.area > 0 && f.Ts > p.fdef.char.T0) burn += (f.Ts - p.fdef.char.T0) / 30; }
+    p.smokeAcc += burn * dt * 3;
+    while (p.smokeAcc > 1) { p.smokeAcc -= 1; Particles.emit('smoke', p.renderPos.x + (Math.random() - 0.5) * 0.05, p.renderPos.y + 0.02, p.renderPos.z + (Math.random() - 0.5) * 0.05); }
+  },
+  // Pat dry: a moving paper towel touching food wicks surface moisture.
+  towels(dt) {
+    for (const t of Props.list) {
+      if (!t.def.towel || !t.alive) continue;
+      const v = t.holders.length ? t.holders[0].vel.length() : t.body.linvel ? Math.hypot(t.body.linvel().x, t.body.linvel().z) : 0;
+      if (v < 0.04 && !t.holders.length) continue;
+      for (const p of this.pieces) {
+        if (!p.alive) continue;
+        if (p.renderPos.distanceTo(t.renderPos) > p.def.size + 0.045) continue;
+        let dried = 0;
+        for (const f of p.th.faces) { const before = f.wet; f.wet *= Math.exp(-dt * (2 + 20 * Math.min(1, v))); dried += before - f.wet; }
+        if (dried > 1e-5 && t.holders.length) haptic(t.holders[0].side, 0.08, 20);
+      }
+    }
+  },
+  // Contact impacts (from physics events): eggs crack on pan rims / counters.
+  onImpact(prop, other, dv) {
+    if (prop.foodKey === 'eggShell') {
+      const hard = other && (other.thermo || other.def && (other.def.pan || other.def.sound === 'metal'));
+      if (dv > (prop.holders.length ? 0.45 : 1.1) || (hard && dv > 0.3)) this.crackEgg(prop);
+    }
+  },
+};
+
+/* ---------- Cutting (knives) ---------- */
+const Cutting = {
+  knives: new Map(), // prop → { prev: Vector3, prevT, vel: Vector3, cool }
+  _pts: [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()],
+  update(dt) {
+    for (const p of Props.list) {
+      const k = p.def.knife; if (!k || !p.alive) continue;
+      let st = this.knives.get(p);
+      if (!st) { st = { prev: new THREE.Vector3(), has: false, vel: new THREE.Vector3(), cool: 0 }; this.knives.set(p, st); }
+      // Edge midpoint velocity
+      _fv1.set(0, k.edgeY, (k.heel + k.tip) / 2).applyQuaternion(p.renderQuat).add(p.renderPos);
+      if (st.has && dt > 0) st.vel.subVectors(_fv1, st.prev).divideScalar(dt); else st.vel.set(0, 0, 0);
+      st.prev.copy(_fv1); st.has = true;
+      st.cool -= dt;
+      if (!p.holders.length || st.cool > 0) continue;
+      this.tryKnife(p, k, st);
+    }
+    for (const [p] of this.knives) if (!p.alive) this.knives.delete(p);
+  },
+  tryKnife(knife, k, st) {
+    const q = knife.renderQuat, pos = knife.renderPos;
+    const bladeN = _v5.set(1, 0, 0).applyQuaternion(q);          // blade plane normal
+    const edgeDown = _v6.set(0, -1, 0).applyQuaternion(q);       // direction the edge faces
+    const along = _v7.set(0, 0, -1).applyQuaternion(q);          // spine direction
+    const vDown = st.vel.dot(edgeDown), vSaw = Math.abs(st.vel.dot(along));
+    const pts = this._pts;
+    for (let i = 0; i < 5; i++) pts[i].set(0, k.edgeY + 0.002, lerp(k.heel, k.tip, i / 4)).applyQuaternion(q).add(pos);
+    const hand = knife.holders[0];
+    // Garlic crush: flat of the blade (blade normal ≈ vertical) moving down onto a clove.
+    if (Math.abs(bladeN.y) > 0.75 && st.vel.y < -CONFIG.cut.crushSpeed) {
+      for (const f of Foods.pieces) {
+        if (f.fdef.look !== 'garlic' || f.crushed || !f.alive) continue;
+        _fv1.copy(f.renderPos).sub(pos); _q3.copy(q).invert(); _fv1.applyQuaternion(_q3);
+        if (Math.abs(_fv1.x) < 0.035 && _fv1.z < k.heel && _fv1.z > k.tip && _fv1.y < 0.01 && _fv1.y > k.edgeY - 0.01) {
+          Foods.crush(f, _fv2.set(0, 1, 0)); st.cool = CONFIG.cut.cooldown; if (hand) haptic(hand.side, 0.8, 50); return;
+        }
+      }
+    }
+    // Rock-chop through minced piles: each pass makes the mince finer.
+    for (const pile of Foods.piles) {
+      if (!pile.alive) continue;
+      for (const pt of pts) {
+        const dx = pt.x - pile.renderPos.x, dz = pt.z - pile.renderPos.z;
+        if (dx * dx + dz * dz < pile.radius * pile.radius && pt.y < pile.renderPos.y + 0.012 && vDown > 0.25) {
+          if (pile.chop()) { AudioSys.chop(pt, pile.fdef.hardness); if (hand) haptic(hand.side, 0.3, 18); }
+          st.cool = CONFIG.cut.cooldown * 0.8; return;
+        }
+      }
+    }
+    for (const f of Foods.pieces) {
+      if (!f.alive || f.noCut) continue;
+      if (f.renderPos.distanceTo(pos) > 0.4) continue;
+      let inside = false;
+      for (const c of f.colliders) { for (const pt of pts) if (c.containsPoint(pt)) { inside = true; break; } if (inside) break; }
+      if (!inside) continue;
+      const hardness = f.fdef.hardness * (f.fdef.look === 'beef' ? lerp(1, 0.8, smoothstep(50, 75, f.th.coreMax)) : 1);
+      const need = CONFIG.cut.baseSpeed + CONFIG.cut.hardSpeed * hardness / k.sharp;
+      const eff = vDown + (k.serrated ? CONFIG.cut.serratedSaw : CONFIG.cut.sawFactor) * vSaw;
+      if (f.foodKey === 'eggShell') { if (eff > 0.25) { Foods.crackEgg(f); st.cool = CONFIG.cut.cooldown; } return; }
+      if (eff < need) { if (hand && vDown > 0.05) haptic(hand.side, 0.12 + hardness * 0.2, 12); continue; }
+      const small = f.volume < CONFIG.cut.minceVolume;
+      if (small) Foods.mince(f);
+      else if (!Foods.cut(f, pts[2], bladeN)) continue;
+      st.cool = CONFIG.cut.cooldown;
+      AudioSys.chop(pts[2], hardness);
+      if (hand) haptic(hand.side, CONFIG.cut.hapticBase + (1 - CONFIG.cut.hapticBase) * hardness, 30 + hardness * 30);
+      return;
+    }
+  },
+};
+
+/* ---------- Tongs ---------- */
+const Tongs = {
+  update() {
+    for (const t of Props.list) {
+      if (!t.def.tongs || !t.alive) continue;
+      const h = t.holders[0], closed = !!(h && (h.input.trigDown || t.forceClosed));
+      t.meshes[0].scale.y = lerp(t.meshes[0].scale.y || 1, closed ? 0.3 : 1, 0.35);
+      const tip = _fv1.set(...t.def.tongs.tip).applyQuaternion(t.renderQuat).add(t.renderPos);
+      if (closed && !t.carry) {
+        let best = null, bd = t.def.tongs.reach;
+        for (const p of Props.list) { if (p === t || !p.alive || p.holders.length || p.def.mass > 0.6 || p.def.pan) continue; const d = p.renderPos.distanceTo(tip) - Math.min(0.03, p.def.size * 0.5); if (d < bd) { bd = d; best = p; } }
+        if (best) {
+          const pseudo = t.pseudo || (t.pseudo = { side: h ? h.side : 'right', targetPos: new THREE.Vector3(), targetQuat: new THREE.Quaternion(), offPos: new THREE.Vector3(), offQuat: new THREE.Quaternion(), localHand: new THREE.Vector3(), isTongs: true });
+          pseudo.targetPos.copy(tip); pseudo.targetQuat.copy(t.renderQuat);
+          _q2.copy(pseudo.targetQuat).invert();
+          pseudo.offQuat.copy(_q2).multiply(best.renderQuat); pseudo.offPos.subVectors(best.renderPos, tip).applyQuaternion(_q2);
+          best.holders.push(pseudo); best.setHeld(true); best.body.setGravityScale(0, true); t.carry = best;
+          if (h) haptic(h.side, 0.3, 20);
+        }
+      }
+      if (t.carry) {
+        const c = t.carry;
+        if (!closed || !c.alive) { this.drop(t); continue; }
+        t.pseudo.targetPos.copy(tip); t.pseudo.targetQuat.copy(t.renderQuat); Grab.computeTarget(c);
+      }
+    }
+  },
+  drop(t) {
+    const c = t.carry; t.carry = null; if (!c || !c.alive) return;
+    const i = c.holders.indexOf(t.pseudo); if (i >= 0) c.holders.splice(i, 1);
+    if (!c.holders.length) { c.hasTarget = false; c.setHeld(false); c.body.setGravityScale(1, true); c.body.wakeUp(); }
+  },
+};
+
+/* ====================================== [STOVE] ===================================== */
+// Gas range: 4 burners with grab-and-twist knobs (OFF → HI → LO), igniter click, scaling blue flame.
+// Pans on a burner receive its wattage × their coupling; everything thermal runs on the sim fixed step.
+const Stove = {
+  pans: [], knobs: [], flames: null, flameMat: null,
+  // knob index → burner index (Kitchen.burners order: FL, FR, BL, BR)
+  knobBurner: [2, 0, 1, 3],
+  init() {
+    const CT = CONFIG.kitchen.counterTop, bz1 = -CONFIG.kitchen.halfZ + CONFIG.kitchen.counterDepth;
+    [-0.47, -0.33, -0.09, 0.05].forEach((x, i) => this.knobs.push({ i, burner: this.knobBurner[i], angle: 0, lit: false, ign: 0, clickT: 0, pos: new THREE.Vector3(x, CT - 0.075, bz1 + 0.03), grab: null, tickAngle: 0, dirty: true }));
+    // Knob geometry with an indicator ridge so its rotation reads clearly.
+    const g1 = new THREE.CylinderGeometry(0.022, 0.024, 0.03, 20); g1.rotateX(Math.PI / 2);
+    const g2 = new THREE.BoxGeometry(0.006, 0.03, 0.012); g2.translate(0, 0.008, 0.018);
+    const kg = mergeGeometries([uberize(g1, MAT.plastic), uberize(g2, MAT.steel)], false);
+    Kitchen.knobs.geometry.dispose(); Kitchen.knobs.geometry = kg;
+    // Flames: ring of tongues, additive, flickering in the vertex shader; one instanced draw for all burners.
+    const parts = [];
+    for (let i = 0; i < 22; i++) {
+      const a = (i / 22) * Math.PI * 2, c = new THREE.ConeGeometry(0.0062, 0.024, 5, 2, true);
+      const n = c.attributes.position.count, tip = new Float32Array(n), seed = new Float32Array(n);
+      for (let k = 0; k < n; k++) { tip[k] = (c.attributes.position.getY(k) + 0.012) / 0.024; seed[k] = i * 1.37; }
+      c.setAttribute('tip', new THREE.BufferAttribute(tip, 1)); c.setAttribute('seed', new THREE.BufferAttribute(seed, 1));
+      c.translate(0, 0.012, 0); c.rotateZ(-0.45); c.translate(0.05, 0, 0); c.rotateY(a);
+      c.deleteAttribute('normal'); c.deleteAttribute('uv');
+      parts.push(c.index ? c.toNonIndexed() : c);
+    }
+    const fg = mergeGeometries(parts, false);
+    this.flameMat = new THREE.ShaderMaterial({
+      uniforms: { uTime: { value: 0 } },
+      vertexShader: `attribute float tip; attribute float seed; uniform float uTime; varying float vTip;
+        void main(){ vTip = tip; vec3 p = position;
+          float fl = 0.82 + 0.18 * sin(uTime * 23.0 + seed * 3.1) + 0.1 * sin(uTime * 41.0 + seed * 7.7);
+          p.y *= fl; p.xz *= 1.0 + 0.08 * tip * sin(uTime * 17.0 + seed);
+          gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(p, 1.0); }`,
+      fragmentShader: `varying float vTip;
+        void main(){ vec3 c = mix(vec3(0.12, 0.28, 1.0), vec3(0.55, 0.8, 1.0), smoothstep(0.1, 0.8, vTip));
+          float a = (1.0 - smoothstep(0.55, 1.0, vTip)) * 0.85; gl_FragColor = vec4(c * 1.6, a); }`,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    this.flames = new THREE.InstancedMesh(fg, this.flameMat, 4); this.flames.frustumCulled = false; this.flames.renderOrder = 6;
+    for (let i = 0; i < 4; i++) { _m1.makeScale(0, 0, 0); this.flames.setMatrixAt(i, _m1); }
+    scene.add(this.flames);
+  },
+  powerFrac(a) {
+    const S = CONFIG.stove;
+    if (a < S.offAngle) return 0;
+    if (a < S.hiAngle) return 1;
+    return lerp(1, S.lowFrac, (a - S.hiAngle) / (S.knobMax - S.hiAngle));
+  },
+  burnerW(b) { const k = this.knobs.find((kk) => kk.burner === b); return k && k.lit ? CONFIG.stove.burnerW[b] * this.powerFrac(k.angle) : 0; },
+  label(k) { if (!k.lit) return k.ign > 0 ? 'igniting' : 'OFF'; const f = this.powerFrac(k.angle); return f > 0.95 ? 'HI' : f > 0.55 ? 'MED-HI' : f > 0.3 ? 'MED' : 'LO'; },
+  knobNear(point, r = 0.05) { let best = null, bd = r; for (const k of this.knobs) { const d = k.pos.distanceTo(point); if (d < bd) { bd = d; best = k; } } return best; },
+  setAngle(k, a) {
+    const S = CONFIG.stove; a = clamp(a, 0, S.knobMax);
+    if (Math.abs(a - k.tickAngle) > 0.26) { k.tickAngle = a; AudioSys.knobTick(k.pos); if (k.grab && k.grab.side) haptic(k.grab.side, 0.12, 10); }
+    const wasOn = k.angle >= S.offAngle, isOn = a >= S.offAngle;
+    if (!wasOn && isOn) { k.ign = S.igniteTime; k.clickT = 0; }
+    if (wasOn && !isOn) { if (k.lit) AudioSys.flameOff(k.pos); k.lit = false; k.ign = 0; }
+    k.angle = a; k.dirty = true;
+  },
+  // Per-frame: igniters, knob visuals, flame animation.
+  update(dt) {
+    this.flameMat.uniforms.uTime.value = Sim.clock;
+    for (const k of this.knobs) {
+      if (k.ign > 0) {
+        k.ign -= dt; k.clickT -= dt;
+        if (k.clickT <= 0) { k.clickT = 0.11; AudioSys.igniterClick(Kitchen.burners[k.burner]); }
+        if (k.ign <= 0) { k.lit = true; AudioSys.ignite(Kitchen.burners[k.burner]); }
+      }
+      if (k.dirty) {
+        _m1.makeRotationZ(k.angle); _m1.setPosition(k.pos); Kitchen.knobs.setMatrixAt(k.i, _m1); Kitchen.knobs.instanceMatrix.needsUpdate = true; k.dirty = false;
+      }
+      const b = k.burner, f = k.lit ? this.powerFrac(k.angle) : 0, bp = Kitchen.burners[b];
+      if (f > 0) { const hs = 0.35 + 0.95 * f, rs = 0.85 + 0.2 * f; _m1.makeScale(rs, hs, rs); _m1.setPosition(bp.x, bp.y - 0.018, bp.z); }
+      else _m1.makeScale(0, 0, 0);
+      this.flames.setMatrixAt(b, _m1);
+    }
+    this.flames.instanceMatrix.needsUpdate = true;
+    Sizzle.update(dt);
+  },
+  // Fixed step: burners heat pans; pans lose heat to air and to their contents (food energy from Foods.simTick).
+  simTick(dt) {
+    const S = CONFIG.stove;
+    for (const p of this.pans) {
+      if (!p.alive) continue;
+      const pd = p.def.pan, pt = p.thermo;
+      _v1.set(pd.c[0], pd.c[1] - 0.006, pd.c[2]).applyQuaternion(p.renderQuat).add(p.renderPos); // outer bottom centre
+      let W = 0; p.onBurner = -1;
+      for (let b = 0; b < 4; b++) {
+        const bp = Kitchen.burners[b], dx = _v1.x - bp.x, dz = _v1.z - bp.z, dy = _v1.y - bp.y;
+        if (dx * dx + dz * dz < S.panReach * S.panReach && dy > -0.02 && dy < S.panGap) { W = this.burnerW(b); p.onBurner = b; break; }
+      }
+      pt.step(dt, W, p.foodJ || 0);
+      // Smoke: nonstick past its safe limit, or any bare pan well past smoking hot.
+      const smoke = Math.max(pt.smoke, clamp((pt.T - 330) / 60, 0, 1));
+      p.smokeAcc = (p.smokeAcc || 0) + smoke * dt * 10;
+      while (p.smokeAcc > 1) { p.smokeAcc -= 1; _v2.set(pd.c[0] + (Math.random() - 0.5) * pd.r, pd.c[1] + 0.01, pd.c[2] + (Math.random() - 0.5) * pd.r).applyQuaternion(p.renderQuat).add(p.renderPos); Particles.emit('smoke', _v2.x, _v2.y, _v2.z); }
+      // Sizzle target: evaporation (wet food hitting hot metal is LOUD) + hot dry contact.
+      const Z = CONFIG.sizzle, contactFrac = clamp(p.contactArea / (Math.PI * pd.r * pd.r), 0, 1);
+      p.sizzle = clamp(Math.sqrt((p.evap || 0) / Z.evapRef), 0, 1) + Z.dryRef * contactFrac * clamp((pt.T - 120) / 120, 0, 1);
+      if (p.sizzle > 0.05) for (const h of p.holders) if (h.side && !h.isTongs) haptic(h.side, Math.min(0.6, p.sizzle * 0.45), 60);
+    }
+  },
+  refreshPans() { this.pans.length = 0; for (const p of Props.list) if (p.alive && p.thermo) this.pans.push(p); },
+};
+
+/* ====================================== [SIZZLE] ==================================== */
+// One continuous filtered-noise voice per pan (spatialised), plus random fat pops.
+const Sizzle = {
+  voices: new Map(),
+  voiceFor(p) {
+    let v = this.voices.get(p); if (v || !AudioSys.ready) return v;
+    const c = AudioSys.ctx, src = c.createBufferSource(); src.buffer = AudioSys.noise; src.loop = true;
+    const hp = c.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 1800;
+    const pk = c.createBiquadFilter(); pk.type = 'peaking'; pk.frequency.value = 4200; pk.Q.value = 0.8; pk.gain.value = 6;
+    const g = c.createGain(); g.gain.value = 0;
+    const pan = new PannerNode(c, { panningModel: 'HRTF', distanceModel: 'inverse', refDistance: 0.5, rolloffFactor: 1.1 });
+    src.connect(hp); hp.connect(pk); pk.connect(g); g.connect(pan); pan.connect(AudioSys.sfx); src.start(0, Math.random());
+    v = { src, hp, pk, g, pan, level: 0, popT: 0 }; this.voices.set(p, v); return v;
+  },
+  update(dt) {
+    if (!AudioSys.ready) return;
+    const t = AudioSys.ctx.currentTime;
+    for (const p of Stove.pans) {
+      const target = clamp(p.sizzle || 0, 0, 1.3);
+      let v = this.voices.get(p);
+      if (!v && target < 0.03) continue;
+      v = this.voiceFor(p); if (!v) continue;
+      v.level += (target - v.level) * Math.min(1, dt * (target > v.level ? 12 : 2.5)); // fast attack, slow settle
+      const heat = clamp((p.thermo.T - 100) / 180, 0, 1);
+      v.g.gain.setTargetAtTime(v.level * CONFIG.sizzle.maxGain, t, 0.03);
+      v.hp.frequency.setTargetAtTime(1200 + heat * 1800, t, 0.1);
+      v.pk.frequency.setTargetAtTime(3200 + heat * 2600, t, 0.1);
+      _v1.set(p.def.pan.c[0], p.def.pan.c[1], p.def.pan.c[2]).applyQuaternion(p.renderQuat).add(p.renderPos);
+      v.pan.positionX.setTargetAtTime(_v1.x, t, 0.02); v.pan.positionY.setTargetAtTime(_v1.y, t, 0.02); v.pan.positionZ.setTargetAtTime(_v1.z, t, 0.02);
+      v.popT -= dt;
+      if (v.level > 0.12 && v.popT <= 0) { v.popT = 0.03 + Math.random() * 0.25 / v.level; AudioSys.pop(_v1, v.level); }
+    }
+    for (const [p, v] of this.voices) if (!p.alive) { try { v.src.stop(); v.pan.disconnect(); } catch (e) { /* gone */ } this.voices.delete(p); }
+  },
+};
+
+/* ===================================== [PARTICLES] ================================== */
+// Pooled, instanced camera-facing puffs (steam, smoke). One draw call.
+const Particles = {
+  n: 0,
+  init() {
+    const M = CONFIG.particles.max;
+    this.max = M; this.pos = new Float32Array(M * 3); this.vel = new Float32Array(M * 3); this.life = new Float32Array(M); this.maxLife = new Float32Array(M);
+    this.s0 = new Float32Array(M); this.s1 = new Float32Array(M); this.col = new Float32Array(M * 4); this.a0 = new Float32Array(M);
+    const g = new THREE.PlaneGeometry(1, 1);
+    this.iCol = new THREE.InstancedBufferAttribute(new Float32Array(M * 4), 4); this.iCol.setUsage(THREE.DynamicDrawUsage);
+    g.setAttribute('iCol', this.iCol);
+    const mat = new THREE.ShaderMaterial({
+      vertexShader: `attribute vec4 iCol; varying vec4 vC; varying vec2 vUv;
+        void main(){ vUv = uv; vC = iCol; vec3 c = (instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz; float s = length(instanceMatrix[0].xyz);
+          vec4 mv = modelViewMatrix * vec4(c, 1.0); mv.xy += position.xy * s; gl_Position = projectionMatrix * mv; }`,
+      fragmentShader: `varying vec4 vC; varying vec2 vUv;
+        void main(){ vec2 d = vUv - 0.5; float r = length(d) * 2.0; float n = 0.85 + 0.15 * sin(vUv.x * 13.0 + vUv.y * 9.0);
+          float a = smoothstep(1.0, 0.1, r) * vC.a * n; if (a < 0.005) discard; gl_FragColor = vec4(vC.rgb, a); }`,
+      transparent: true, depthWrite: false,
+    });
+    this.mesh = new THREE.InstancedMesh(g, mat, M); this.mesh.count = 0; this.mesh.frustumCulled = false; this.mesh.renderOrder = 8;
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    scene.add(this.mesh);
+  },
+  types: {
+    steam: { col: [0.96, 0.96, 0.96], a: 0.2, life: 1.5, s0: 0.02, s1: 0.13, vy: 0.32, spread: 0.06 },
+    smoke: { col: [0.33, 0.31, 0.3], a: 0.32, life: 3.2, s0: 0.03, s1: 0.26, vy: 0.2, spread: 0.05 },
+  },
+  emit(type, x, y, z) {
+    if (!this.pos || this.n >= this.max) return;
+    const T = this.types[type], i = this.n++;
+    this.pos[i * 3] = x; this.pos[i * 3 + 1] = y; this.pos[i * 3 + 2] = z;
+    this.vel[i * 3] = (Math.random() - 0.5) * T.spread; this.vel[i * 3 + 1] = T.vy * (0.7 + Math.random() * 0.6); this.vel[i * 3 + 2] = (Math.random() - 0.5) * T.spread;
+    this.life[i] = 0; this.maxLife[i] = T.life * (0.75 + Math.random() * 0.5); this.s0[i] = T.s0; this.s1[i] = T.s1 * (0.8 + Math.random() * 0.4);
+    this.col[i * 4] = T.col[0]; this.col[i * 4 + 1] = T.col[1]; this.col[i * 4 + 2] = T.col[2]; this.a0[i] = T.a;
+  },
+  update(dt) {
+    let i = 0;
+    const P = this.pos, V = this.vel, L = this.life, ML = this.maxLife, C = this.col, ic = this.iCol.array;
+    while (i < this.n) {
+      L[i] += dt;
+      if (L[i] >= ML[i]) { // swap-remove
+        const j = --this.n;
+        P[i * 3] = P[j * 3]; P[i * 3 + 1] = P[j * 3 + 1]; P[i * 3 + 2] = P[j * 3 + 2]; V[i * 3] = V[j * 3]; V[i * 3 + 1] = V[j * 3 + 1]; V[i * 3 + 2] = V[j * 3 + 2];
+        L[i] = L[j]; ML[i] = ML[j]; this.s0[i] = this.s0[j]; this.s1[i] = this.s1[j]; this.a0[i] = this.a0[j];
+        C[i * 4] = C[j * 4]; C[i * 4 + 1] = C[j * 4 + 1]; C[i * 4 + 2] = C[j * 4 + 2]; continue;
+      }
+      const t = L[i] / ML[i];
+      V[i * 3] += (Math.sin(L[i] * 3 + i) * 0.04) * dt; V[i * 3 + 2] += (Math.cos(L[i] * 2.7 + i) * 0.04) * dt; V[i * 3 + 1] *= 1 - dt * 0.3;
+      P[i * 3] += V[i * 3] * dt; P[i * 3 + 1] += V[i * 3 + 1] * dt; P[i * 3 + 2] += V[i * 3 + 2] * dt;
+      const s = lerp(this.s0[i], this.s1[i], Math.sqrt(t));
+      _m1.makeScale(s, s, s); _m1.setPosition(P[i * 3], P[i * 3 + 1], P[i * 3 + 2]); this.mesh.setMatrixAt(i, _m1);
+      ic[i * 4] = C[i * 4]; ic[i * 4 + 1] = C[i * 4 + 1]; ic[i * 4 + 2] = C[i * 4 + 2]; ic[i * 4 + 3] = this.a0[i] * smoothstep(0, 0.12, t) * (1 - smoothstep(0.55, 1, t));
+      i++;
+    }
+    this.mesh.count = this.n; this.mesh.instanceMatrix.needsUpdate = true; this.iCol.needsUpdate = true;
+  },
+};
+
+/* ===================================== [CHEF'S EYE] ================================= */
+// X-ray overlay: hovering food shows core/surface temperature, moisture and browning per face + the node profile.
+const fmtT = (c) => (settings.tempUnit === 'F' ? `${(c * 9 / 5 + 32).toFixed(0)}°F` : `${c.toFixed(1)}°C`);
+const ChefEye = {
+  target: null, t: 0,
+  init() {
+    this.canvas = Tex.canvas(512, 400); this.ctx = this.canvas.getContext('2d');
+    this.tex = Tex.finish(this.canvas); this.tex.wrapS = this.tex.wrapT = THREE.ClampToEdgeWrapping;
+    const [w, h] = CONFIG.chefsEye.size;
+    this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: this.tex, transparent: true, depthTest: false, toneMapped: false }));
+    this.mesh.renderOrder = 40; this.mesh.visible = false; scene.add(this.mesh);
+  },
+  pick() {
+    const isT = (p) => p && p.alive && (p.th || p.thermo);
+    if (Input.mode === 'xr') {
+      for (const h of [Hands.dominant(), Hands.offhand()]) {
+        if (!h.active) continue;
+        if (isT(h.held)) return h.held;
+        if (isT(h.hover)) return h.hover;
+      }
+      const h = Hands.dominant();
+      if (h.active && !h.uiHover) { const hit = Phys.castRay(h.rayOrigin, h.rayDir, 3, GROUPS.qPoint, _v1, null); const p = hit && Phys.propByCollider.get(hit.collider.handle); if (isT(p)) return p; }
+      return null;
+    }
+    const h = Hands.dominant(); if (isT(h.held)) return h.held;
+    Loco.updateHead(); _v2.set(0, 0, -1).applyQuaternion(Loco.headQuat);
+    const hit = Phys.castRay(Loco.headPos, _v2, 3, GROUPS.qPoint, _v1, null); const p = hit && Phys.propByCollider.get(hit.collider.handle);
+    return isT(p) ? p : null;
+  },
+  update(dt) {
+    if (!settings.chefsEye) { this.mesh.visible = false; this.target = null; return; }
+    const tgt = this.pick();
+    if (tgt !== this.target) { this.target = tgt; this.t = 1; }
+    if (!tgt) { this.mesh.visible = false; return; }
+    this.mesh.visible = true;
+    Loco.updateHead();
+    this.mesh.position.copy(tgt.renderPos); this.mesh.position.y += 0.17;
+    _v1.subVectors(Loco.headPos, this.mesh.position).normalize(); this.mesh.position.addScaledVector(_v1, 0.06);
+    this.mesh.lookAt(Loco.headPos);
+    this.t += dt;
+    if (this.t >= 1 / CONFIG.chefsEye.redrawHz) { this.t = 0; this.draw(tgt); }
+  },
+  bar(x, y, w, v, col) { const c = this.ctx; c.fillStyle = '#3b2e25'; c.fillRect(x, y, w, 10); c.fillStyle = col; c.fillRect(x, y, w * clamp(v, 0, 1), 10); },
+  draw(p) {
+    const c = this.ctx; c.clearRect(0, 0, 512, 400);
+    c.fillStyle = 'rgba(20,14,10,0.9)'; c.beginPath(); c.roundRect(2, 2, 508, 396, 18); c.fill();
+    c.strokeStyle = 'rgba(127,227,255,0.6)'; c.lineWidth = 3; c.stroke();
+    c.textBaseline = 'middle'; c.fillStyle = '#7fe3ff'; c.font = '700 26px system-ui'; c.textAlign = 'left';
+    if (p.thermo && !p.th) {
+      const t = p.thermo; c.fillText(`${p.def.name}`, 20, 32);
+      c.fillStyle = '#f4e9d8'; c.font = '600 24px system-ui';
+      c.fillText(`Cooking surface  ${fmtT(t.T)}`, 20, 80); c.fillText(`Pan body  ${fmtT(t.Tb)}`, 20, 116);
+      c.fillText(`Burner  ${p.onBurner >= 0 ? (Stove.burnerW(p.onBurner) / 1000).toFixed(1) + ' kW' : 'off / not on a burner'}`, 20, 152);
+      c.fillText(`Absorbed  ${t.power.toFixed(0)} W   → food ${t.foodW.toFixed(0)} W`, 20, 188);
+      c.fillText(`Food contact  ${(p.contactArea * 1e4).toFixed(0)} cm²   steam ${((p.evap || 0) * 1000).toFixed(2)} g/s`, 20, 224);
+      if (t.T > t.def.maxSafe) { c.fillStyle = '#ff8a70'; c.fillText(`Above safe limit (${fmtT(t.def.maxSafe)})!`, 20, 266); }
+      c.fillStyle = '#b7a58f'; c.font = '500 20px system-ui'; c.fillText(t.T < 150 ? 'Not hot enough to sear yet.' : t.T < 200 ? 'Hot: good for sautéing.' : 'Ripping hot: sear away.', 20, 320);
+      this.tex.needsUpdate = true; return;
+    }
+    const th = p.th, F = th.faces, fd = p.fdef;
+    let title = fd.name;
+    if (fd.look === 'beef') title += ` · ${beefDoneness(th.coreMax)}`;
+    if (p.isPuddle) title = `Egg · white ${Math.round(th.cook.set * 100)}% set · yolk ${Math.round(p.yolk.cook.set * 100)}% set`;
+    if (fd.look === 'onion') title += ` · sweat ${Math.round((th.cook.sweat || 0) * 100)}%`;
+    if (p.isPile) title = p.def.name;
+    c.fillText(title, 20, 30);
+    c.fillStyle = '#f4e9d8'; c.font = '600 22px system-ui';
+    c.fillText(`Core ${fmtT(th.core)}   peak ${fmtT(th.coreMax)}`, 20, 64);
+    c.fillStyle = '#b7a58f'; c.font = '500 17px system-ui';
+    c.fillText(`${(th.mass * 1000).toFixed(0)} g · juicy ${(th.juiciness() * 100).toFixed(0)}%${p.inPan ? ' · in pan (' + fmtT(p.inPan.thermo.T) + ')' : ''}`, 20, 92);
+    const names = th.geo.shape === 'sphere' ? ['Surface'] : ['Bottom', 'Top', 'Sides'];
+    const faceIdx = th.geo.shape === 'sphere' ? [0] : [0, 1, 2];
+    const COLS = [20, 118, 222, 318, 414];
+    c.font = '600 16px system-ui'; c.fillStyle = '#b7a58f';
+    ['face', 'surface', 'moisture', 'browning', 'char'].forEach((h, i) => c.fillText(h, COLS[i], 122));
+    faceIdx.forEach((fi, r) => {
+      const f = F[fi], y = 148 + r * 30; if (f.area <= 0) return;
+      const dn = p.downFace === fi && p.inPan;
+      c.fillStyle = dn ? '#ffb35c' : '#f4e9d8'; c.font = '600 17px system-ui'; c.fillText(names[r] + (dn ? ' ▼' : ''), COLS[0], y);
+      c.fillText(fmtT(f.Ts ?? th.surfaceT(fi)), COLS[1], y);
+      this.bar(COLS[2], y - 5, 84, f.wet / 0.12, '#6fb7ff'); this.bar(COLS[3], y - 5, 84, f.brown, '#c07a3a'); this.bar(COLS[4], y - 5, 76, f.char, '#777');
+    });
+    // Node profile: current (solid) and peak (dashed); doneness reference lines for beef.
+    const gx = 20, gy = 244, gw = 472, gh = 124, N = th.N;
+    let lo = 0, hi = 110; for (let i = 0; i < N; i++) hi = Math.max(hi, th.Tmax[i] + 10);
+    const X = (i) => gx + (i / (N - 1)) * gw, Y = (t) => gy + gh - ((t - lo) / (hi - lo)) * gh;
+    c.fillStyle = '#231a14'; c.fillRect(gx, gy, gw, gh);
+    if (fd.look === 'beef') for (const [t, col] of [[52, '#a33'], [57, '#d66'], [63, '#c99'], [70, '#999']]) { c.strokeStyle = col; c.lineWidth = 1; c.beginPath(); c.moveTo(gx, Y(t)); c.lineTo(gx + gw, Y(t)); c.stroke(); }
+    c.strokeStyle = '#555'; c.beginPath(); c.moveTo(gx, Y(100)); c.lineTo(gx + gw, Y(100)); c.stroke();
+    c.setLineDash([6, 5]); c.strokeStyle = '#ffb35c'; c.lineWidth = 2; c.beginPath(); for (let i = 0; i < N; i++) (i ? c.lineTo : c.moveTo).call(c, X(i), Y(th.Tmax[i])); c.stroke();
+    c.setLineDash([]); c.strokeStyle = '#7fe3ff'; c.lineWidth = 3; c.beginPath(); for (let i = 0; i < N; i++) (i ? c.lineTo : c.moveTo).call(c, X(i), Y(th.T[i])); c.stroke();
+    c.fillStyle = '#b7a58f'; c.font = '500 15px system-ui';
+    c.fillText(th.geo.shape === 'sphere' ? 'centre → surface' : 'bottom → top', gx + 4, gy + gh + 14);
+    c.textAlign = 'right'; c.fillText(`— now   - - peak   ${th.lastSubsteps || 1} substeps`, gx + gw, gy + gh + 14);
+    this.tex.needsUpdate = true;
+  },
+};
+
+/* ===================================== [TEST MODE] ================================== */
+// ?test in the URL runs the headless thermal scenarios and prints a pass/fail table.
+const TestMode = {
+  run() {
+    const res = runThermalTests();
+    window.MEP_TEST_RESULTS = res;
+    const pass = res.filter((r) => r.pass).length;
+    const el = document.createElement('div');
+    el.id = 'testmode';
+    el.style.cssText = 'position:fixed;inset:12px;z-index:50;overflow:auto;background:rgba(18,12,9,.96);border:1px solid #e0a458;border-radius:14px;padding:18px;font:14px system-ui;color:#f4e9d8';
+    el.innerHTML = `<h2 style="margin:0 0 6px">TEST MODE: thermal scenarios <span style="color:${pass === res.length ? '#8f8' : '#f77'}">${pass}/${res.length} passed</span></h2>
+      <p style="color:#b7a58f;margin:0 0 12px">Headless runs of the same ThermalSim code used in the game (no rendering or physics). Close this panel to play.</p>
+      <table style="border-collapse:collapse;width:100%">${res.map((r) => `<tr style="border-top:1px solid #3d2f24">
+        <td style="padding:8px;font-weight:800;color:${r.pass ? '#8f8' : '#f77'}">${r.pass ? 'PASS' : 'FAIL'}</td>
+        <td style="padding:8px;white-space:nowrap;color:#e0a458">${r.id}</td><td style="padding:8px"><b>${r.name}</b><br><span style="color:#b7a58f">${r.detail}</span></td>
+        <td style="padding:8px;color:#b7a58f;white-space:nowrap">${r.ms.toFixed(0)} ms</td></tr>`).join('')}</table>
+      <button id="testClose" style="margin-top:14px;padding:10px 18px;border-radius:10px;border:0;background:#e0a458;font-weight:700">Close</button>`;
+    document.body.appendChild(el);
+    el.querySelector('#testClose').onclick = () => el.remove();
+    console.table(res.map((r) => ({ id: r.id, pass: r.pass, detail: r.detail })));
+    return res;
   },
 };
 
@@ -2133,8 +3740,10 @@ const Grab = {
     // Hand position expressed in the prop frame (for two-handed solving).
     _q1.copy(h.offQuat).invert(); h.localHand.copy(h.offPos).applyQuaternion(_q1).negate();
     prop.holders.push(h);
+    if (prop.holders.length === 2 && prop.isFood && prop.fdef.look === 'onion' && !prop.peeled) h.peelStart = prop.holders[0].targetPos.distanceTo(h.targetPos);
+    else h.peelStart = -1;
     if (prop.holders.length === 1) {
-      prop.setGroups(GROUPS.held); prop.body.setGravityScale(0, true); prop.body.wakeUp();
+      prop.setHeld(true); prop.body.setGravityScale(0, true); prop.body.wakeUp();
       this.computeTarget(prop); if (snap) prop.renderPos.copy(prop.targetPos), prop.renderQuat.copy(prop.targetQuat);
     }
     prop.setHighlight(false);
@@ -2154,7 +3763,7 @@ const Grab = {
       return;
     }
     prop.hasTarget = false;
-    prop.setGroups(GROUPS.prop); prop.body.setGravityScale(1, true); prop.body.wakeUp();
+    prop.setHeld(false); prop.body.setGravityScale(1, true); prop.body.wakeUp();
     if (doThrow) {
       h.throwVelocity(_v1, _v2);
       prop.body.worldCom(_v3); _v4.subVectors(_v3, h.targetPos);
@@ -2202,10 +3811,20 @@ const Grab = {
     const H = CONFIG.hands;
     for (const h of HANDS) {
       const inp = h.input;
-      if (!h.active) { if (h.hover) { h.hover.setHighlight(false); h.hover = null; } continue; }
+      if (!h.active) { if (h.hover) { h.hover.setHighlight(false); h.hover = null; } if (h.knob) { h.knob.grab = null; h.knob = null; } continue; }
+      // Twisting a stove knob: the wrist roll about the knob axis (+Z) drives the knob angle.
+      if (h.knob) {
+        if (inp.gripReleased) { h.knob.grab = null; h.knob = null; }
+        else { let da = this.rollOf(h) - h.knobRoll0; da = Math.atan2(Math.sin(da), Math.cos(da)); if (Math.abs(da) > 0.02) { h.knobRoll0 += da; Stove.setAngle(h.knob, h.knob.angle + da); } }
+        continue;
+      }
       // Held props follow the hand(s)
       if (h.held) {
         if (h.held.holders[0] === h) this.computeTarget(h.held);
+        // Peel an onion by pulling its skin away with the second hand.
+        if (h.peelStart > 0 && h.held.holders.length === 2 && h.held.holders[1] === h && !h.held.peeled) {
+          if (h.held.holders[0].targetPos.distanceTo(h.targetPos) - h.peelStart > 0.06) { h.peelStart = -1; Foods.peel(h.held, h); haptic(h.side, 0.5, 40); continue; }
+        }
         if (inp.gripReleased) this.release(h, true);
         else if (inp.trigPressed && !h.uiHover && h.held.def.use) h.held.def.use(h.held, h);
         continue;
@@ -2215,6 +3834,10 @@ const Grab = {
       if (near !== h.hover) { if (h.hover && !this.isTargeted(h.hover, h)) h.hover.setHighlight(false); h.hover = near; }
       if (near) near.setHighlight(true);
       if (inp.gripPressed && !h.uiHover) {
+        const knob = Stove.knobNear(h.grabPoint(_v1), 0.05);
+        if (knob && (!near || knob.pos.distanceTo(_v1) < near.renderPos.distanceTo(_v1))) {
+          h.knob = knob; knob.grab = h; h.knobRoll0 = this.rollOf(h); haptic(h.side, 0.3, 18); continue;
+        }
         if (near) { this.attach(h, near); continue; }
         if (h.forceTarget) { h.forceArmed = h.forceTarget; haptic(h.side, 0.2, 15); }
         else if (settings.gripTriggerTeleport) h.gripTeleport = true;
@@ -2225,6 +3848,8 @@ const Grab = {
     // Clear stale highlights
     for (let i = 0; i < Props.list.length; i++) { const p = Props.list[i]; if (p.highlighted && !this.isTargeted(p, null)) p.setHighlight(false); }
   },
+  // Wrist roll about world +Z (the knob axis) from the hand's local X axis.
+  rollOf(h) { _v3.set(1, 0, 0).applyQuaternion(h.targetQuat); return Math.atan2(_v3.y, _v3.x); },
   // Force grab: point, hold grip, flick → the item arcs into your hand.
   updateForce(h, dt) {
     const H = CONFIG.hands, inp = h.input;
@@ -2534,7 +4159,7 @@ const Loco = {
 const UI = {
   open: false, mode: 'wrist', tab: 'Comfort', dirty: true,
   widgets: [], hoverId: null, drag: null, confirmReset: 0,
-  spawnCat: 'Tools', spawnQty: 1, peekT: 0, pointerHand: null, _cands: [null, null],
+  spawnCat: 'Food', spawnQty: 1, peekT: 0, pointerHand: null, _cands: [null, null],
   _inv: new THREE.Matrix4(), _n: new THREE.Vector3(), _c: new THREE.Vector3(), _hit: new THREE.Vector3(),
   init() {
     const S = CONFIG.ui.canvas;
@@ -2743,7 +4368,11 @@ const UI = {
     this.toggle('perf', X, y, half, 'Perf HUD', s.perfHud, (v) => this.set('perfHud', v));
     this.label('Refresh', X2, y + 28, 26, this.C.muted);
     this.segment('hz', X2 + 120, y + 4, half - 120, 48, [{ v: 72, l: '72 Hz' }, { v: 90, l: '90 Hz' }], s.refresh, (v) => { this.set('refresh', v); XRSession.applyRefresh(); });
-    y += 80;
+    y += 70;
+    this.toggle('chefsEye', X, y, half, "Chef's Eye (X-ray)", s.chefsEye, (v) => this.set('chefsEye', v));
+    this.label('Units', X2, y + 28, 26, this.C.muted);
+    this.segment('unit', X2 + 120, y + 4, half - 120, 48, [{ v: 'C', l: '°C' }, { v: 'F', l: '°F' }], s.tempUnit, (v) => this.set('tempUnit', v));
+    y += 74;
     this.label('Glove colour', X, y + 24, 26, this.C.muted);
     GLOVE_COLORS.forEach((col, i) => {
       const bx = X + 200 + i * 86, id = 'glove' + i;
@@ -2753,28 +4382,29 @@ const UI = {
     });
     y += 84;
     this.button('resetSettings', X, y, 300, 58, 'Reset settings', () => { Object.assign(settings, DEFAULT_SETTINGS); Loco.relayout(); settingsChanged(); }, { size: 24 });
-    y += 90;
+    y += 80;
     this.label('Controls', X, y, 26, this.C.accent, 'left', 700);
-    const lines = ['Grip: grab (big items take two hands). Trigger: use held item / click UI.',
-      'Point at a far item, hold grip and flick your wrist to pull it in.',
-      'Hold grip + trigger on an empty hand to point-teleport (if enabled).',
-      'Palm toward your face opens this menu. Y/B pins it in front of you.'];
-    lines.forEach((t, i) => this.label(t, X, y + 40 + i * 36, 21, this.C.muted, 'left', 500));
+    const lines = ['Grip: grab. Trigger: use held item (peel onion, crack egg, close tongs) / click UI.',
+      'Cut: push a knife edge down through food. Flat of the blade crushes garlic.',
+      'Stove: grip a knob and twist your wrist (off → HI → LO). Pat steak dry with towels.',
+      'Point + grip + flick = force grab. Palm to face opens this menu; Y/B pins it.'];
+    lines.forEach((t, i) => this.label(t, X, y + 36 + i * 32, 20, this.C.muted, 'left', 500));
   },
   drawSpawn(y) {
-    const X = 44, W = S_UI_W, cats = ['Tools', 'Cookware', 'Produce', 'Tableware', 'Misc'];
+    const X = 44, W = S_UI_W, cats = ['Food', 'Tools', 'Cookware', 'Produce', 'Tableware', 'Misc'];
     this.segment('cat', X, y, W, 52, cats.map((c) => ({ v: c, l: c })), this.spawnCat, (v) => { this.spawnCat = v; }, 24);
     y += 70;
     this.label('Quantity', X, y + 24, 26, this.C.muted);
     this.segment('qty', X + 140, y, 300, 48, [1, 3, 5].map((q) => ({ v: q, l: '×' + q })), this.spawnQty, (v) => { this.spawnQty = v; });
     y += 70;
-    const keys = Object.keys(PROP_DEFS).filter((k) => PROP_DEFS[k].cat === this.spawnCat);
+    const items = this.spawnCat === 'Food' ? Foods.catalog.map((f) => ({ k: f.key, name: f.name }))
+      : Object.keys(PROP_DEFS).filter((k) => PROP_DEFS[k].cat === this.spawnCat).map((k) => ({ k, name: PROP_DEFS[k].name }));
     const cols = 3, bw = (W - (cols - 1) * 14) / cols, bh = 70;
-    keys.forEach((k, i) => {
+    items.forEach((it, i) => {
       const cx = X + (i % cols) * (bw + 14), cy = y + Math.floor(i / cols) * (bh + 14);
-      this.button('spawn:' + k, cx, cy, bw, bh, PROP_DEFS[k].name, () => Spawner.spawnInFront(k, this.spawnQty), { size: 22 });
+      this.button('spawn:' + it.k, cx, cy, bw, bh, it.name, () => Spawner.spawnInFront(it.k, this.spawnQty), { size: 21 });
     });
-    this.label('Items appear in front of you. Food starts cooking in Milestone 2.', X, 950, 21, this.C.muted, 'left', 500);
+    this.label('Items appear in front of you. Fridge food starts at 4°C, pantry food at 21°C.', X, 950, 21, this.C.muted, 'left', 500);
   },
   drawRecipes(y) {
     const X = 44;
@@ -2801,9 +4431,9 @@ const UI = {
     y += 100;
     this.button('recenter2', X, y, half, 64, 'Return to start', () => Loco.recenter(), { size: 26 });
     y += 110;
-    this.label('Milestone 1 build', X, y, 28, this.C.accent, 'left', 700);
-    const lines = ['Kitchen, physics hands, grabbing & throwing, two-handed items,', 'force grab, full per-hand locomotion, wrist menu, desktop mode.',
-      'Next (M2): tools & cutting, stovetop, thermal simulation for steak,', 'egg and onion, sizzle audio, cut-face doneness gradient.'];
+    this.label('Milestone 2 build', X, y, 28, this.C.accent, 'left', 700);
+    const lines = ['Tools & cutting (slices keep their thermal state), minced piles, garlic crush,', 'gas range with twist knobs, pan thermal nodes, 1D food thermal sim,',
+      'steak / egg / onion, Maillard browning & char, sizzle, smoke & steam, Chef\'s Eye.', 'Next (M3): thermometer, oven, water & boiling, pasta, liquids, butter.'];
     lines.forEach((t, i) => this.label(t, X, y + 44 + i * 36, 22, this.C.muted, 'left', 500));
     this.label(`Props: ${Props.list.length}`, X + W, y, 22, this.C.muted, 'right', 500);
   },
@@ -2817,7 +4447,8 @@ const Spawner = {
     for (let i = 0; i < qty; i++) {
       const off = (i - (qty - 1) / 2) * 0.16;
       const pos = new THREE.Vector3(Loco.headPos.x + fx * 0.5 + rx * off, Math.max(Loco.headPos.y - 0.3, 1.05) + i * 0.02, Loco.headPos.z + fz * 0.5 + rz * off);
-      Props.spawn(key, pos, new THREE.Quaternion().setFromAxisAngle(UP, yaw), true);
+      const q = new THREE.Quaternion().setFromAxisAngle(UP, yaw);
+      if (!Foods.spawn(key, pos, q, true)) Props.spawn(key, pos, q, true);
     }
     UI.dirty = true;
   },
@@ -2833,7 +4464,17 @@ const Sim = {
     const step = 1 / CONFIG.sim.hz;
     this.acc += dt * this.timeScale;
     let n = 0;
-    while (this.acc >= step && n < 50) { this.time += step; Props.tick(step); this.acc -= step; n++; }
+    // Time acceleration takes more fixed steps; it never takes larger (unstable) ones.
+    while (this.acc >= step && n < 50) {
+      this.time += step;
+      Stove.refreshPans();
+      if (!this._food) { this._food = Foods.simTick.bind(Foods); this._stove = Stove.simTick.bind(Stove); }
+      safe('foodSim', this._food, step);   // food contacts + thermal steps (draw energy from pans)
+      safe('stoveSim', this._stove, step); // burners heat pans; pans lose to air and contents
+      Props.tick(step);
+      this.acc -= step; n++;
+    }
+    if (n >= 50) this.acc = 0;
   },
 };
 
@@ -2854,6 +4495,7 @@ const Desktop = {
     document.addEventListener('mousemove', (e) => {
       if (Input.mode !== 'desktop') return;
       if (this.locked) {
+        if (this.knob) { Stove.setAngle(this.knob, this.knob.angle - e.movementX * 0.012 + e.movementY * 0.006); return; }
         if (this.rDown && Hands.dominant().held) { this.rotateHeld(e.movementX, e.movementY); return; }
         rig.rotation.y -= e.movementX * D.mouseSens;
         this.pitch = clamp(this.pitch - e.movementY * D.mouseSens, -1.45, 1.45);
@@ -2868,6 +4510,7 @@ const Desktop = {
     });
     window.addEventListener('mouseup', (e) => {
       if (e.button === 0) { if (this.lmbMenu) { this.lmbMenu = false; this._menuRelease = true; } if (this.lmb) this.lmbUp(); }
+      if (e.button === 2) this.rmbUp();
     });
     el.addEventListener('contextmenu', (e) => e.preventDefault());
     el.addEventListener('wheel', (e) => { if (Input.mode === 'desktop') this.holdDist = clamp(this.holdDist - Math.sign(e.deltaY) * 0.08, D.holdMin, D.holdMax); }, { passive: true });
@@ -2888,6 +4531,7 @@ const Desktop = {
         case 'KeyT': this.tHeld = true; break;
         case 'KeyR': this.rDown = true; break;
         case 'KeyF': this.forceGrab(); break;
+        case 'KeyX': settings.chefsEye = !settings.chefsEye; settingsChanged(); toast(settings.chefsEye ? "Chef's Eye on" : "Chef's Eye off", 900); break;
       }
     });
     window.addEventListener('keyup', (e) => {
@@ -2914,6 +4558,17 @@ const Desktop = {
     const held = !!dom.held, dist = held ? this.holdDist : CONFIG.desktop.holdRest, tuck = UI.open ? 0.22 : 0; // tuck hands away while the menu is open
     dom.targetPos.copy(hp).addScaledVector(this._fwd, dist).addScaledVector(this._right, s * (held ? 0.04 : 0.16)).addScaledVector(this._up, (held ? -0.06 : -0.17) - tuck);
     dom.targetQuat.copy(hq).multiply(this._pitchQ);
+    // Desktop chop / crush: a quick downward stroke of the held knife (flat of the blade for crush).
+    if (this.chopT > 0 && dom.held && dom.held.def.knife) {
+      this.chopT = Math.max(0, this.chopT - frameDt); const u = 1 - this.chopT / this.chopDur, k = dom.held.def.knife;
+      // Level blade (head yaw only), edge down — or flat for a crush — hovering over the aim point, then a stroke down through it.
+      dom.targetQuat.setFromAxisAngle(UP, Loco.headYaw).multiply(this._pitchQ);
+      _q4.copy(dom.targetQuat).multiply(dom.offQuat);
+      if (this.crushMode) { _q4.multiply(_q2.setFromAxisAngle(_v8.set(0, 0, 1), Math.PI / 2)); dom.targetQuat.copy(_q4).multiply(_q2.copy(dom.offQuat).invert()); }
+      const lift = u < 0.2 ? 0.07 : u < 0.55 ? 0.07 - (u - 0.2) / 0.35 * 0.12 : -0.05 + (u - 0.55) / 0.45 * 0.12; // hover, fast stroke, lift
+      _v8.set(0, this.crushMode ? k.edgeY * 0.5 : k.edgeY, (k.heel + k.tip) / 2).applyQuaternion(_q4);
+      dom.targetPos.copy(this.chopAim).addScaledVector(UP, lift).sub(_v8).sub(_v7.copy(dom.offPos).applyQuaternion(dom.targetQuat));
+    }
     dom.rayOrigin.copy(hp); dom.rayDir.copy(this._fwd);
     off.targetPos.copy(hp).addScaledVector(this._fwd, 0.36).addScaledVector(this._right, -s * 0.2).addScaledVector(this._up, -0.26 - tuck);
     off.targetQuat.copy(hq).multiply(this._pitchQ);
@@ -2927,12 +4582,22 @@ const Desktop = {
     }
     if (hover !== this.hoverProp) { if (this.hoverProp) this.hoverProp.setHighlight(false); this.hoverProp = hover; }
     if (hover) hover.setHighlight(true);
-    if (!!hover !== this._hot) { this._hot = !!hover; $('crosshair').classList.toggle('hot', this._hot); }
+    const knobHot = !held && !UI.open && !!this.knobAtCrosshair();
+    if ((!!hover || knobHot) !== this._hot) { this._hot = !!hover || knobHot; $('crosshair').classList.toggle('hot', this._hot); }
+  },
+  // Ray from the view centre against the stove knobs (they are not physics bodies).
+  knobAtCrosshair() {
+    const o = Loco.headPos; _v6.set(0, 0, -1).applyQuaternion(Loco.headQuat);
+    let best = null, bt = 2.5;
+    for (const k of Stove.knobs) { _v7.subVectors(k.pos, o); const t = _v7.dot(_v6); if (t < 0 || t > bt) continue; if (_v7.addScaledVector(_v6, -t).length() < 0.03) { bt = t; best = k; } }
+    return best;
   },
   lmbDown() {
     this.lmb = true;
     const h = Hands.dominant(); if (h.held) return;
     Loco.updateHead();
+    const k = this.knobAtCrosshair();
+    if (k) { this.knob = k; k.grab = { side: null }; return; }
     const fwd = _v2.set(0, 0, -1).applyQuaternion(Loco.headQuat);
     const hit = Phys.castRay(Loco.headPos, fwd, CONFIG.desktop.reach, GROUPS.qPoint, _v1, null);
     if (!hit) return;
@@ -2945,8 +4610,25 @@ const Desktop = {
     h.snapBody(); h.resetHistory();
     Grab.attach(h, p);
   },
-  lmbUp() { this.lmb = false; const h = Hands.dominant(); if (h.held) Grab.release(h, true); },
-  rmbDown() { const h = Hands.dominant(); if (h.held && h.held.def.use) h.held.def.use(h.held, h); },
+  lmbUp() { this.lmb = false; if (this.knob) { this.knob.grab = null; this.knob = null; return; } const h = Hands.dominant(); if (h.held) Grab.release(h, true); },
+  chopT: 0, chopDur: 0.5, crushMode: false, chopAim: new THREE.Vector3(),
+  rmbDown() {
+    const h = Hands.dominant(), p = h.held; if (!p) return;
+    if (p.def.knife) {
+      if (this.chopT > 0) return;
+      // Aim the stroke at whatever the crosshair is on (food, board, counter) within reach.
+      Loco.updateHead(); _v2.set(0, 0, -1).applyQuaternion(Loco.headQuat);
+      const hit = Phys.castRay(Loco.headPos, _v2, CONFIG.desktop.reach, GROUPS.qPoint, this.chopAim, null);
+      if (!hit) return;
+      const f = Phys.propByCollider.get(hit.collider.handle);
+      if (f && f.isFood) this.chopAim.copy(f.renderPos); // centre the stroke on the food
+      this.chopT = this.chopDur; this.crushMode = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
+      return;
+    }
+    if (p.def.tongs) { p.forceClosed = true; return; }
+    if (p.def.use) p.def.use(p, h);
+  },
+  rmbUp() { const p = Hands.dominant().held; if (p && p.def.tongs) p.forceClosed = false; },
   rotateHeld(dx, dy) {
     const h = Hands.dominant(); if (!h.held) return;
     _q2.copy(h.targetQuat).invert();
@@ -3050,13 +4732,17 @@ const XRSession = {
 };
 
 /* ====================================== [MAIN] ====================================== */
-const Main = { last: performance.now(), physAcc: 0, started: false, calls: 0, tris: 0, stepIndex: 0, rescueT: 0 };
+const Main = { last: performance.now(), physAcc: 0, started: false, calls: 0, tris: 0, stepIndex: 0, rescueT: 0, impacts: [] };
 const PHYS_DT = 1 / CONFIG.physics.hz;
 
 function onContactForce(e) {
   const c1 = e.collider1(), c2 = e.collider2(), f = e.totalForceMagnitude();
   const p1 = Phys.propByCollider.get(c1), p2 = Phys.propByCollider.get(c2);
   const prop = p1 || p2; if (!prop) return;
+  // Food impacts (eggs crack on rims/counters) use each food's own velocity change. They are queued and
+  // handled after the event drain: bodies must not be created/removed while Rapier is draining events.
+  if (p1 && p1.isFood && Main.stepIndex - p1.lastContactStep > 3) Main.impacts.push(p1, p2, (f * PHYS_DT) / p1.mass);
+  if (p2 && p2.isFood && Main.stepIndex - p2.lastContactStep > 3) Main.impacts.push(p2, p1, (f * PHYS_DT) / p2.mass);
   const otherHandle = p1 ? c2 : c1, otherProp = p1 ? p2 : null;
   const fresh = Main.stepIndex - prop.lastContactStep > 3;
   prop.lastContactStep = Main.stepIndex;
@@ -3079,6 +4765,9 @@ function physicsStep(dt) {
   world.step(eventQueue);
   Main.stepIndex++;
   eventQueue.drainContactForceEvents(onContactForce);
+  const im = Main.impacts;
+  for (let i = 0; i < im.length; i += 3) if (im[i].alive) Foods.onImpact(im[i], im[i + 1], im[i + 2]);
+  im.length = 0;
   Props.capture(); Hands.capture();
 }
 
@@ -3088,7 +4777,7 @@ function frame() {
   const now = performance.now();
   let dt = (now - Main.last) / 1000; Main.last = now;
   if (!(dt > 0)) dt = 1 / 72; if (dt > 0.1) dt = 0.1;
-  Sim.clock += dt;
+  Sim.clock += dt; frameDt = dt;
   renderer.info.reset();
   if (renderer.xr.isPresenting) renderer.xr.updateCamera(camera);
   safe('desktop', U.desktop, dt);
@@ -3099,13 +4788,19 @@ function frame() {
   safe('handTargets', U.handTargets, dt);
   safe('ui', U.ui, dt);
   safe('grab', U.grab, dt);
+  safe('tongs', U.tongs, dt);
   const step = PHYS_DT; Main.physAcc += dt; let n = 0;
   while (Main.physAcc >= step && n < CONFIG.physics.maxSubSteps) { safe('physics', physicsStep, step); Main.physAcc -= step; n++; }
   if (Main.physAcc > step) Main.physAcc = step * 0.5;
   const alpha = Main.physAcc / step;
   safe('propsRender', U.propsRender, alpha);
   safe('handsRender', U.handsRender, alpha, dt);
+  safe('cutting', U.cutting, dt);
+  safe('piles', U.piles);
   safe('sim', U.sim, dt);
+  safe('stove', U.stove, dt);
+  safe('particles', U.particles, dt);
+  safe('chefsEye', U.chefsEye, dt);
   safe('clock', U.clock);
   safe('audio', U.audio, camera);
   safe('hud', U.hud, dt);
@@ -3124,7 +4819,12 @@ async function boot() {
     setStatus('Building the kitchen…'); await nextFrame();
     buildMaterials();
     Kitchen.build();
+    Stove.init();
+    Particles.init();
+    Foods.init();
+    ChefEye.init();
     Props.spawnInitial();
+    Foods.initial();
     Hands.init();
     UI.init();
     Loco.init();
@@ -3137,7 +4837,8 @@ async function boot() {
       ui: UI.update.bind(UI), grab: Grab.update.bind(Grab),
       propsRender: Props.render.bind(Props), handsRender: Hands.render.bind(Hands), sim: Sim.update.bind(Sim),
       clock: Kitchen.updateClock.bind(Kitchen), audio: AudioSys.updateListener.bind(AudioSys), hud: PerfHUD.update.bind(PerfHUD),
-      rescue: Props.rescue.bind(Props),
+      rescue: Props.rescue.bind(Props), tongs: Tongs.update.bind(Tongs), cutting: Cutting.update.bind(Cutting), piles: PileBits.update.bind(PileBits),
+      stove: Stove.update.bind(Stove), particles: Particles.update.bind(Particles), chefsEye: ChefEye.update.bind(ChefEye),
     });
     renderer.xr.addEventListener('sessionstart', () => XRSession.onStart());
     renderer.xr.addEventListener('sessionend', () => XRSession.onEnd());
@@ -3145,9 +4846,10 @@ async function boot() {
     const sp = CONFIG.player.spawn;
     rig.position.set(sp.x, 0, sp.z); rig.rotation.y = sp.yaw; camera.position.set(0, settings.targetEyeHeight, 0);
     rig.updateMatrixWorld(true); Loco.updateHead(); Loco.syncCapsule();
+    if (new URLSearchParams(location.search).has('test')) setTimeout(() => safe('testMode', () => TestMode.run()), 50);
     renderer.setAnimationLoop(frame);
     // Debug handle for the browser console (inspect state, tweak CONFIG live).
-    window.MEP = { THREE, RAPIER, CONFIG, resolveLayout, Nav, Phys, Main, PerfHUD, settings, scene, camera, rig, renderer, world, Hands, Props, Loco, UI, Grab, Input, Desktop, Sim, Kitchen, U };
+    window.MEP = { THREE, RAPIER, CONFIG, resolveLayout, Nav, Phys, Main, PerfHUD, THERMO, FOOD_DEFS, PAN_DEFS, Thermo, PanThermo, simPanCook, simRest, preheat, Foods, FoodPiece, Stove, Cutting, Tongs, Particles, ChefEye, TestMode, settings, scene, camera, rig, renderer, world, Hands, Props, Loco, UI, Grab, Input, Desktop, Sim, Kitchen, U };
 
     const btnVR = $('btnVR'), btnD = $('btnDesktop');
     btnD.disabled = false;
