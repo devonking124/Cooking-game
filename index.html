@@ -718,6 +718,7 @@ function buildMaterials() {
     steel: spec(0xdfe2e5, 0.3, 0.9, 'steel'), darkSteel: spec(0x252322, 0.55, 0.7), blackGlass: spec(0x0a0b0d, 0.06, 0.3),
     brass: spec(0xc9a25a, 0.28, 1.0), rubber: spec(0x1a1817, 0.85), painted: spec(0xffffff, 0.6),
     glow: spec(0xffd6a0, 0.9, 0, null, 2.4), oil: spec(0x5e3a06, 0.03, 0.15),
+    enamel: spec(0x1c2127, 0.22, 0.15),
   });
   // Prop surfaces
   Object.assign(MAT, {
@@ -728,6 +729,9 @@ function buildMaterials() {
     tomato: spec(0xffffff, 0.28, 0, 'tomato'), onion: spec(0xffffff, 0.6, 0, 'onion'), lemon: spec(0xffffff, 0.4, 0, 'lemon'),
     apple: spec(0xffffff, 0.3, 0, 'apple'), potato: spec(0xffffff, 0.85, 0, 'potato'), carrot: spec(0xffffff, 0.55, 0, 'carrot'),
     egg: spec(0xffffff, 0.5, 0, 'egg'), leaf: spec(0x3d7a2a, 0.6), paper: spec(0xf3f0ea, 0.95), onionSkin: spec(0xb07a42, 0.85),
+    oliveGlass: spec(0x2c3a12, 0.08, 0.2), oilPlastic: spec(0xe8c860, 0.25, 0.0), label: spec(0xf1e6c8, 0.8), labelRed: spec(0xb3302a, 0.7),
+    saltBlue: spec(0x2a5ea8, 0.55), ricePaper: spec(0xe9ddc4, 0.9), probe: spec(0xd8dde2, 0.2, 1.0), probeBody: spec(0xd8472e, 0.45),
+    lcd: spec(0xc7d3bf, 0.4), jugHandle: spec(0xdde7ea, 0.1, 0.0), dishCeramic: spec(0xf2ede4, 0.14),
   });
   // Real (non-uber) materials
   MAT.sky = new THREE.MeshBasicMaterial({ map: TEX.sky, color: 0xffffff });
@@ -907,6 +911,7 @@ const GROUPS = {
   qGrab: groups(G.HELD, G.PROP | G.HELD | G.FOOD),                     // grab sphere (includes items held by the other hand)
   qPoint: groups(G.HELD, G.PROP | G.STATIC | G.FOOD),                  // force-grab & desktop pointing (walls occlude)
   qFood: groups(G.HELD, G.FOOD),                                       // food-only queries
+  qPour: groups(G.HELD, G.PROP | G.STATIC | G.FOOD | G.HELD),         // pour streams / faucet / salt (held vessels catch too)
 };
 let world = null, eventQueue = null;
 const Phys = {
@@ -964,6 +969,9 @@ const THERMO = {
   stabilitySafety: 0.45,  // × — substep dt uses 45% of the explicit stability limit
   maxSubsteps: 400,
   wetDryLevel: 0.012,     // kg/m² — below this a surface counts as "dry" for browning
+  crowdFull: 0.45,
+  wetContactBoost: 3,     // × — a wet face conducts better against hot metal (water trapped underneath boils)
+  poolDepth: 0.00015,     // m — liquid depth in a pan above which food sits in a pool (stews, can't brown)        // × — share of a pan's floor covered by food at which it counts as fully crowded
   resFrac: 3,             // × — surface-layer water reservoir (× the layer's own water, i.e. incl. moisture wicked from deeper) —
                           //     large, so a seared layer stays water-bound near 100°C and only the crust skin runs hot
   layerEvap: 0.6,         // × — evaporation from a surface layer without a free film, relative to a wet film
@@ -986,6 +994,14 @@ const FOOD_DEFS = {
     brown: { T0: 999, k: 0 }, char: { T0: 999, k: 0 }, expel: null, contactQ: 1.0, protein: true, egg: true },
   onion: { name: 'Onion', look: 'onion', rho: 960, c: 3770, k: 0.5, water: 0.89, fat: 0.0, sugar: 0.06, nodes: 6, wet0: 0.0, T0: 21, hardness: 0.5,
     brown: { T0: 108, k: 0.0019 }, char: { T0: 175, k: 0.014 }, expel: { T0: 70, T1: 100, k: 0.004 }, contactQ: 0.9 },
+  mushroom: { name: 'Mushroom', look: 'mushroom', rho: 920, c: 3900, k: 0.45, water: 0.92, fat: 0.0, nodes: 5, wet0: 0.0, T0: 4, hardness: 0.3,
+    brown: { T0: 120, k: 0.006 }, char: { T0: 185, k: 0.014 }, expel: { T0: 45, T1: 80, k: 0.3 }, contactQ: 0.95 },
+  spaghetti: { name: 'Spaghetti', look: 'pasta', rho: 1400, c: 1800, k: 0.3, water: 0.1, fat: 0.0, nodes: 5, wet0: 0, T0: 21, hardness: 0.6,
+    brown: { T0: 140, k: 0.004 }, char: { T0: 190, k: 0.01 }, expel: null, contactQ: 0.4, pasta: { k: 0.0019, absorb: 1.4 } },
+  penne: { name: 'Penne', look: 'pasta', rho: 1400, c: 1800, k: 0.3, water: 0.1, fat: 0.0, nodes: 5, wet0: 0, T0: 21, hardness: 0.6,
+    brown: { T0: 140, k: 0.004 }, char: { T0: 190, k: 0.01 }, expel: null, contactQ: 0.4, pasta: { k: 0.0017, absorb: 1.3 } },
+  butter: { name: 'Butter', look: 'butter', rho: 911, c: 2100, k: 0.2, water: 0.16, fat: 0.82, nodes: 4, wet0: 0, T0: 4, hardness: 0.15,
+    brown: { T0: 999, k: 0 }, char: { T0: 999, k: 0 }, expel: null, contactQ: 1.0, melts: 32 },
   garlic: { name: 'Garlic Clove', look: 'garlic', rho: 1100, c: 3000, k: 0.45, water: 0.6, fat: 0.0, sugar: 0.1, nodes: 5, wet0: 0, T0: 21, hardness: 0.45,
     brown: { T0: 115, k: 0.004 }, char: { T0: 165, k: 0.02 }, expel: { T0: 70, T1: 100, k: 0.002 }, contactQ: 0.8 },
 };
@@ -999,9 +1015,14 @@ const PAN_DEFS = {
   sautePan: { name: 'Stainless', mass: 1.3, c: 500, coupling: 0.50, hContact: 390, emissivity: 0.3, area: 0.11, maxSafe: 450, bottomR: 0.11, surfFrac: 0.3, gSpread: 55 },
   nonstick: { name: 'Nonstick', mass: 0.95, c: 900, coupling: 0.52, hContact: 340, emissivity: 0.9, area: 0.11, maxSafe: 260, bottomR: 0.1, surfFrac: 0.3, gSpread: 80 },
   saucepan: { name: 'Saucepan', mass: 1.1, c: 500, coupling: 0.50, hContact: 380, emissivity: 0.3, area: 0.08, maxSafe: 450, bottomR: 0.085, surfFrac: 0.3, gSpread: 55 },
+  stockPot: { name: 'Stock pot', mass: 1.9, c: 500, coupling: 0.50, hContact: 380, emissivity: 0.3, area: 0.22, maxSafe: 450, bottomR: 0.106, surfFrac: 0.3, gSpread: 55 },
+  sheetPan: { name: 'Sheet pan', mass: 1.0, c: 900, coupling: 0.2, hContact: 300, emissivity: 0.5, area: 0.3, maxSafe: 400, rect: [0.44, 0.32], surfFrac: 0.5, gSpread: 160 },
+  bakingDish: { name: 'Baking dish', mass: 1.6, c: 850, coupling: 0.1, hContact: 200, emissivity: 0.9, area: 0.16, maxSafe: 500, rect: [0.27, 0.17], surfFrac: 0.4, gSpread: 12 },
 };
 
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
+// Effective food↔pan contact coefficient (W/m²K); wet faces conduct much better.
+function contactH(panDef, food, face) { return panDef.hContact * food.def.contactQ * (1 + THERMO.wetContactBoost * clamp01(food.faces[face].wet / 0.02)); }
 const sstep = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t); };
 
 // Doneness labels (beef) from a node's peak temperature.
@@ -1019,19 +1040,200 @@ class PanThermo {
   }
   get mean() { return (this.T * this.Cs + this.Tb * this.Cb) / (this.Cs + this.Cb); }
   set temp(v) { this.T = v; this.Tb = v; }
-  loss(T, A) { const Tk = T + 273.15, Ta = THERMO.Tamb + 273.15; return THERMO.hAirPan * A * (T - THERMO.Tamb) + this.def.emissivity * THERMO.sigma * A * (Tk * Tk * Tk * Tk - Ta * Ta * Ta * Ta); }
+  loss(T, A) {
+    const e = this.env, Te = e ? e.T : THERMO.Tamb, h = e ? e.h : THERMO.hAirPan, Tr = (e ? e.radT : THERMO.Tamb) + 273.15, Tk = T + 273.15;
+    return h * A * (T - Te) + this.def.emissivity * THERMO.sigma * A * (Tk * Tk * Tk * Tk - Tr * Tr * Tr * Tr);
+  }
+  bottomArea() { const d = this.def; return d.rect ? d.rect[0] * d.rect[1] : Math.PI * d.bottomR * d.bottomR; }
   // dt s, burnerW = raw burner output under this pan, foodJ = energy the food drew from the surface this step.
-  step(dt, burnerW, foodJ) {
-    const d = this.def, sub = Math.max(1, Math.ceil(dt / 0.05)), h = dt / sub;
-    this.power = burnerW * d.coupling;
+  // env (optional) = { T, h, radT } surroundings (oven cavity); contents = liquid/fat/rice in the vessel.
+  step(dt, burnerW, foodJ, env = null) {
+    const d = this.def, sub = Math.max(1, Math.ceil(dt / 0.05)), h = dt / sub, C = this.contents;
+    this.env = env; this.power = burnerW * d.coupling;
+    const A = this.bottomArea();
     for (let i = 0; i < sub; i++) {
       const flow = d.gSpread * (this.Tb - this.T);
       this.Tb += h * (this.power - flow - this.loss(this.Tb, d.area * (1 - d.surfFrac))) / this.Cb;
-      this.T += (h * (flow - this.loss(this.T, d.area * d.surfFrac)) - foodJ / sub) / this.Cs;
+      let toContents = 0;
+      // Pooled liquid only boils off where food isn't covering the pan (crowding traps it).
+      if (C && C.mass > 1e-6) toContents = C.step(h, this.T, C.hSurface() * A * C.coverage(A) * (1 - 0.95 * clamp01(this.covered || 0)), A, env ? env.T : THERMO.Tamb, i === 0 ? dt : 0);
+      this.T += (h * (flow - this.loss(this.T, d.area * d.surfFrac)) - toContents - foodJ / sub) / this.Cs;
     }
     this.foodW = foodJ / dt;
     if (this.T > d.maxSafe) this.damage = Math.min(1, this.damage + dt * (this.T - d.maxSafe) / 3000);
     this.smoke = clamp01((this.T - d.maxSafe) / 40);
+  }
+}
+
+/* ---------- vessel contents (liquids, fats, grains) ---------- */
+// Everything poured into a vessel shares one lumped node: masses per component (kg) + temperature.
+const COMP = {
+  water: { rho: 1000, c: 4180 }, oil: { rho: 915, c: 1970 }, butterfat: { rho: 911, c: 2100 }, milkSolids: { rho: 1200, c: 1500 },
+  salt: { rho: 2160, c: 880 }, riceDry: { rho: 800, c: 1600 }, riceWater: { rho: 1000, c: 4180 }, butterSolid: { rho: 911, c: 2100 },
+};
+const OILS = { olive: { name: 'Olive oil', smoke: 195 }, vegetable: { name: 'Vegetable oil', smoke: 205 }, peanut: { name: 'Peanut oil', smoke: 230 } };
+const LIQ = {
+  Lf: 80e3,            // J/kg — latent heat of fusion of butter (≈ fat fraction × 100 kJ/kg)
+  meltT: 32,           // °C — butter melting point
+  hWater: 1500,        // W/m²K — pan → water (nucleate boiling)
+  hOil: 350,           // W/m²K — pan → oil / melted butter
+  riceK: 0.0026,       // 1/s — rice hydration rate at 100°C (absorption method ≈ 18–20 min incl. heat-up)
+  riceAbsorb: 1.25,    // kg water per kg dry rice at full hydration
+  lidEvap: 0.12,       // × — evaporation with a lid on
+  lidLoss: 0.35,       // × — top heat loss with a lid on (traps steam)
+  lidSteam: 0.25,      // × — share of boiled-off steam that escapes a lidded pot
+  milkBrownK: 0.012,   // 1/s per 30°C above 115°C — milk-solid browning (beurre noisette)
+  burnT: 165,          // °C — milk solids burn above this
+};
+class Contents {
+  constructor(parts = null, T = THERMO.Tamb) {
+    this.m = { water: 0, oil: 0, butterfat: 0, milkSolids: 0, salt: 0, riceDry: 0, riceWater: 0, butterSolid: 0 };
+    this.T = T; this.oilType = 'olive'; this.brown = 0; this.burnt = 0; this.riceHyd = 0; this.scorch = 0;
+    this.evapRate = 0; this.smoke = 0; this.acrid = 0; this.lid = false; this.drawJ = 0; this.boiling = 0; this.foam = 0;
+    if (parts) this.add(parts, T);
+  }
+  get mass() { const m = this.m; return m.water + m.oil + m.butterfat + m.milkSolids + m.salt + m.riceDry + m.riceWater + m.butterSolid; }
+  get C() { let c = 0; for (const k in this.m) c += this.m[k] * COMP[k].c; return c; }
+  volume() { const m = this.m; return m.water / 1000 + m.oil / 915 + (m.butterfat + m.butterSolid) / 911 + m.milkSolids / 1200 + m.salt / 2160 + (m.riceDry + m.riceWater) / 850; }
+  liters() { return this.volume() * 1000; }
+  saltConc() { return this.m.water > 1e-6 ? this.m.salt / this.m.water : 0; } // kg salt per kg water
+  fatFrac() { const M = this.mass; return M > 0 ? (this.m.oil + this.m.butterfat) / M : 0; }
+  waterFrac() { const M = this.mass; return M > 0 ? this.m.water / M : 0; }
+  hSurface() { return this.waterFrac() > 0.3 ? LIQ.hWater : LIQ.hOil; }
+  // Share of the pan bottom actually wetted (a thin film only covers part of it).
+  coverage(A) { return clamp01(this.volume() / (A * 0.0008)); }
+  depth(A) { return this.volume() / Math.max(1e-6, A); }
+  add(parts, T) {
+    let Cadd = 0; for (const k in parts) if (COMP[k]) Cadd += parts[k] * COMP[k].c;
+    const Cold = this.C;
+    // Carry per-batch state (rice hydration, butter browning) as mass-weighted averages.
+    if (parts.riceDry > 0 && parts.riceHyd !== undefined) this.riceHyd = (this.riceHyd * this.m.riceDry + parts.riceHyd * parts.riceDry) / (this.m.riceDry + parts.riceDry);
+    if (parts.milkSolids > 0 && parts.brown !== undefined) { const w = parts.milkSolids / (this.m.milkSolids + parts.milkSolids); this.brown += (parts.brown - this.brown) * w; this.burnt += (parts.burnt - this.burnt) * w; }
+    for (const k in parts) if (COMP[k]) this.m[k] += parts[k];
+    if (parts.oilType) this.oilType = parts.oilType;
+    if (Cold + Cadd > 0) this.T = (Cold * this.T + Cadd * T) / (Cold + Cadd);
+  }
+  // Remove a volume (m³) proportionally; returns it as { parts, T } for a pour stream.
+  take(vol) {
+    const V = this.volume(); if (V <= 0) return null;
+    const f = Math.min(1, vol / V), parts = {};
+    for (const k in this.m) { if (k === 'butterSolid') continue; parts[k] = this.m[k] * f; this.m[k] -= parts[k]; }
+    parts.oilType = this.oilType;
+    return { parts, T: this.T, brown: this.brown };
+  }
+  // Allocation-free variant for per-frame pouring: fills `out` (component masses + T, oilType, batch state).
+  takeInto(vol, out) {
+    const V = this.volume(); if (V <= 0 || vol <= 0) return 0;
+    const f = Math.min(1, vol / V);
+    for (const k in this.m) { if (k === 'butterSolid') { out[k] = 0; continue; } const x = this.m[k] * f; out[k] = x; this.m[k] -= x; }
+    out.oilType = this.oilType; out.T = this.T; out.riceHyd = this.riceHyd; out.brown = this.brown; out.burnt = this.burnt;
+    return f * V;
+  }
+  // One substep. Tsurf = pan cooking surface, G = W/K pan→contents, area = pan bottom m², envT = air above.
+  // Returns J drawn from the pan surface. tickDt > 0 on the first substep of a sim tick (applies food draws).
+  step(dt, Tsurf, G, area, envT, tickDt = 0) {
+    const m = this.m, C = this.C; if (C <= 0) return 0;
+    const fromPan = G * (Tsurf - this.T) * dt;
+    let q = fromPan - (tickDt > 0 ? this.drawJ : 0);
+    if (tickDt > 0) this.drawJ = 0;
+    q -= 10 * area * (this.T - envT) * (this.lid ? LIQ.lidLoss : 1) * dt;
+    this.T += q / C;
+    // Solid butter melts (latent heat) before the mix can warm past 32°C.
+    if (m.butterSolid > 0 && this.T > LIQ.meltT) {
+      const ex = this.C * (this.T - LIQ.meltT), mm = Math.min(m.butterSolid, ex / LIQ.Lf);
+      m.butterSolid -= mm; m.butterfat += mm * 0.82; m.water += mm * 0.16; m.milkSolids += mm * 0.02;
+      this.T = LIQ.meltT + (ex - mm * LIQ.Lf) / this.C;
+    }
+    let evap = 0;
+    // Evaporation below the boil (much less with a lid).
+    if (m.water > 0 && this.T < 100) {
+      const e = Math.min(m.water, area * THERMO.airEvap * Math.exp((this.T - 100) / 19) * (this.lid ? LIQ.lidEvap : 1) * dt);
+      m.water -= e; evap += e; this.T -= e * THERMO.Lv / Math.max(1, this.C);
+    }
+    // Boiling: water pins the pot at 100°C; surplus energy boils water away (concentrating salt).
+    this.boiling = 0;
+    if (m.water > 0 && this.T > 100) {
+      const ex = this.C * (this.T - 100), e = Math.min(m.water, ex / THERMO.Lv);
+      // With a lid most steam condenses and drips back (its heat still leaves through the lid).
+      const lost = this.lid ? e * LIQ.lidSteam : e;
+      m.water -= lost; evap += lost; this.T = 100 + (ex - e * THERMO.Lv) / Math.max(1, this.C);
+      this.boiling = clamp01(e / dt / Math.max(1e-6, area * 0.012));
+    }
+    this.evapRate += (evap / dt - this.evapRate) * Math.min(1, dt * 4);
+    this.foam = m.butterfat > 0 && m.water > 1e-5 && this.T > 95 ? 1 : 0;
+    // Rice: absorbs water while hot and wet; once the water is gone the bottom scorches.
+    if (m.riceDry > 0) {
+      const k = LIQ.riceK * Math.exp((Math.min(this.T, 100) - 100) / 12) * (1 - this.riceHyd);
+      const need = m.riceDry * LIQ.riceAbsorb * k * dt, used = Math.min(m.water, need);
+      if (need > 0) this.riceHyd = Math.min(1, this.riceHyd + (used / (m.riceDry * LIQ.riceAbsorb)));
+      m.water -= used; m.riceWater += used;
+      if (m.water < m.riceDry * 0.03 && this.T > 104) this.scorch = Math.min(1, this.scorch + dt * (this.T - 104) / 1500);
+    }
+    // Butter: once its water has boiled off, milk solids brown (noisette) and then burn.
+    if (m.milkSolids > 0 && m.water < 1e-5) {
+      if (this.T > 115) this.brown = Math.min(1, this.brown + dt * LIQ.milkBrownK * (this.T - 115) / 30);
+      if (this.T > LIQ.burnT || this.brown > 0.9) this.burnt = Math.min(1, this.burnt + dt * Math.max(0, this.T - 150) / 400);
+    }
+    const sp = (m.oil > 0 ? OILS[this.oilType].smoke : 999), bsp = m.milkSolids > 0 && m.water < 1e-5 ? 150 : 999;
+    this.smoke = clamp01((this.T - Math.min(sp, bsp)) / 25);
+    this.acrid = Math.min(1, this.acrid + this.smoke * dt / 120);
+    return fromPan;
+  }
+  stage() {
+    if (this.m.butterSolid > 1e-4 && this.m.butterSolid > this.m.butterfat) return 'solid butter';
+    if (this.m.butterSolid > 1e-5) return 'melting';
+    if (this.m.butterfat > 0) {
+      if (this.burnt > 0.3) return 'burnt butter';
+      if (this.brown > 0.35) return 'beurre noisette';
+      if (this.foam) return 'foaming';
+      return 'melted butter';
+    }
+    if (this.m.riceDry > 0) return this.scorch > 0.3 ? 'scorched rice' : this.riceHyd > 0.9 ? 'cooked rice' : 'cooking rice';
+    if (this.m.water > 0) return this.T >= 99.5 ? (this.boiling > 0.5 ? 'rolling boil' : 'simmering') : this.T > 85 ? 'nearly boiling' : 'water';
+    if (this.m.oil > 0) return this.smoke > 0.1 ? 'smoking oil' : this.T > OILS[this.oilType].smoke - 30 ? 'shimmering oil' : 'oil';
+    return 'empty';
+  }
+}
+// Water droplet flicked on a hot pan: skates on a vapour cushion above the Leidenfrost point.
+function dropletFate(panT, material = 'stainless') {
+  const lf = material === 'castIron' ? 200 : material === 'nonstick' ? 210 : 190;
+  return panT >= lf ? 'skate' : panT > 100 ? 'sizzle' : 'sit';
+}
+
+/* ---------- oven ---------- */
+// Two-node cavity (air + liner/walls) with bake / convection / broil elements and a hysteresis thermostat.
+const OVEN = {
+  Ca: 380, Cw: 11000,        // J/K — cavity air (+racks) and walls
+  Gaw: 45, fanGaw: 95,       // W/K — air ↔ wall (fan on)
+  UA: 3.2,                   // W/K — insulated walls → kitchen
+  doorLoss: 30,              // W/K — air → kitchen with the door fully open
+  bakeW: 3000, convW: 2600, broilW: 3200, // W — elements
+  hyst: 3,                   // °C — thermostat band
+  hBake: 14, hConv: 30,      // W/m²K — food ↔ cavity air
+  broilT: 850,               // °C — glowing top element
+  minT: 50, maxT: 290,
+};
+class OvenThermo {
+  constructor() { this.Ta = THERMO.Tamb; this.Tw = THERMO.Tamb; this.set = 180; this.mode = 'off'; this.heat = false; this.door = 0; this.preheat = false; this.elemT = THERMO.Tamb; this.foodJ = 0; }
+  setMode(mode) { if (mode !== this.mode) { this.mode = mode; this.preheat = mode !== 'off' && this.Ta < this.set - OVEN.hyst; } }
+  setTemp(t) { this.set = Math.max(OVEN.minT, Math.min(OVEN.maxT, t)); if (this.mode !== 'off' && this.Ta < this.set - OVEN.hyst) this.preheat = true; }
+  get hFood() { return this.mode === 'convect' ? OVEN.hConv : OVEN.hBake; }
+  step(dt) {
+    const on = this.mode !== 'off';
+    if (!on) this.heat = false;
+    else if (this.mode === 'broil') this.heat = this.Ta < 290;
+    else if (this.Ta < this.set - OVEN.hyst) this.heat = true; else if (this.Ta > this.set + OVEN.hyst) this.heat = false;
+    let P = 0, toAir = 0.6;
+    if (this.heat) { if (this.mode === 'bake') P = OVEN.bakeW; else if (this.mode === 'convect') { P = OVEN.convW; toAir = 0.9; } else { P = OVEN.broilW; toAir = 0.3; } }
+    const g = this.mode === 'convect' ? OVEN.fanGaw : OVEN.Gaw, sub = Math.max(1, Math.ceil(dt / 0.05)), h = dt / sub;
+    for (let i = 0; i < sub; i++) {
+      const aw = g * (this.Tw - this.Ta);
+      this.Ta += h * (P * toAir + aw - OVEN.doorLoss * this.door * (this.Ta - THERMO.Tamb)) / OVEN.Ca - (i === 0 ? this.foodJ / OVEN.Ca : 0);
+      this.Tw += h * (P * (1 - toAir) - aw - OVEN.UA * (this.Tw - THERMO.Tamb)) / OVEN.Cw;
+    }
+    this.foodJ = 0;
+    this.elemT += ((this.mode === 'broil' && this.heat ? OVEN.broilT : this.Tw) - this.elemT) * Math.min(1, dt / 40);
+    if (this.preheat && this.Ta >= this.set - 1) this.preheat = false;
   }
 }
 
@@ -1088,7 +1290,9 @@ class Thermo {
     for (let i = 0; i < N; i++) { const r = sampler(i / (N - 1)); T[i] = r[0]; Tm[i] = r[1]; }
     this.T = T; this.Tmax = Tm; this.setGeometry(geo);
   }
-  clearExposure() { for (const f of this.faces) { f.hA = 0; f.hAT = 0; f.radEpsA = 0; f.contact = null; } this.pans.length = 0; this.panJ.length = 0; this.submerged = false; }
+  clearExposure() { for (const f of this.faces) { f.hA = 0; f.hAT = 0; f.radEpsA = 0; f.contact = null; } this.pans.length = 0; this.panJ.length = 0; this.submerged = false; this.liquid = null; this.pool = null; this.downFace = -1; }
+  // Direct energy input to a face (e.g. a spoonful of hot butter basted over the top).
+  addHeat(face, J) { const n = this.faceNode[face]; if (n < 0) return; this.T[n] += J / this.C[n]; if (this.T[n] > this.Tmax[n]) this.Tmax[n] = this.T[n]; }
   // Convective/conductive exposure of a face to a medium at temperature T through area A (m²) with coefficient h.
   expose(face, h, A, T, pan = null) {
     const f = this.faces[face]; if (A <= 0) return;
@@ -1200,7 +1404,11 @@ class Thermo {
         const x = (T[i] - e.T0) / (e.T1 - e.T0); if (x <= 0) continue;
         const m = e.k * Math.min(1.5, x) * this.vol[i] * d.rho * d.water * dt / 60;
         const fi = this.geo.shape === 'sphere' ? 0 : (i < N / 2 ? 0 : 1), f = this.faces[fi];
-        if (f.area > 0) { f.wet += m / f.area; this.waterMass -= m; this.mass -= m; }
+        if (f.area <= 0) continue;
+        this.waterMass -= m; this.mass -= m;
+        // Juice from the face sitting on a pan drains into the pan (a pool forms if the pan can't boil it off).
+        if (this.pool) { this.pool.add({ water: m * 0.7 }, T[i]); f.wet += m * 0.3 / f.area; } // most runs off into the pan
+        else f.wet += m / f.area;
       }
     }
     for (let fi = 0; fi < 3; fi++) {
@@ -1219,6 +1427,19 @@ class Thermo {
       c.sweat = Math.min(1, c.sweat + dt * s / 90);       // ~1.5 min of sweating at temperature
       c.soft = Math.min(1, c.soft + dt * s / 360);        // fully soft after ~6 min
     }
+    if (d.look === 'mushroom') { let s = 0; for (let i = 0; i < N; i++) s += sstep(50, 75, T[i]); s /= N; c.sweat = Math.min(1, (c.sweat || 0) + dt * s / 150); }
+    if (d.pasta) {
+      // Starch hydration: only in hot liquid; al dente ≈ 0.62–0.78, mushy > 0.88. Salt in the water seasons it.
+      if (this.submerged && this.liquid) {
+        const L = this.liquid, Tw = Math.min(100, L.T), k = d.pasta.k * Math.exp((Tw - 100) / 10) * sstep(55, 75, Tw);
+        const dH = k * (1 - (c.hyd || 0)) * dt;
+        c.hyd = Math.min(1, (c.hyd || 0) + dH);
+        const dry = this.mass0 * (1 - d.water), take = Math.min(L.m.water, dry * d.pasta.absorb * dH);
+        L.m.water -= take; this.mass += take; this.waterMass += take;
+        const conc = L.saltConc(); this.salt += take * conc; L.m.salt = Math.max(0, L.m.salt - take * conc);
+      }
+      c.set = c.hyd || 0;
+    }
     if (d.egg) { let s = 0; for (let i = 0; i < N; i++) s += d.look === 'eggYolk' ? sstep(65, 72, peak[i]) : sstep(62, 66, peak[i]); c.set = s / N; }
   }
   // Summary for Chef's Eye / scoring
@@ -1234,7 +1455,7 @@ function simPanCook(food, pan, opts) {
   for (; t < seconds; t += dt, k++) {
     if (flipK && k > 0 && k % flipK === 0) down = 1 - down;
     food.clearExposure();
-    const hc = pan.def.hContact * food.def.contactQ, A = food.faces[down].area;
+    const hc = contactH(pan.def, food, down), A = food.faces[down].area;
     food.faces[down].contactT = pan.T;
     food.expose(down, hc, A, pan.T, pan);
     const airT = THERMO.Tamb + (pan.T - THERMO.Tamb) * 0.12;
@@ -1257,6 +1478,49 @@ function simRest(food, seconds, dt = 0.1) {
 }
 function preheat(pan, burnerW, target, maxS = 900) { let t = 0; for (; t < maxS && pan.T < target; t += 0.1) pan.step(0.1, burnerW, 0); return t; }
 const STEAK_GEO = () => ({ shape: 'slab', L: 0.035, A: 0.0102, As: 0.36 * 0.035 });
+
+// Food fully submerged in a vessel's contents (boiling water, oil): all faces exchange with the liquid.
+function exposeSubmerged(food, C) {
+  const hot = C.waterFrac() > 0.3 ? (C.T >= 99.5 ? 900 : 550) : 400;
+  food.clearExposure(); food.submerged = true; food.liquid = C;
+  for (let fi = 0; fi < 3; fi++) { const f = food.faces[fi]; if (f.area > 0) { f.contactT = C.T; food.expose(fi, hot, f.area, C.T, C); } }
+}
+// Credit the energy a food drew during its step to its sinks (pans → returned, contents → drawJ).
+function settleFoodEnergy(food) {
+  let panJ = 0;
+  for (let k = 0; k < food.pans.length; k++) { const s = food.pans[k]; if (s instanceof Contents) s.drawJ += food.panJ[k]; else panJ += food.panJ[k]; }
+  return panJ;
+}
+// Several foods lying in one pan; expelled juices pool in the pan (crowding → steaming).
+function simPanMulti(foods, pan, opts) {
+  const { burnerW, seconds, dt = 0.1, onTick = null } = opts;
+  if (!pan.contents) pan.contents = new Contents();
+  const C = pan.contents, A = pan.bottomArea();
+  pan.covered = foods.reduce((a, f) => a + f.faces[0].area, 0) / A / THERMO.crowdFull;
+  for (let t = 0; t < seconds; t += dt) {
+    let J = 0;
+    const pooled = C.depth(A) > THERMO.poolDepth && C.waterFrac() > 0.5;
+    for (const f of foods) {
+      f.clearExposure(); f.pool = C; f.downFace = 0;
+      const Ac = f.faces[0].area;
+      if (pooled) { f.faces[0].contactT = C.T; f.expose(0, 700, Ac, C.T, C); f.faces[0].wet = Math.max(f.faces[0].wet, 0.015); }
+      else { f.faces[0].contactT = pan.T; f.expose(0, contactH(pan.def, f, 0), Ac, pan.T, pan); }
+      const airT = THERMO.Tamb + (pan.T - THERMO.Tamb) * 0.12; f.exposeAir(1, airT); f.exposeAir(2, airT);
+      f.step(dt); J += settleFoodEnergy(f);
+    }
+    pan.step(dt, burnerW, J);
+    if (onTick) onTick(t);
+  }
+}
+function simPot(pan, burnerW, seconds, foods = [], dt = 0.1, onTick = null) {
+  for (let t = 0; t < seconds; t += dt) {
+    let J = 0;
+    for (const f of foods) { exposeSubmerged(f, pan.contents); f.step(dt); J += settleFoodEnergy(f); }
+    pan.step(dt, burnerW, J);
+    if (onTick && onTick(t)) return t;
+  }
+  return seconds;
+}
 
 const TEST_SCENARIOS = [
   { id: '13.1a', name: 'Cold WET steak, barely-warm pan (2 min/side) → steams gray, no crust', run() {
@@ -1304,6 +1568,55 @@ const TEST_SCENARIOS = [
     simPanCook(o, pan, { burnerW: 900, seconds: 1200, flipEvery: 60, onTick: (t) => { if (sweatAt < 0 && o.cook.sweat > 0.5) sweatAt = t; } });
     const b = (o.faces[0].brown + o.faces[1].brown) / 2, ch = Math.max(o.faces[0].char, o.faces[1].char);
     return { pass: sweatAt > 0 && sweatAt < 300 && b > 0.5 && ch < 0.2, detail: `sweated at ${(sweatAt / 60).toFixed(1)} min, caramelization ${(b * 100).toFixed(0)}% after 20 min, char ${(ch * 100).toFixed(0)}%` }; } },
+  { id: '13.3', name: '6 L pot boils much slower than 1 L saucepan on the same burner; pasta drops the boil briefly', run() {
+    const big = new PanThermo(PAN_DEFS.stockPot); big.contents = new Contents({ water: 6.0, salt: 0.06 }, 15);
+    const small = new PanThermo(PAN_DEFS.saucepan); small.contents = new Contents({ water: 1.0 }, 15);
+    const tBig = simPot(big, 4000, 3600, [], 0.1, () => big.contents.T >= 100 && big.contents.boiling > 0.3);
+    const tSmall = simPot(small, 4000, 3600, [], 0.1, () => small.contents.T >= 100 && small.contents.boiling > 0.3);
+    const pasta = new Thermo(FOOD_DEFS.spaghetti, { shape: 'slab', L: 0.0018, A: 0.198, As: 0.001 }, 21);
+    let minT = 100, recovered = -1;
+    simPot(big, 4000, 240, [pasta], 0.1, (t) => { minT = Math.min(minT, big.contents.T); if (recovered < 0 && minT < 99.5 && big.contents.T >= 99.9) recovered = t; return false; });
+    return { pass: tBig > tSmall * 3 && minT < 99.5 && recovered > 0 && recovered < 180,
+      detail: `to boil: 6 L ${(tBig / 60).toFixed(1)} min vs 1 L ${(tSmall / 60).toFixed(1)} min; 500 g pasta dropped the pot to ${minT.toFixed(1)}°C, back to a boil after ${recovered.toFixed(0)} s` }; } },
+  { id: '13.5', name: '10 crowded mushrooms release water and stew; 4 spaced ones brown', run() {
+    const mk = () => new Thermo(FOOD_DEFS.mushroom, { shape: 'slab', L: 0.02, A: 0.0015, As: 0.0028 }, 4);
+    // Crowded: 10 packed into a 24 cm pan. Spaced: 4 in a 28 cm sauté pan. Same medium-high burner.
+    const run = (n) => { const pan = new PanThermo(n > 5 ? PAN_DEFS.nonstick : PAN_DEFS.sautePan); preheat(pan, 2000, 180); const ms = Array.from({ length: n }, mk); let pool = 0;
+      simPanMulti(ms, pan, { burnerW: 2000, seconds: 360, onTick: () => { pool = Math.max(pool, pan.contents.m.water); } });
+      return { brown: ms.reduce((a, m) => a + m.faces[0].brown, 0) / n, pool: pool * 1000, panT: pan.T }; };
+    const crowd = run(10), spaced = run(4);
+    return { pass: crowd.brown < 0.25 && crowd.pool > 15 && spaced.brown > 0.5,
+      detail: `after 6 min: crowded browning ${(crowd.brown * 100).toFixed(0)}% (peak pool ${crowd.pool.toFixed(0)} g water, pan ${crowd.panT.toFixed(0)}°C) vs spaced ${(spaced.brown * 100).toFixed(0)}% (pool ${spaced.pool.toFixed(0)} g)` }; } },
+  { id: '13.6', name: 'Butter melts, foams, turns nutty brown, then burns if ignored', run() {
+    const pan = new PanThermo(PAN_DEFS.sautePan); pan.contents = new Contents({ butterSolid: 0.03 }, 6);
+    const at = {}; const mark = (k, t) => { if (at[k] === undefined) at[k] = t; };
+    simPot(pan, 1300, 900, [], 0.1, (t) => { const st = pan.contents.stage(); if (st === 'melted butter' || st === 'foaming') mark('melted', t); if (st === 'foaming') mark('foam', t);
+      if (st === 'beurre noisette') mark('noisette', t); if (st === 'burnt butter') mark('burnt', t); return false; });
+    const ok = at.melted < at.foam && at.foam < at.noisette && at.noisette < at.burnt && at.melted < 120 && at.noisette < 480;
+    const f = (x) => (x === undefined ? 'never' : (x / 60).toFixed(1) + ' min');
+    return { pass: !!ok, detail: `melted ${f(at.melted)} → foaming ${f(at.foam)} → noisette ${f(at.noisette)} → burnt ${f(at.burnt)} (medium heat, ignored)` }; } },
+  { id: 'pasta', name: 'Spaghetti al dente in ~9–11 min at a rolling boil, mushy if left; salted water seasons it', run() {
+    const pan = new PanThermo(PAN_DEFS.saucepan); pan.contents = new Contents({ water: 1.5, salt: 0.015 }, 100); pan.temp = 110;
+    const p = new Thermo(FOOD_DEFS.spaghetti, { shape: 'slab', L: 0.0018, A: 0.04, As: 0.001 }, 21);
+    let tAl = -1, tMush = -1;
+    simPot(pan, 2600, 1500, [p], 0.1, (t) => { const h = p.cook.hyd || 0; if (tAl < 0 && h >= 0.62) tAl = t; if (tMush < 0 && h >= 0.88) tMush = t; return false; });
+    const saltGkg = p.salt / (p.mass0 * 0.9) * 1000;
+    return { pass: tAl > 480 && tAl < 690 && tMush > 840 && saltGkg > 2, detail: `al dente at ${(tAl / 60).toFixed(1)} min, mushy at ${(tMush / 60).toFixed(1)} min, salt uptake ${saltGkg.toFixed(1)} g/kg` }; } },
+  { id: 'rice', name: 'Rice by absorption uses up its water, then the bottom scorches', run() {
+    const pan = new PanThermo(PAN_DEFS.saucepan); pan.contents = new Contents({ riceDry: 0.2, water: 0.3 }, 20); pan.contents.lid = true;
+    let tDone = -1; simPot(pan, 1500, 2400, [], 0.1, (t) => { if (tDone < 0 && pan.contents.riceHyd > 0.9) tDone = t; return false; });
+    const c = pan.contents;
+    return { pass: tDone > 600 && tDone < 1500 && c.m.water < 0.005 && c.scorch > 0.3, detail: `cooked (90% hydrated) at ${(tDone / 60).toFixed(1)} min; water left ${(c.m.water * 1000).toFixed(0)} g; scorch after 40 min ${(c.scorch * 100).toFixed(0)}%` }; } },
+  { id: 'oven', name: 'Oven preheats to 180°C (indicator), door opening drops it, it recovers', run() {
+    const o = new OvenThermo(); o.setTemp(180); o.setMode('bake');
+    let t = 0; while (o.preheat && t < 3600) { o.step(0.5); t += 0.5; }
+    const tPre = t; for (let i = 0; i < 240; i++) o.step(0.5);
+    const before = o.Ta; o.door = 1; for (let i = 0; i < 60; i++) o.step(0.5); const opened = o.Ta; o.door = 0;
+    let tr = 0; while (o.Ta < 177 && tr < 900) { o.step(0.5); tr += 0.5; }
+    return { pass: tPre > 480 && tPre < 900 && before - opened > 25 && tr < 180, detail: `preheat to 180°C in ${(tPre / 60).toFixed(1)} min; 30 s door open ${before.toFixed(0)}→${opened.toFixed(0)}°C; recovered in ${tr.toFixed(0)} s` }; } },
+  { id: 'leiden', name: 'Leidenfrost: droplets skate on stainless above ~190°C, sizzle below', run() {
+    const r = [120, 170, 195, 240].map((T) => dropletFate(T, 'stainless'));
+    return { pass: r.join() === 'sizzle,sizzle,skate,skate', detail: `120°C ${r[0]}, 170°C ${r[1]}, 195°C ${r[2]}, 240°C ${r[3]}` }; } },
   { id: 'stable', name: 'Thin piece at 10× time-scale stays stable (substeps, no NaN)', run() {
     const pan = new PanThermo(PAN_DEFS.castIron); pan.T = 300;
     const g = new Thermo(FOOD_DEFS.garlic, { shape: 'slab', L: 0.0015, A: 0.0004, As: 0.0001 }, 21);
@@ -1341,7 +1654,7 @@ const Nav = {
 
 // World-scale UV density per material (texture repeats per metre).
 const UV_SCALE = { floor: 0.5, wall: 0.8, tile: 1 / 0.3, marble: 0.55, butcher: 0.9, cabinet: 1.2, shelf: 1.1, steel: 1.5 };
-const SURFACE = { marble: 'stone', butcher: 'wood', tile: 'stone', steel: 'metal', darkSteel: 'metal', shelf: 'wood', cabinet: 'wood', floor: 'wood', wall: 'stone', trim: 'wood', blackGlass: 'stone', painted: 'wood', rubber: 'produce', brass: 'metal' };
+const SURFACE = { enamel: 'metal', marble: 'stone', butcher: 'wood', tile: 'stone', steel: 'metal', darkSteel: 'metal', shelf: 'wood', cabinet: 'wood', floor: 'wood', wall: 'stone', trim: 'wood', blackGlass: 'stone', painted: 'wood', rubber: 'produce', brass: 'metal' };
 
 const KB = {
   casters: [], flat: [], special: new Map(),
@@ -1510,21 +1823,32 @@ const Kitchen = {
     const neck = new THREE.TorusGeometry(0.11, 0.016, 10, 24, Math.PI); // arc from riser top out over the basin
     KB.geo('steel', neck, fx + 0.11, CT + 0.33, fzz, {});
     KB.cyl('steel', 0.018, 0.016, 0.08, fx + 0.22, CT + 0.29, fzz, { collide: false });
-    KB.box('steel', 0.012, 0.012, 0.09, fx, CT + 0.25, fzz + 0.05, { collide: false });
+    // Lever (dynamic) + spout live in [SINK]; the basin drains.
+    this.faucet = { pivot: new THREE.Vector3(fx, CT + 0.25, fzz + 0.02), spout: new THREE.Vector3(fx + 0.22, CT + 0.245, fzz) };
+    this.sink = { x0: sx0, x1: sx1, z0: sz0, z1: sz1, y: sb };
 
     // Range (gas, 4 burners) at x ∈ [-0.6, 0.16]
     const rx0 = -0.6, rx1 = 0.16, rcx = (rx0 + rx1) / 2;
-    KB.box('steel', rx1 - rx0, CT - 0.1, bz1 - bz0, rcx, 0.1 + (CT - 0.1) / 2, (bz0 + bz1) / 2, { collide: false, sh: 3 });
+    // Hollow oven body: steel shell with an enamel cavity (door, racks and dials live in [OVEN]).
+    const cy0 = 0.14, cy1 = 0.76, oz0 = bz0 + 0.02, oz1 = bz1 - 0.012, oW = 0.02;
+    KB.box('steel', oW, CT - 0.1, bz1 - bz0, rx0 + oW / 2, 0.1 + (CT - 0.1) / 2, (bz0 + bz1) / 2, { sh: 3 });
+    KB.box('steel', oW, CT - 0.1, bz1 - bz0, rx1 - oW / 2, 0.1 + (CT - 0.1) / 2, (bz0 + bz1) / 2, { sh: 3 });
+    KB.box('steel', rx1 - rx0 - 2 * oW, CT - 0.1, oW, rcx, 0.1 + (CT - 0.1) / 2, bz0 + oW / 2);
+    KB.box('steel', rx1 - rx0 - 2 * oW, cy0 - 0.1, bz1 - bz0 - oW, rcx, 0.1 + (cy0 - 0.1) / 2, (bz0 + oW + bz1) / 2);
+    KB.box('steel', rx1 - rx0 - 2 * oW, CT - 0.012 - cy1, bz1 - bz0 - oW, rcx, (cy1 + CT - 0.012) / 2, (bz0 + oW + bz1) / 2);
+    const ex0 = rx0 + oW, ex1 = rx1 - oW;
+    KB.box('enamel', 0.004, cy1 - cy0, oz1 - oz0, ex0 + 0.002, (cy0 + cy1) / 2, (oz0 + oz1) / 2, { collide: false });
+    KB.box('enamel', 0.004, cy1 - cy0, oz1 - oz0, ex1 - 0.002, (cy0 + cy1) / 2, (oz0 + oz1) / 2, { collide: false });
+    KB.box('enamel', ex1 - ex0, cy1 - cy0, 0.004, rcx, (cy0 + cy1) / 2, oz0 + 0.002, { collide: false });
+    KB.box('enamel', ex1 - ex0, 0.004, oz1 - oz0, rcx, cy0 + 0.002, (oz0 + oz1) / 2, { collide: false });
+    KB.box('enamel', ex1 - ex0, 0.004, oz1 - oz0, rcx, cy1 - 0.002, (oz0 + oz1) / 2, { collide: false });
+    for (const y of [0.3, 0.52]) for (const x of [ex0 + 0.008, ex1 - 0.008]) KB.box('steel', 0.012, 0.008, oz1 - oz0 - 0.04, x, y - 0.012, (oz0 + oz1) / 2, { collide: false });
     KB.box('rubber', rx1 - rx0 - 0.02, 0.1, bz1 - bz0 - 0.06, rcx, 0.05, (bz0 + bz1) / 2 - 0.03, { collide: false });
     KB.box('blackGlass', rx1 - rx0, 0.012, bz1 - bz0 + 0.01, rcx, CT - 0.006, (bz0 + bz1) / 2, { collide: false });
-    Phys.staticBox((rx1 - rx0) / 2, CT / 2, (bz1 - bz0) / 2, rcx, CT / 2, (bz0 + bz1) / 2, 0, 'metal');
+    Phys.staticBox((rx1 - rx0) / 2, 0.006, (bz1 - bz0) / 2, rcx, CT - 0.006, (bz0 + bz1) / 2, 0, 'metal');
     Nav.obstacle(rx0, bz0, rx1, bz1);
-    // Oven door with window + handle, knob panel
-    KB.box('steel', rx1 - rx0 - 0.04, 0.56, 0.03, rcx, 0.44, bz1 + 0.015, { collide: false });
-    KB.box('blackGlass', rx1 - rx0 - 0.2, 0.26, 0.006, rcx, 0.45, bz1 + 0.032, { collide: false });
-    KB.cyl('steel', 0.011, 0.011, rx1 - rx0 - 0.12, rcx, 0.77, bz1 + 0.07, { rotZ: Math.PI / 2, collide: false });
-    KB.box('steel', 0.02, 0.02, 0.05, rx0 + 0.08, 0.77, bz1 + 0.045, { collide: false });
-    KB.box('steel', 0.02, 0.02, 0.05, rx1 - 0.08, 0.77, bz1 + 0.045, { collide: false });
+    this.oven = { x0: ex0, x1: ex1, y0: cy0, y1: cy1, z0: oz0, z1: oz1, hinge: new THREE.Vector3(rcx, 0.125, bz1), width: rx1 - rx0 - 0.03, rackY: [0.3, 0.52], cx: rcx };
+    // Control panel
     KB.box('blackGlass', rx1 - rx0 - 0.02, 0.11, 0.02, rcx, CT - 0.075, bz1 + 0.005, { collide: false });
     // Burners: grates rest pans at CT + 0.036
     const burners = [[-0.41, -2.02], [-0.03, -2.02], [-0.41, -2.33], [-0.03, -2.33]];
@@ -1542,8 +1866,8 @@ const Kitchen = {
     }
     // Knobs (instanced; become grab-and-twist controls in M2)
     const knobGeo = new THREE.CylinderGeometry(0.022, 0.024, 0.03, 20); knobGeo.rotateX(Math.PI / 2);
-    this.knobs = new THREE.InstancedMesh(uberize(knobGeo, MAT.plastic), UBER, 4);
-    [-0.47, -0.33, -0.09, 0.05].forEach((x, i) => { _m1.makeTranslation(x, CT - 0.075, bz1 + 0.03); this.knobs.setMatrixAt(i, _m1); });
+    this.knobs = new THREE.InstancedMesh(uberize(knobGeo, MAT.plastic), UBER, 6); // 4 burners + oven temp & mode dials
+    [-0.47, -0.33, -0.09, 0.05, -0.555, 0.12].forEach((x, i) => { _m1.makeTranslation(x, CT - 0.075, bz1 + 0.03); this.knobs.setMatrixAt(i, _m1); });
     this.knobs.castShadow = true; scene.add(this.knobs);
     // Hood
     KB.box('steel', 0.86, 0.22, 0.52, rcx, 1.82, bz0 + 0.26, { collide: false });
@@ -1892,7 +2216,7 @@ const PROP_DEFS = {
       }
       P.add(MAT.knife, new THREE.TorusGeometry(0.012, 0.003, 6, 12, Math.PI), [0, 0, 0.085], [0, Math.PI / 2, Math.PI / 2]);
       return { parts: P.done(), shapes: [Shp.box(0.012, 0.022, 0.14, 0, 0, -0.05)] }; } },
-  woodenSpoon: { name: 'Wooden Spoon', cat: 'Tools', mass: 0.05, sound: 'wood', grip: TOOL_GRIP, size: 0.15,
+  woodenSpoon: { name: 'Wooden Spoon', cat: 'Tools', mass: 0.05, sound: 'wood', grip: TOOL_GRIP, size: 0.15, vessel: { c: [0, -0.014, -0.15], r: 0.02, h: 0.01, dip: true },
     build() { const P = Parts();
       P.add(MAT.beech, new THREE.CapsuleGeometry(0.0075, 0.24, 4, 10), [0, 0, 0.0], [Math.PI / 2, 0, 0]);
       const b = new THREE.SphereGeometry(1, 16, 10, 0, Math.PI * 2, 0, Math.PI * 0.62); b.rotateX(Math.PI);
@@ -1903,7 +2227,7 @@ const PROP_DEFS = {
       P.add(MAT.knife, new THREE.CylinderGeometry(0.012, 0.01, 0.14, 14), [0, 0, 0.02], [Math.PI / 2, 0, 0]);
       for (let i = 0; i < 6; i++) { const t = new THREE.TorusGeometry(0.036, 0.0011, 4, 28); t.scale(1, 2.2, 1); t.rotateX(Math.PI / 2); t.rotateZ(i * Math.PI / 6); P.add(MAT.knife, t, [0, 0, -0.105]); }
       return { parts: P.done(), shapes: [Shp.box(0.012, 0.012, 0.07, 0, 0, 0.02), Shp.box(0.03, 0.03, 0.07, 0, 0, -0.12)] }; } },
-  ladle: { name: 'Ladle', cat: 'Tools', mass: 0.16, sound: 'metal', grip: TOOL_GRIP, size: 0.16,
+  ladle: { name: 'Ladle', cat: 'Tools', mass: 0.16, sound: 'metal', grip: TOOL_GRIP, size: 0.16, vessel: { c: [0, -0.078, -0.19], r: 0.036, h: 0.032, dip: true },
     build() { const P = Parts();
       P.add(MAT.knife, new THREE.BoxGeometry(0.014, 0.004, 0.28), [0, 0, -0.02], [-0.2, 0, 0]);
       P.add(MAT.potSteel, vesselGeo([[0.001, -0.045], [0.03, -0.04], [0.044, -0.02], [0.046, 0.0]], 0.0015), [0, -0.035, -0.19]);
@@ -1947,7 +2271,7 @@ const PROP_DEFS = {
       const s = [Shp.cyl(0.003, 0.114, 0, -0.052, cz), Shp.box(0.013, 0.008, 0.1, 0, -0.004, 0.02, 0.14, 0, 0), Shp.box(0.02, 0.005, 0.015, 0, -0.01, cz - R - 0.015)];
       Shp.ring(s, 0.12, -0.028, 0.028, 0.006, 12, 0, cz);
       return { parts: P.done(), shapes: s }; } },
-  stockPot: { name: 'Stock Pot (6 L)', cat: 'Cookware', mass: 1.9, sound: 'metal', twoHanded: true, size: 0.3,
+  stockPot: { name: 'Stock Pot (6 L)', cat: 'Cookware', mass: 1.9, sound: 'metal', twoHanded: true, size: 0.3, pan: { key: 'stockPot', c: [0, 0.006, 0], r: 0.105, rim: 0.185 },
     build() { const P = Parts();
       P.add(MAT.potSteel, vesselGeo([[0.108, 0.0], [0.11, 0.005], [0.11, 0.19]], 0.003));
       for (const s of [1, -1]) P.add(MAT.potSteel, new THREE.TorusGeometry(0.03, 0.006, 6, 14, Math.PI), [s * 0.11, 0.155, 0], [Math.PI / 2, 0, s > 0 ? -Math.PI / 2 : Math.PI / 2]);
@@ -1959,7 +2283,7 @@ const PROP_DEFS = {
       P.add(MAT.potSteel, lathe([[0, 0.02], [0.06, 0.017], [0.112, 0.004], [0.116, 0.0], [0.114, 0.0], [0.11, 0.003], [0.06, 0.014], [0, 0.017]], 40));
       P.add(MAT.plastic, new THREE.CylinderGeometry(0.018, 0.012, 0.022, 14), [0, 0.03, 0]);
       return { parts: P.done(), shapes: [Shp.cyl(0.009, 0.115, 0, 0.009, 0), Shp.cyl(0.011, 0.016, 0, 0.03, 0)] }; } },
-  sheetPan: { name: 'Sheet Pan', cat: 'Cookware', mass: 1.0, sound: 'metal', twoHanded: true, size: 0.3,
+  sheetPan: { name: 'Sheet Pan', cat: 'Cookware', mass: 1.0, sound: 'metal', twoHanded: true, size: 0.3, pan: { key: 'sheetPan', c: [0, 0.002, 0], r: 0.2, rim: 0.024 },
     build() { const P = Parts(), w = 0.45, d = 0.33, h = 0.025;
       P.add(MAT.potSteel, new THREE.BoxGeometry(w, 0.002, d), [0, 0.001, 0]);
       for (const s of [1, -1]) { P.add(MAT.potSteel, new THREE.BoxGeometry(w, h, 0.004), [0, h / 2, s * d / 2]); P.add(MAT.potSteel, new THREE.BoxGeometry(0.004, h, d), [s * w / 2, h / 2, 0]); }
@@ -1968,7 +2292,7 @@ const PROP_DEFS = {
     build() { const P = Parts();
       const g = new THREE.BoxGeometry(0.45, 0.028, 0.3); P.add(MAT.board, g, [0, 0.014, 0]);
       return { parts: P.done(), shapes: [Shp.box(0.225, 0.014, 0.15, 0, 0.014, 0)] }; } },
-  mixingBowl: { name: 'Mixing Bowl', cat: 'Cookware', mass: 0.45, sound: 'metal', twoHanded: true, size: 0.2,
+  mixingBowl: { name: 'Mixing Bowl', cat: 'Cookware', mass: 0.45, sound: 'metal', twoHanded: true, size: 0.2, vessel: { c: [0, 0.004, 0], r: 0.1, h: 0.105 },
     build() { const P = Parts();
       P.add(MAT.potSteel, vesselGeo([[0.06, 0.0], [0.09, 0.02], [0.12, 0.07], [0.13, 0.11]], 0.002));
       const s = [Shp.cyl(0.003, 0.07, 0, 0.003, 0)];
@@ -1978,7 +2302,7 @@ const PROP_DEFS = {
     build() { const P = Parts();
       P.add(MAT.ceramic, lathe([[0, 0.004], [0.07, 0.002], [0.075, 0.0], [0.09, 0.006], [0.13, 0.016], [0.135, 0.02], [0.133, 0.022], [0.09, 0.013], [0, 0.012]], 40));
       return { parts: P.done(), shapes: [Shp.cyl(0.006, 0.13, 0, 0.008, 0)] }; } },
-  bowl: { name: 'Bowl', cat: 'Tableware', mass: 0.35, sound: 'ceramic', size: 0.09,
+  bowl: { name: 'Bowl', cat: 'Tableware', mass: 0.35, sound: 'ceramic', size: 0.09, vessel: { c: [0, 0.006, 0], r: 0.058, h: 0.058 },
     build() { const P = Parts();
       P.add(MAT.ceramicBlue, vesselGeo([[0.04, 0.0], [0.06, 0.015], [0.075, 0.045], [0.08, 0.065]], 0.005));
       const s = [Shp.cyl(0.004, 0.045, 0, 0.004, 0)];
@@ -2069,6 +2393,68 @@ const PROP_DEFS = {
       P.add(MAT.brass, new THREE.CylinderGeometry(0.004, 0.004, 0.014, 8), [0, 0.057, 0]);
       return { parts: P.done(), shapes: [Shp.cyl(0.028, 0.047, 0, 0.028, 0)] }; },
     use(prop) { const v = AudioSys.voice(prop.group.position, 1.6, 0.5); if (!v) return; const t = AudioSys.ctx.currentTime; AudioSys.osc(v, 'sine', 2093, t, 1.4, 0.5, 1.4); AudioSys.osc(v, 'sine', 5230, t, 0.6, 0.2, 0.5); } },
+  bakingDish: { name: 'Baking Dish', cat: 'Cookware', mass: 1.6, sound: 'ceramic', twoHanded: true, size: 0.18, pan: { key: 'bakingDish', c: [0, 0.009, 0], r: 0.13, rim: 0.05 },
+    build() { const P = Parts(), w = 0.3, d = 0.2, h = 0.06, t = 0.012;
+      P.add(MAT.dishCeramic, new THREE.BoxGeometry(w, t, d), [0, t / 2, 0]);
+      for (const s of [1, -1]) { P.add(MAT.dishCeramic, new THREE.BoxGeometry(w, h, t), [0, h / 2, s * (d - t) / 2]); P.add(MAT.dishCeramic, new THREE.BoxGeometry(t, h, d), [s * (w - t) / 2, h / 2, 0]); P.add(MAT.dishCeramic, new THREE.BoxGeometry(0.03, 0.012, 0.09), [s * (w / 2 + 0.012), h - 0.012, 0]); }
+      return { parts: P.done(), shapes: [Shp.box(w / 2, t / 2, d / 2, 0, t / 2, 0), Shp.box(w / 2, h / 2, t / 2, 0, h / 2, (d - t) / 2), Shp.box(w / 2, h / 2, t / 2, 0, h / 2, -(d - t) / 2), Shp.box(t / 2, h / 2, d / 2, (w - t) / 2, h / 2, 0), Shp.box(t / 2, h / 2, d / 2, -(w - t) / 2, h / 2, 0)] }; } },
+  measuringCup: { name: 'Measuring Jug (1 L)', cat: 'Cookware', mass: 0.4, sound: 'ceramic', size: 0.08, vessel: { c: [0, 0.005, 0], r: 0.052, h: 0.115 },
+    build() { const P = Parts();
+      const t = new THREE.TorusGeometry(0.035, 0.007, 6, 12, Math.PI); P.add(MAT.jugHandle, t, [0.058, 0.07, 0], [0, 0, -Math.PI / 2]);
+      for (let i = 1; i <= 4; i++) P.add(MAT.labelRed, new THREE.BoxGeometry(0.012, 0.0015, 0.002), [-0.02, 0.005 + i * 0.0235, 0.0555], [0, -0.35, 0]);
+      const glass = vesselGeo([[0.052, 0.0], [0.055, 0.004], [0.057, 0.12]], 0.003); glass.computeVertexNormals();
+      const parts = P.done(); parts.push({ mat: MAT.glass, geo: glass, cast: false });
+      const s = [Shp.cyl(0.003, 0.052, 0, 0.003, 0), Shp.box(0.008, 0.035, 0.008, 0.093, 0.07, 0)]; Shp.ring(s, 0.056, 0.06, 0.06, 0.005, 12);
+      return { parts, shapes: s }; } },
+  oilOlive: { name: 'Olive Oil', cat: 'Pantry', mass: 0.8, sound: 'ceramic', size: 0.1, vessel: { c: [0, 0.006, 0], r: 0.03, h: 0.26, neck: 0.011, opaque: true }, fill: { oil: 0.46, oilType: 'olive' },
+    build() { const P = Parts();
+      P.add(MAT.oliveGlass, lathe([[0, 0], [0.034, 0], [0.035, 0.005], [0.035, 0.19], [0.026, 0.225], [0.013, 0.24], [0.013, 0.262], [0, 0.262]], 20));
+      P.add(MAT.label, new THREE.CylinderGeometry(0.0355, 0.0355, 0.08, 20, 1, true), [0, 0.1, 0]);
+      P.add(MAT.brass, new THREE.CylinderGeometry(0.0145, 0.0145, 0.018, 12), [0, 0.268, 0]);
+      return { parts: P.done(), shapes: [Shp.cyl(0.1, 0.035, 0, 0.1, 0), Shp.cyl(0.03, 0.014, 0, 0.245, 0)] }; } },
+  oilVeg: { name: 'Vegetable Oil', cat: 'Pantry', mass: 1.0, sound: 'produce', size: 0.12, vessel: { c: [0, 0.006, 0], r: 0.04, h: 0.27, neck: 0.014, opaque: true }, fill: { oil: 0.9, oilType: 'vegetable' },
+    build() { const P = Parts();
+      P.add(MAT.oilPlastic, lathe([[0, 0], [0.043, 0], [0.045, 0.006], [0.045, 0.2], [0.03, 0.235], [0.016, 0.25], [0.016, 0.27], [0, 0.27]], 20));
+      P.add(MAT.labelRed, new THREE.CylinderGeometry(0.0455, 0.0455, 0.09, 20, 1, true), [0, 0.11, 0]);
+      P.add(MAT.plastic, new THREE.CylinderGeometry(0.0175, 0.0175, 0.02, 12), [0, 0.278, 0]);
+      return { parts: P.done(), shapes: [Shp.cyl(0.1, 0.045, 0, 0.1, 0), Shp.cyl(0.04, 0.017, 0, 0.24, 0)] }; } },
+  saltBox: { name: 'Salt', cat: 'Pantry', mass: 0.5, sound: 'produce', size: 0.07,
+    build() { const P = Parts();
+      P.add(MAT.saltBlue, new THREE.CylinderGeometry(0.04, 0.04, 0.13, 20), [0, 0.065, 0]);
+      P.add(MAT.label, new THREE.CylinderGeometry(0.0405, 0.0405, 0.05, 20, 1, true), [0, 0.07, 0]);
+      P.add(MAT.potSteel, new THREE.CylinderGeometry(0.041, 0.041, 0.006, 20), [0, 0.132, 0]);
+      P.add(MAT.potSteel, new THREE.BoxGeometry(0.02, 0.006, 0.014), [0.022, 0.137, 0]);
+      return { parts: P.done(), shapes: [Shp.cyl(0.068, 0.04, 0, 0.068, 0)] }; },
+    // Trigger / right-click: a pinch-sized shake. In VR: turn it over and shake.
+    use(prop) { Liquids.shake(prop, 1.2); },
+    tick(prop, dt) {
+      const h = prop.holders[0]; if (!h || Input.mode !== 'xr') return;
+      _v1.set(0, 1, 0).applyQuaternion(prop.renderQuat);
+      if (_v1.y < -0.2 && h.vel.length() > 0.8 && Sim.clock - (prop.lastShake || 0) > 0.15) { prop.lastShake = Sim.clock; Liquids.shake(prop, 0.7); haptic(h.side, 0.2, 15); }
+    } },
+  riceBag: { name: 'Rice (1 kg)', cat: 'Pantry', mass: 1.05, sound: 'produce', size: 0.1, vessel: { c: [0, 0.01, 0], r: 0.045, h: 0.19, neck: 0.03, opaque: true }, fill: { riceDry: 1.0 },
+    build() { const P = Parts();
+      P.add(MAT.ricePaper, new THREE.BoxGeometry(0.12, 0.2, 0.07), [0, 0.1, 0]);
+      P.add(MAT.labelRed, new THREE.BoxGeometry(0.1, 0.06, 0.071), [0, 0.1, 0]);
+      return { parts: P.done(), shapes: [Shp.box(0.06, 0.1, 0.035, 0, 0.1, 0)] }; } },
+  thermometer: { name: 'Instant-Read Thermometer', cat: 'Tools', mass: 0.06, sound: 'metal', grip: TOOL_GRIP, size: 0.1,
+    build() { const P = Parts();
+      P.add(MAT.probeBody, new THREE.BoxGeometry(0.036, 0.018, 0.085), [0, 0, 0.012]);
+      P.add(MAT.probeBody, new THREE.CylinderGeometry(0.007, 0.009, 0.02, 12), [0, 0, -0.035], [Math.PI / 2, 0, 0]);
+      P.add(MAT.probe, new THREE.CylinderGeometry(0.0016, 0.0019, 0.12, 8), [0, 0, -0.105], [Math.PI / 2, 0, 0]);
+      P.add(MAT.probe, new THREE.ConeGeometry(0.0016, 0.006, 8), [0, 0, -0.168], [-Math.PI / 2, 0, 0]);
+      // The probe is flagged like a blade: it slides into food instead of colliding with it.
+      return { parts: P.done(), shapes: [Shp.box(0.018, 0.009, 0.05, 0, 0, 0.005), { ...Shp.box(0.002, 0.002, 0.06, 0, 0, -0.105), blade: true }] }; },
+    init(prop) {
+      const c = Tex.canvas(128, 64), tex = Tex.finish(c); tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+      const disp = new THREE.Mesh(new THREE.PlaneGeometry(0.03, 0.015), new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }));
+      disp.position.set(0, 0.0095, 0.02); disp.rotation.x = -Math.PI / 2; prop.group.add(disp);
+      prop.state = { T: THERMO.Tamb, what: 'air', canvas: c, tex, lastShown: '' };
+      Thermometer.draw(prop);
+    },
+    // Trigger / right-click toggles °C / °F.
+    use(prop) { settings.tempUnit = settings.tempUnit === 'F' ? 'C' : 'F'; settingsChanged(); AudioSys.uiTick(); },
+    tick(prop, dt) { Thermometer.tick(prop, dt); } },
   fryerBasket: { name: 'Fryer Basket', cat: 'Cookware', mass: 0.6, sound: 'metal', grip: { zone: 0.1 }, size: 0.2,
     build() { const P = Parts(), w = 0.2, d = 0.26, h = 0.11, cz = -0.06 - d / 2, y0 = -0.09;
       for (let i = 0; i <= 8; i++) { P.add(MAT.potSteel, new THREE.BoxGeometry(0.002, h, 0.002), [-w / 2 + i * w / 8, y0 + h / 2, cz - d / 2]); P.add(MAT.potSteel, new THREE.BoxGeometry(0.002, h, 0.002), [-w / 2 + i * w / 8, y0 + h / 2, cz + d / 2]); }
@@ -2109,7 +2495,12 @@ const INITIAL_PROPS = (() => {
     ['spatula', 0.66, CT + 0.04, -1.98, 100, 0], ['tongs', 0.66, CT + 0.03, -2.3, 95, 0],
     ['woodenSpoon', 0.8, CT + 0.022, -2.14, 80, 0],
     ['bakingSoda', -0.75, CT, -2.3, 10, 0],
-    ['sheetPan', -2.67, CT + 0.01, -1.5, 90, 0],
+    ['sheetPan', -0.22, 0.305, -2.176, 0, 0], // on the oven's lower rack
+    ['bakingDish', 1.0, CT, -1.98, 0, 0],
+    ['thermometer', -0.4, CT + 0.012, 0.38, 90, 0],
+    ['measuringCup', -2.62, CT, -1.3, 0, 0],
+    ['saltBox', 0.93, CT, -2.36, 0, 0], ['oilOlive', 1.05, CT, -2.3, 0, 0], ['oilVeg', 1.17, CT, -2.37, 0, 0],
+    ['riceBag', -1.25, CT, -2.32, 0, 0],
     ['plate', -2.68, CT + 0.005, 0.35, 0, 0], ['plate', -2.68, CT + 0.03, 0.35, 0, 0], ['plate', -2.68, CT + 0.055, 0.35, 0, 0],
     ['bowl', -2.66, CT + 0.005, 0.7, 0, 0], ['bowl', -2.62, CT + 0.005, 0.02, 0, 0],
     ['serviceBell', -2.48, CT, 0.84, 0, 0],
@@ -2150,6 +2541,7 @@ class Prop {
     }
     this.mass = def.mass;
     if (def.pan) this.thermo = new PanThermo(PAN_DEFS[def.pan.key]);
+    Liquids.attach(this); // vessels get a Contents (pans share it with their PanThermo)
     this.born = Sim.clock;
     this.prevPos = pos.clone(); this.currPos = pos.clone(); this.prevQuat = quat.clone(); this.currQuat = quat.clone();
     this.renderPos = pos.clone(); this.renderQuat = quat.clone();
@@ -2223,6 +2615,7 @@ const Props = {
     this.spawnInitial();
     Foods.initial();
     for (const k of Stove.knobs) Stove.setAngle(k, 0);
+    Oven.reset(); Liquids.reset();
   },
   // Clean up: remove spawned extras, return the original items home.
   cleanUp() {
@@ -2233,6 +2626,7 @@ const Props = {
       p.teleport(p.homePos, p.homeQuat);
       if (p.thermo) p.thermo.temp = THERMO.Tamb;
     }
+    Liquids.reset();
     Foods.initial();
   },
   capture() { for (let i = 0; i < this.list.length; i++) this.list[i].capture(); },
@@ -2254,14 +2648,21 @@ const Props = {
 // Food pieces are Props with per-instance geometry, a Thermo (1D finite-volume state) and a procedural
 // shader that reads the thermal state: per-face browning/char/moisture and the peak-temperature profile
 // across the thermal axis (so any cut face shows the real doneness gradient).
-const FOOD_LOOK = { beef: 0, onion: 1, egg: 2, eggWhite: 3, eggYolk: 4, garlic: 5 };
+const FOOD_LOOK = { beef: 0, onion: 1, egg: 2, eggWhite: 3, eggYolk: 4, garlic: 5, butter: 6, mushroom: 7, pasta: 8 };
 
 const FoodVis = {
   patch(shader, mat) {
     Object.assign(shader.uniforms, mat.userData.u);
     shader.vertexShader = shader.vertexShader
-      .replace('#include <common>', '#include <common>\nattribute vec4 fd;\nvarying vec4 vFd;\nvarying vec3 vLoc;\nvarying vec3 vLN;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvLoc = transformed; vFd = fd; vLN = objectNormal;');
+      .replace('#include <common>', '#include <common>\nattribute vec4 fd;\nattribute float bnd;\nuniform float uBend;\nvarying vec4 vFd;\nvarying vec3 vLoc;\nvarying vec3 vLN;')
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+if (uBend > 0.001) {
+  // Cooked spaghetti goes limp: strands (along local X, bnd = -1..1) coil into a loose nest.
+  float a = bnd * 2.4 + position.z * 140.0 + position.y * 60.0, R = 0.026 + position.y * 1.4;
+  vec3 coil = vec3(cos(a) * R, position.z * 0.5 + abs(sin(bnd * 5.0 + position.y * 300.0)) * 0.007, sin(a) * R);
+  transformed = mix(transformed, coil, uBend);
+}
+vLoc = transformed; vFd = fd; vLN = objectNormal;`);
     shader.fragmentShader = shader.fragmentShader
       .replace('#include <common>', `#include <common>
 uniform int uLook; uniform float uShape; uniform float uTm[8]; uniform float uN; uniform vec3 uAxO; uniform vec3 uAx; uniform float uL;
@@ -2325,6 +2726,18 @@ vec3 brownCol(float b){ vec3 c = mix(vec3(0.80, 0.58, 0.30), vec3(0.52, 0.28, 0.
   } else if (uLook == 4) {
     float st = smoothstep(65.0, 74.0, tm);
     col = mix(vec3(0.98, 0.60, 0.07), vec3(0.97, 0.80, 0.36), st); frough = mix(0.1, 0.6, st);
+  } else if (uLook == 6) {
+    col = mix(vec3(0.99, 0.91, 0.58), vec3(1.0, 0.86, 0.44), uX.y); frough = mix(0.5, 0.12, uX.y);
+  } else if (uLook == 7) {
+    float sp = ffbm(op * 180.0 + uSeed);
+    col = mix(vec3(0.93, 0.88, 0.80), vec3(0.82, 0.75, 0.65), sp * 0.6);
+    if (vLN.y < -0.3 && !cutFace) col = mix(vec3(0.52, 0.40, 0.32), col, 0.35);
+    if (cutFace) col = vec3(0.94, 0.91, 0.83);
+    col = mix(col, vec3(0.56, 0.46, 0.36), uX.y * 0.7); frough = mix(0.75, 0.35, uX.y);
+  } else if (uLook == 8) {
+    col = mix(vec3(0.96, 0.84, 0.50), vec3(0.98, 0.91, 0.68), smoothstep(0.05, 0.6, uX.y));
+    col = mix(col, vec3(0.97, 0.94, 0.84), smoothstep(0.85, 1.0, uX.y));
+    frough = mix(0.55, 0.18, smoothstep(0.1, 0.5, uX.y));
   } else {
     col = vec3(0.95, 0.93, 0.84); frough = 0.4;
     if (vFd.x < 0.5 && uX.x < 0.5) { col = vec3(0.90, 0.83, 0.74); frough = 0.75; }
@@ -2347,10 +2760,10 @@ vec3 brownCol(float b){ vec3 c = mix(vec3(0.80, 0.58, 0.30), vec3(0.52, 0.28, 0.
       uAxO: { value: new THREE.Vector3() }, uAx: { value: new THREE.Vector3(0, 1, 0) }, uL: { value: 0.02 },
       uBr: { value: new THREE.Vector3() }, uCh: { value: new THREE.Vector3() }, uWt: { value: new THREE.Vector3() },
       uX: { value: new THREE.Vector4() }, uOp: { value: new THREE.Matrix4() }, uSeed: { value: Math.random() * 50 }, uHi: { value: 0 },
-      uTm2: { value: new Float32Array(8) }, uN2: { value: 2 }, uAxO2: { value: new THREE.Vector3() }, uAx2: { value: new THREE.Vector3(0, 1, 0) }, uL2: { value: 0.02 }, uShape2: { value: 0 }, uHas2: { value: 0 },
+      uBend: { value: 0 }, uTm2: { value: new Float32Array(8) }, uN2: { value: 2 }, uAxO2: { value: new THREE.Vector3() }, uAx2: { value: new THREE.Vector3(0, 1, 0) }, uL2: { value: 0.02 }, uShape2: { value: 0 }, uHas2: { value: 0 },
     };
     m.onBeforeCompile = (sh) => FoodVis.patch(sh, m);
-    m.customProgramCacheKey = () => 'food-v2' + (transparent ? 't' : '');
+    m.customProgramCacheKey = () => 'food-v3' + (transparent ? 't' : '');
     return m;
   },
   // Push a piece's thermal state into its material uniforms.
@@ -2440,6 +2853,31 @@ const FoodShapes = {
     for (let i = 0; i < p.count; i++) { const x = p.getX(i), y = p.getY(i), z = p.getZ(i), t = (y / 0.011 + 1) / 2; p.setXYZ(i, x * (1.0 - 0.45 * t) + 0.004 * t * t, y * 1.55, z * 0.85 * (1.0 - 0.3 * t)); }
     return foodGeo(g);
   },
+  butter() { return foodGeo(new THREE.BoxGeometry(0.05, 0.016, 0.035, 2, 1, 2)); },
+  mushroom() {
+    const pts = [[0, -0.016], [0.0075, -0.016], [0.007, -0.004], [0.009, 0.0], [0.018, 0.0015], [0.0205, 0.0065], [0.018, 0.013], [0.01, 0.0175], [0, 0.0185]];
+    return foodGeo(new THREE.LatheGeometry(pts.map(([x, y]) => new THREE.Vector2(x, y)), 16));
+  },
+  // Spaghetti bundle: strands along local X; `bnd` = position along the strand (−1..1) for the limp-coil shader.
+  spaghetti(len = 0.26, n = 26) {
+    const parts = [], r = rng((len * 1e4) | 0);
+    for (let i = 0; i < n; i++) {
+      const a = r() * 6.283, d = Math.sqrt(r()) * 0.0075, g = new THREE.CylinderGeometry(0.00095, 0.00095, len * (0.97 + r() * 0.03), 5, 6, false);
+      g.rotateZ(Math.PI / 2); g.translate((r() - 0.5) * 0.004, Math.cos(a) * d, Math.sin(a) * d); parts.push(g.toNonIndexed());
+    }
+    const g = mergeGeometries(parts, false), P = g.attributes.position, bnd = new Float32Array(P.count);
+    for (let i = 0; i < P.count; i++) bnd[i] = clamp(P.getX(i) / (len / 2), -1, 1);
+    const out = foodGeo(g); out.setAttribute('bnd', new THREE.BufferAttribute(bnd, 1)); return out;
+  },
+  penne() {
+    const parts = [], r = rng(77);
+    for (let i = 0; i < 14; i++) {
+      const g = new THREE.CylinderGeometry(0.0048, 0.0048, 0.045, 10, 1, true), P = g.attributes.position;
+      for (let k = 0; k < P.count; k++) P.setY(k, P.getY(k) + P.getX(k) * 0.35); // angled "quill" ends
+      g.rotateX(r() * 3); g.rotateY(r() * 6.28); g.translate((r() - 0.5) * 0.05, r() * 0.018, (r() - 0.5) * 0.05); parts.push(g.toNonIndexed());
+    }
+    return foodGeo(mergeGeometries(parts, false));
+  },
   // Egg puddle: unit-radius flat white disc (scaled by the spread radius) + separate yolk dome.
   eggWhite() {
     const pts = [[0, -0.0025], [0.9, -0.0025], [0.985, -0.0018], [1.0, 0.0], [0.97, 0.0022], [0.6, 0.003], [0, 0.0034]];
@@ -2469,7 +2907,7 @@ class FoodPiece extends Prop {
     const def = { name: fdef.name, cat: 'Food', food: true, mass: massKg, sound: fdef.look === 'egg' ? 'ceramic' : 'produce', size: opts.size ?? geo.boundingSphere.radius,
       linDamp: 0.3, angDamp: fdef.look === 'egg' || fdef.look === 'onion' ? 1.2 : 0.6, friction: 0.85, restitution: 0.02,
       // Trigger / right-click on held food: peel an onion, crack an egg.
-      use: fdef.look === 'onion' ? (p) => Foods.peel(p, null) : fdef.look === 'egg' ? (p) => Foods.crackEgg(p) : undefined };
+      use: fdef.look === 'onion' ? (p) => Foods.peel(p, null) : fdef.look === 'egg' ? (p) => Foods.crackEgg(p) : foodKey === 'spaghetti' ? (p) => Foods.snapPasta(p) : undefined };
     const shapes = opts.shapes || [hullShape(geo, vol)];
     super(foodKey, pos, quat, opts.spawned ?? true, { def, parts: [{ mat, geo, cast: vol > 3e-5 }], shapes, volume: vol });
     this.foodKey = foodKey; this.fdef = fdef; this.mat = mat; this.geo = geo; this.volume = vol;
@@ -2499,10 +2937,26 @@ class FoodPiece extends Prop {
   // Point in local coords → peak temperature of the thermal field there.
   tmaxAt(p) { return frameSample(this.frame, this.th, p, true); }
   syncVisual() {
-    this.extra.x = this.peeled ? 1 : 0; this.extra.y = this.th.cook.sweat || 0;
-    FoodVis.sync(this.mat, this.th, this.frame, this.opM, this.extra, this.legacy);
-    // Meat shrinks as it loses water (10–25% by well-done).
-    if (this.fdef.protein && this.fdef.look === 'beef') { const s = Math.cbrt(clamp(this.th.mass / this.th.mass0, 0.7, 1)); this.meshes[0].scale.setScalar(s); }
+    const th = this.th, look = this.fdef.look;
+    this.extra.x = this.peeled ? 1 : 0;
+    this.extra.y = look === 'pasta' ? (th.cook.hyd || 0) : look === 'butter' ? smoothstep(10, 30, th.sample(1)) : (th.cook.sweat || 0);
+    FoodVis.sync(this.mat, th, this.frame, this.opM, this.extra, this.legacy);
+    // Meat shrinks as it loses water (10–25% by well-done); mushrooms lose up to half their volume; butter melts away.
+    if (this.fdef.protein && look === 'beef') { const s = Math.cbrt(clamp(th.mass / th.mass0, 0.7, 1)); this.meshes[0].scale.setScalar(s); }
+    else if (look === 'mushroom') this.meshes[0].scale.setScalar(Math.cbrt(clamp(th.mass / th.mass0, 0.45, 1)));
+    else if (look === 'butter') this.meshes[0].scale.setScalar(Math.cbrt(clamp(1 - (this.meltFrac || 0), 0.05, 1)));
+    else if (this.len) {
+      const b = smoothstep(0.3, 0.5, th.cook.hyd || 0); this.mat.userData.u.uBend.value = b;
+      if (b > 0.5 && !this.limp) { this.limp = true; this.reshapeCollider(0.009, 0.036); }
+    }
+  }
+  // Limp pasta settles as a flat nest instead of a rigid rod.
+  reshapeCollider(hh, r) {
+    for (const c of this.colliders) { Phys.propByCollider.delete(c.handle); world.removeCollider(c, true); }
+    this.colliders.length = 0;
+    const d = RAPIER.ColliderDesc.cylinder(hh, r).setMass(this.def.mass).setFriction(0.9).setRestitution(0)
+      .setCollisionGroups(Prop.groupsFor('food', this.holders.length > 0)).setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS).setContactForceEventThreshold(this.def.mass * 9.81 * 2.5);
+    const c = world.createCollider(d, this.body); c.__kind = 'food'; this.colliders.push(c); Phys.propByCollider.set(c.handle, this);
   }
   destroy() { super.destroy(); const i = Foods.pieces.indexOf(this); if (i >= 0) Foods.pieces.splice(i, 1); this.mat.dispose(); this.geo.dispose(); }
 }
@@ -2705,11 +3159,32 @@ const Foods = {
       case 'egg': return new FoodPiece('eggShell', FoodShapes.egg(), pos, quat, { spawned, T0: T0 ?? 4, sphere: true, whole: true });
       case 'onion': return new FoodPiece('onion', FoodShapes.onion(), pos, quat, { spawned, T0: T0 ?? 21, sphere: true, whole: true });
       case 'garlic': return new FoodPiece('garlic', FoodShapes.garlic(), pos, quat, { spawned, T0: T0 ?? 21, sphere: true, whole: true });
+      case 'mushroom': return new FoodPiece('mushroom', FoodShapes.mushroom(), pos, quat, { spawned, T0: T0 ?? 4, sphere: true, whole: true });
+      case 'butter': return new FoodPiece('butter', FoodShapes.butter(), pos, quat, { spawned, T0: T0 ?? 4, whole: true });
+      case 'spaghetti': return this.makePasta('spaghetti', 0.26, pos, quat, spawned, T0);
+      case 'penne': return this.makePasta('penne', 0, pos, quat, spawned, T0);
     }
     return null;
   },
+  makePasta(kind, len, pos, quat, spawned = true, T0 = 21, hyd = 0) {
+    const isS = kind === 'spaghetti', geo = isS ? FoodShapes.spaghetti(len) : FoodShapes.penne();
+    const mass = isS ? 0.1 * len / 0.26 : 0.08, vol = mass / FOOD_DEFS[kind].rho, L = isS ? 0.0019 : 0.0013;
+    const th = new Thermo(FOOD_DEFS[kind], { shape: 'slab', L, A: vol / L, As: 0 }, T0 ?? 21); th.cook.hyd = hyd;
+    const p = new FoodPiece(kind, geo, pos, quat, { spawned, th, frame: { shape: 'slab', o: new THREE.Vector3(), ax: new THREE.Vector3(0, 1, 0), L }, mass, volume: vol, whole: true });
+    p.noCut = true; if (isS) p.len = len; else p.mat.side = THREE.DoubleSide;
+    return p;
+  },
+  // Dry spaghetti snaps in half (trigger, or a hard knock); cooked pasta just bends.
+  snapPasta(p) {
+    if (!p.alive || !p.len || p.len < 0.1 || (p.th.cook.hyd || 0) > 0.2) return;
+    const half = p.len / 2, T = p.th.core, hyd = p.th.cook.hyd || 0;
+    for (const s of [-1, 1]) { _fv1.set(s * half / 2, 0, 0).applyQuaternion(p.renderQuat).add(p.renderPos); const c = this.makePasta('spaghetti', half, _fv1.clone(), p.renderQuat.clone(), true, T, hyd); c.body.setLinvel({ x: 0, y: 0.3, z: 0 }, true); }
+    AudioSys.crack(p.renderPos); AudioSys.crunch(p.renderPos, 0.4);
+    Props.remove(p);
+  },
   catalog: [
     { key: 'ribeye', name: 'Ribeye Steak (4°C)' }, { key: 'egg', name: 'Egg (4°C)' }, { key: 'onion', name: 'Onion' }, { key: 'garlic', name: 'Garlic Clove' },
+    { key: 'mushroom', name: 'Mushroom (4°C)' }, { key: 'butter', name: 'Butter, 25 g (4°C)' }, { key: 'spaghetti', name: 'Spaghetti (100 g)' }, { key: 'penne', name: 'Penne (80 g)' },
   ],
   initial() {
     const CT = CONFIG.kitchen.counterTop, IB = CT + 0.02, q = (y) => new THREE.Quaternion().setFromEuler(new THREE.Euler(0, y * DEG, 0));
@@ -2720,6 +3195,11 @@ const Foods = {
     add(this.spawn('garlic', new THREE.Vector3(0.48, IB + 0.012, -0.05), new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, Math.PI / 2)), false));
     add(this.spawn('garlic', new THREE.Vector3(0.52, IB + 0.012, -0.02), new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 1, Math.PI / 2)), false));
     for (let i = 0; i < 3; i++) add(this.spawn('egg', new THREE.Vector3(0.22 + i * 0.06, IB + 0.023, 0.3), new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, Math.PI / 2)), false));
+    // Back counter (left of the range): butter, mushrooms, dried pasta.
+    for (let i = 0; i < 2; i++) add(this.spawn('butter', new THREE.Vector3(-0.95, CT + 0.01, -2.1 - i * 0.07), q(0), false));
+    for (let i = 0; i < 10; i++) add(this.spawn('mushroom', new THREE.Vector3(-1.95 + (i % 5) * 0.06, CT + 0.018, -2.04 - Math.floor(i / 5) * 0.07), q(i * 37), false));
+    for (let i = 0; i < 2; i++) add(this.spawn('spaghetti', new THREE.Vector3(-1.55, CT + 0.009 + i * 0.016, -2.25), q(0), false));
+    add(this.spawn('penne', new THREE.Vector3(-1.52, CT + 0.03, -2.05), q(0), false));
   },
   removeAll() { for (const p of this.pieces.slice()) Props.remove(p); for (const p of this.piles.slice()) Props.remove(p); },
   restoreInitial() { this.removeAll(); this.initial(); },
@@ -2871,6 +3351,10 @@ const Foods = {
   // Contact boundary conditions: which face touches which surface, and how much area.
   applyContacts(p) {
     const th = p.th; th.clearExposure();
+    // Immersed in a vessel's liquid (pasta in boiling water, food in deep oil): every face exchanges with it.
+    p.inLiquid = null;
+    const LV = p.holders.length ? null : Liquids.liquidAt(p.renderPos, 0.004);
+    if (LV) { exposeSubmerged(th, LV.contents); p.inLiquid = LV; p.inPan = null; p.downFace = -1; return; }
     const up = _fv1.set(0, 1, 0);
     // Face pointing down (slab: ±axis in world vs up)
     let down = 2;
@@ -2900,14 +3384,22 @@ const Foods = {
     let Ac = F[down].area;
     if (p.frame.shape === 'sphere') Ac = F[0].area * (p.isPuddle ? 0.5 : 0.08);
     else if (down === 2) Ac = Math.min(F[2].area * 0.25, p.frame.L * Math.sqrt(F[0].area) * 0.9);
+    const top = p.frame.shape === 'sphere' ? 0 : down === 0 ? 1 : down === 1 ? 0 : 2, inOven = Oven.contains(p.renderPos);
     if (pan) {
-      const pt = pan.thermo, h = pt.def.hContact * p.fdef.contactQ;
-      F[down].contactT = pt.T;
-      th.expose(down, h, Ac, pt.T, pt);
+      const pt = pan.thermo, C = pan.contents, A = pt.bottomArea();
+      th.pool = C; // expelled juices run into the pan
+      // A pan whose floor is under a layer of liquid (crowded mushrooms, juices) stews instead of searing.
+      if (C && C.depth(A) > THERMO.poolDepth && C.waterFrac() > 0.5) { F[down].contactT = C.T; th.expose(down, 700, Ac, C.T, C); F[down].wet = Math.max(F[down].wet, 0.015); }
+      else { F[down].contactT = pt.T; th.expose(down, contactH(pt.def, th, down), Ac, pt.T, pt); }
       pan.contactArea += Ac;
-      const airT = THERMO.Tamb + (pt.T - THERMO.Tamb) * 0.12;
-      for (let fi = 0; fi < 3; fi++) if (fi !== down) th.exposeAir(fi, airT);
-      if (p.frame.shape === 'sphere') th.exposeAir(0, airT);
+      if (inOven) Oven.exposeFood(th, down, top, p.renderPos.y, true);
+      else {
+        const airT = THERMO.Tamb + (pt.T - THERMO.Tamb) * 0.12;
+        for (let fi = 0; fi < 3; fi++) if (fi !== down) th.exposeAir(fi, airT);
+        if (p.frame.shape === 'sphere') th.exposeAir(0, airT);
+      }
+    } else if (inOven && !p.holders.length) {
+      Oven.exposeFood(th, down, top, p.renderPos.y, false);
     } else if (p.holders.length || !this.resting(p)) {
       for (let fi = 0; fi < 3; fi++) th.exposeAir(fi);
     } else {
@@ -2932,17 +3424,35 @@ const Foods = {
         if (p.inPan || this.resting(p)) p.spread(dt);
       }
       p.th.step(dt);
+      // Energy the food drew: pans get it back as a load, liquids via their drawJ (settleFoodEnergy).
+      const J = settleFoodEnergy(p.th);
       if (p.inPan) {
-        const pt = p.inPan.thermo; let j = 0;
-        for (let k = 0; k < p.th.pans.length; k++) if (p.th.pans[k] === pt) j += p.th.panJ[k];
-        p.inPan.foodJ += j;
+        p.inPan.foodJ += J;
         p.inPan.evap += p.th.faces[0].evap + p.th.faces[1].evap + p.th.faces[2].evap;
       }
+      if (p.fdef.melts && this.melt(p)) continue;
       p.syncVisual();
       this.emitFx(p, dt);
     }
+    // Crowding: share of each pan's floor covered by food (traps steam; see PanThermo.covered).
+    for (const pp of Stove.pans) pp.thermo.covered = pp.contactArea / pp.thermo.bottomArea() / THERMO.crowdFull;
     this.towels(dt);
   },
+  // Butter: nodes above the melting point turn their excess heat into melted butter (latent heat), which
+  // runs into the pan / pot it sits in (or pools on the counter). Returns true once the pat is gone.
+  melt(p) {
+    const th = p.th, Tm = p.fdef.melts; let dm = 0;
+    for (let i = 0; i < th.N; i++) if (th.T[i] > Tm) { dm += th.C[i] * (th.T[i] - Tm) / LIQ.Lf; th.T[i] = Tm; }
+    if (dm <= 0) return false;
+    p.meltFrac = (p.meltFrac || 0) + dm / th.mass0;
+    const gone = p.meltFrac > 0.93; if (gone) dm += th.mass0 * Math.max(0, 1 - p.meltFrac);
+    const parts = this._melt; parts.butterfat = dm * 0.82; parts.water = dm * 0.16; parts.milkSolids = dm * 0.02; parts.T = Tm;
+    const dst = p.inLiquid ? p.inLiquid.contents : p.inPan ? p.inPan.contents : null;
+    if (dst) dst.add(parts, Tm); else Liquids.deposit(p.renderPos, parts, null, Tm);
+    if (gone) { Props.remove(p); return true; }
+    return false;
+  },
+  _melt: { butterfat: 0, water: 0, milkSolids: 0, T: 0 },
   // Steam from evaporation, smoke from charring surfaces.
   emitFx(p, dt) {
     const F = p.th.faces, evap = F[0].evap + F[1].evap + F[2].evap;
@@ -2970,6 +3480,7 @@ const Foods = {
   },
   // Contact impacts (from physics events): eggs crack on pan rims / counters.
   onImpact(prop, other, dv) {
+    if (prop.len && dv > 1.4) { this.snapPasta(prop); return; }
     if (prop.foodKey === 'eggShell') {
       const hard = other && (other.thermo || other.def && (other.def.pan || other.def.sound === 'metal'));
       if (dv > (prop.holders.length ? 0.45 : 1.1) || (hard && dv > 0.3)) this.crackEgg(prop);
@@ -3092,6 +3603,8 @@ const Stove = {
   init() {
     const CT = CONFIG.kitchen.counterTop, bz1 = -CONFIG.kitchen.halfZ + CONFIG.kitchen.counterDepth;
     [-0.47, -0.33, -0.09, 0.05].forEach((x, i) => this.knobs.push({ i, burner: this.knobBurner[i], angle: 0, lit: false, ign: 0, clickT: 0, pos: new THREE.Vector3(x, CT - 0.075, bz1 + 0.03), grab: null, tickAngle: 0, dirty: true }));
+    // Oven dials share the knob mesh: temperature (OFF, 50–290°C) and mode (OFF / BAKE / CONVECT / BROIL detents).
+    [[-0.555, 'temp'], [0.12, 'mode']].forEach(([x, oven], j) => this.knobs.push({ i: 4 + j, burner: -1, oven, angle: 0, lit: false, ign: 0, clickT: 0, pos: new THREE.Vector3(x, CT - 0.075, bz1 + 0.03), grab: null, tickAngle: 0, dirty: true }));
     // Knob geometry with an indicator ridge so its rotation reads clearly.
     const g1 = new THREE.CylinderGeometry(0.022, 0.024, 0.03, 20); g1.rotateX(Math.PI / 2);
     const g2 = new THREE.BoxGeometry(0.006, 0.03, 0.012); g2.translate(0, 0.008, 0.018);
@@ -3135,8 +3648,9 @@ const Stove = {
   label(k) { if (!k.lit) return k.ign > 0 ? 'igniting' : 'OFF'; const f = this.powerFrac(k.angle); return f > 0.95 ? 'HI' : f > 0.55 ? 'MED-HI' : f > 0.3 ? 'MED' : 'LO'; },
   knobNear(point, r = 0.05) { let best = null, bd = r; for (const k of this.knobs) { const d = k.pos.distanceTo(point); if (d < bd) { bd = d; best = k; } } return best; },
   setAngle(k, a) {
-    const S = CONFIG.stove; a = clamp(a, 0, S.knobMax);
+    const S = CONFIG.stove; a = clamp(a, 0, k.oven === 'mode' ? 3.6 : S.knobMax);
     if (Math.abs(a - k.tickAngle) > 0.26) { k.tickAngle = a; AudioSys.knobTick(k.pos); if (k.grab && k.grab.side) haptic(k.grab.side, 0.12, 10); }
+    if (k.oven) { k.angle = a; k.dirty = true; Oven.setDial(k); return; }
     const wasOn = k.angle >= S.offAngle, isOn = a >= S.offAngle;
     if (!wasOn && isOn) { k.ign = S.igniteTime; k.clickT = 0; }
     if (wasOn && !isOn) { if (k.lit) AudioSys.flameOff(k.pos); k.lit = false; k.ign = 0; }
@@ -3151,9 +3665,12 @@ const Stove = {
         if (k.clickT <= 0) { k.clickT = 0.11; AudioSys.igniterClick(Kitchen.burners[k.burner]); }
         if (k.ign <= 0) { k.lit = true; AudioSys.ignite(Kitchen.burners[k.burner]); }
       }
+      // The mode dial clicks into its nearest detent when let go.
+      if (k.oven === 'mode' && !k.grab) { const d = Math.round(k.angle / 1.2) * 1.2 - k.angle; if (Math.abs(d) > 0.005) { k.angle += d * Math.min(1, dt * 12); k.dirty = true; } }
       if (k.dirty) {
         _m1.makeRotationZ(k.angle); _m1.setPosition(k.pos); Kitchen.knobs.setMatrixAt(k.i, _m1); Kitchen.knobs.instanceMatrix.needsUpdate = true; k.dirty = false;
       }
+      if (k.burner < 0) continue;
       const b = k.burner, f = k.lit ? this.powerFrac(k.angle) : 0, bp = Kitchen.burners[b];
       if (f > 0) { const hs = 0.35 + 0.95 * f, rs = 0.85 + 0.2 * f; _m1.makeScale(rs, hs, rs); _m1.setPosition(bp.x, bp.y - 0.018, bp.z); }
       else _m1.makeScale(0, 0, 0);
@@ -3174,7 +3691,16 @@ const Stove = {
         const bp = Kitchen.burners[b], dx = _v1.x - bp.x, dz = _v1.z - bp.z, dy = _v1.y - bp.y;
         if (dx * dx + dz * dz < S.panReach * S.panReach && dy > -0.02 && dy < S.panGap) { W = this.burnerW(b); p.onBurner = b; break; }
       }
-      pt.step(dt, W, p.foodJ || 0);
+      // Inside the oven: the cavity air/walls replace room air; the broil element radiates onto the pan.
+      let env = null;
+      if (Oven.contains(p.renderPos)) {
+        env = Oven.env; const O = Oven.thermo;
+        if (O.mode === 'broil') { const a = O.elemT + 273.15, b = pt.T + 273.15; W += pt.def.emissivity * THERMO.sigma * pt.bottomArea() * Oven.broilF(_v1.y) * (a * a * a * a - b * b * b * b) / pt.def.coupling; }
+        O.foodJ += env.h * pt.def.area * (O.Ta - pt.mean) * dt;
+      }
+      pt.step(dt, W, p.foodJ || 0, env);
+      // A thin film of water flashing off hot metal sizzles too.
+      const C = p.contents; if (C && C.m.water > 0 && C.depth(pt.bottomArea()) < 0.0015) p.evap = (p.evap || 0) + C.evapRate;
       // Smoke: nonstick past its safe limit, or any bare pan well past smoking hot.
       const smoke = Math.max(pt.smoke, clamp((pt.T - 330) / 60, 0, 1));
       p.smokeAcc = (p.smokeAcc || 0) + smoke * dt * 10;
@@ -3251,6 +3777,9 @@ const Particles = {
   types: {
     steam: { col: [0.96, 0.96, 0.96], a: 0.2, life: 1.5, s0: 0.02, s1: 0.13, vy: 0.32, spread: 0.06 },
     smoke: { col: [0.33, 0.31, 0.3], a: 0.32, life: 3.2, s0: 0.03, s1: 0.26, vy: 0.2, spread: 0.05 },
+    salt: { col: [0.97, 0.97, 0.97], a: 0.95, life: 0.45, s0: 0.004, s1: 0.004, vy: -1.3, spread: 0.08 },
+    splash: { col: [0.85, 0.92, 0.98], a: 0.5, life: 0.35, s0: 0.01, s1: 0.03, vy: 0.25, spread: 0.3 },
+    spatter: { col: [0.95, 0.85, 0.5], a: 0.8, life: 0.4, s0: 0.004, s1: 0.006, vy: 1.2, spread: 0.9 },
   },
   emit(type, x, y, z) {
     if (!this.pos || this.n >= this.max) return;
@@ -3296,7 +3825,8 @@ const ChefEye = {
     this.mesh.renderOrder = 40; this.mesh.visible = false; scene.add(this.mesh);
   },
   pick() {
-    const isT = (p) => p && p.alive && (p.th || p.thermo);
+    const isT = (p) => p && p.alive && (p.th || p.thermo || p.contents);
+    const oven = (hit) => hit && hit.collider.handle === Oven.doorHandle ? Oven : null;
     if (Input.mode === 'xr') {
       for (const h of [Hands.dominant(), Hands.offhand()]) {
         if (!h.active) continue;
@@ -3304,13 +3834,13 @@ const ChefEye = {
         if (isT(h.hover)) return h.hover;
       }
       const h = Hands.dominant();
-      if (h.active && !h.uiHover) { const hit = Phys.castRay(h.rayOrigin, h.rayDir, 3, GROUPS.qPoint, _v1, null); const p = hit && Phys.propByCollider.get(hit.collider.handle); if (isT(p)) return p; }
+      if (h.active && !h.uiHover) { const hit = Phys.castRay(h.rayOrigin, h.rayDir, 3, GROUPS.qPoint, _v1, null); const p = hit && Phys.propByCollider.get(hit.collider.handle); if (isT(p)) return p; if (oven(hit)) return Oven; }
       return null;
     }
     const h = Hands.dominant(); if (isT(h.held)) return h.held;
     Loco.updateHead(); _v2.set(0, 0, -1).applyQuaternion(Loco.headQuat);
     const hit = Phys.castRay(Loco.headPos, _v2, 3, GROUPS.qPoint, _v1, null); const p = hit && Phys.propByCollider.get(hit.collider.handle);
-    return isT(p) ? p : null;
+    return isT(p) ? p : oven(hit);
   },
   update(dt) {
     if (!settings.chefsEye) { this.mesh.visible = false; this.target = null; return; }
@@ -3331,6 +3861,33 @@ const ChefEye = {
     c.fillStyle = 'rgba(20,14,10,0.9)'; c.beginPath(); c.roundRect(2, 2, 508, 396, 18); c.fill();
     c.strokeStyle = 'rgba(127,227,255,0.6)'; c.lineWidth = 3; c.stroke();
     c.textBaseline = 'middle'; c.fillStyle = '#7fe3ff'; c.font = '700 26px system-ui'; c.textAlign = 'left';
+    if (p.isOven) {
+      const t = p.thermo; c.fillText(`Oven · ${OVEN_MODES[p.modeIdx].toUpperCase()}${p.set ? ' · set ' + fmtT(p.set) : ''}`, 20, 32);
+      c.fillStyle = '#f4e9d8'; c.font = '600 24px system-ui';
+      c.fillText(`Cavity air  ${fmtT(t.Ta)}`, 20, 80); c.fillText(`Walls  ${fmtT(t.Tw)}   element ${fmtT(t.elemT)}`, 20, 116);
+      c.fillText(`Elements  ${t.heat ? 'ON' : 'off'}   door ${Math.round(clamp(p.angle / 1.52, 0, 1) * 100)}% open`, 20, 152);
+      c.fillText(t.mode === 'off' ? 'Off' : t.preheat ? 'Preheating…' : 'At temperature', 20, 188);
+      c.fillStyle = '#b7a58f'; c.font = '500 20px system-ui';
+      c.fillText(t.mode === 'convect' ? 'Fan on: food sees ~2× the air-side heat transfer.' : t.mode === 'broil' ? 'Broil: intense radiant heat on top faces.' : 'Door open → the air temperature drops fast.', 20, 320);
+      this.tex.needsUpdate = true; return;
+    }
+    if (p.contents && !p.th && (!p.thermo || p.contents.mass > 1e-4)) {
+      const C = p.contents, t = p.thermo;
+      c.fillText(`${p.def.name} · ${C.stage()}`, 20, 32);
+      c.fillStyle = '#f4e9d8'; c.font = '600 24px system-ui'; let y = 80;
+      const line = (txt) => { c.fillText(txt, 20, y); y += 36; };
+      if (C.mass > 1e-5) line(`Contents  ${fmtT(C.T)}   ${(C.liters() * 1000).toFixed(0)} ml${C.lid ? '   lid on' : ''}`);
+      if (t) line(`Pan surface ${fmtT(t.T)} · burner ${p.onBurner >= 0 ? (Stove.burnerW(p.onBurner) / 1000).toFixed(1) + ' kW' : 'off'}`);
+      if (C.m.water > 1e-4) line(`Water ${(C.m.water * 1000).toFixed(0)} g · salt ${(C.saltConc() * 1000).toFixed(1)} g/kg · steam ${(C.evapRate * 1000).toFixed(2)} g/s`);
+      if (C.m.oil > 1e-4) line(`${OILS[C.oilType].name} ${(C.m.oil * 1000).toFixed(0)} g · smoke point ${fmtT(OILS[C.oilType].smoke)}`);
+      if (C.m.butterfat + C.m.butterSolid > 1e-4) line(`Butter: browning ${Math.round(C.brown * 100)}% · burnt ${Math.round(C.burnt * 100)}%`);
+      if (C.m.riceDry > 1e-4) line(`Rice ${(C.m.riceDry * 1000).toFixed(0)} g · hydrated ${Math.round(C.riceHyd * 100)}% · scorch ${Math.round(C.scorch * 100)}%`);
+      if (t && t.covered > 0.05) line(`Crowding ${Math.round(clamp(t.covered, 0, 1) * 100)}%`);
+      c.fillStyle = '#b7a58f'; c.font = '500 20px system-ui';
+      const tip = C.mass < 1e-5 ? 'Empty. Fill it at the sink or pour into it.' : C.smoke > 0.05 ? 'Past the smoke point: turn it down!' : C.m.water > 1e-4 && C.T < 99 ? 'Not boiling yet. A lid speeds it up.' : C.boiling > 0.5 ? 'Rolling boil.' : '';
+      c.fillText(tip, 20, 330);
+      this.tex.needsUpdate = true; return;
+    }
     if (p.thermo && !p.th) {
       const t = p.thermo; c.fillText(`${p.def.name}`, 20, 32);
       c.fillStyle = '#f4e9d8'; c.font = '600 24px system-ui';
@@ -3347,12 +3904,15 @@ const ChefEye = {
     if (fd.look === 'beef') title += ` · ${beefDoneness(th.coreMax)}`;
     if (p.isPuddle) title = `Egg · white ${Math.round(th.cook.set * 100)}% set · yolk ${Math.round(p.yolk.cook.set * 100)}% set`;
     if (fd.look === 'onion') title += ` · sweat ${Math.round((th.cook.sweat || 0) * 100)}%`;
+    if (fd.look === 'mushroom') title += ` · sweated ${Math.round((th.cook.sweat || 0) * 100)}%`;
+    if (fd.pasta) { const h = th.cook.hyd || 0; title += ` · ${h < 0.62 ? 'firm' : h < 0.78 ? 'al dente' : h < 0.88 ? 'soft' : 'mushy'} (${Math.round(h * 100)}%)`; }
+    if (fd.melts) title += ` · ${Math.round((p.meltFrac || 0) * 100)}% melted`;
     if (p.isPile) title = p.def.name;
     c.fillText(title, 20, 30);
     c.fillStyle = '#f4e9d8'; c.font = '600 22px system-ui';
     c.fillText(`Core ${fmtT(th.core)}   peak ${fmtT(th.coreMax)}`, 20, 64);
     c.fillStyle = '#b7a58f'; c.font = '500 17px system-ui';
-    c.fillText(`${(th.mass * 1000).toFixed(0)} g · juicy ${(th.juiciness() * 100).toFixed(0)}%${p.inPan ? ' · in pan (' + fmtT(p.inPan.thermo.T) + ')' : ''}`, 20, 92);
+    c.fillText(`${(th.mass * 1000).toFixed(0)} g · juicy ${(th.juiciness() * 100).toFixed(0)}%${th.salt > 0 ? ' · salt ' + (th.salt / th.mass * 1000).toFixed(1) + ' g/kg' : ''}${p.inLiquid ? ' · in ' + p.inLiquid.contents.stage() + ' (' + fmtT(p.inLiquid.contents.T) + ')' : p.inPan ? ' · in pan (' + fmtT(p.inPan.thermo.T) + ')' : ''}`, 20, 92);
     const names = th.geo.shape === 'sphere' ? ['Surface'] : ['Bottom', 'Top', 'Sides'];
     const faceIdx = th.geo.shape === 'sphere' ? [0] : [0, 1, 2];
     const COLS = [20, 118, 222, 318, 414];
@@ -3405,6 +3965,755 @@ const TestMode = {
   },
 };
 
+
+/* ===================================== [CONTROLS] =================================== */
+// Grab-and-drag fixtures (oven door, oven racks, faucet lever). Twist dials are Stove.knobs.
+// A control: { name, grabPos (world, kept current), r (grab radius), begin(hand), drag(hand, dt), end(hand), mouse(dx, dy) }.
+const Controls = {
+  list: [],
+  add(c) { c.grab = null; this.list.push(c); return c; },
+  near(p) {
+    let best = null, bd = Infinity;
+    for (const c of this.list) { if (c.enabled && !c.enabled()) continue; const d = c.grabPos.distanceTo(p); if (d < c.r && d < bd) { bd = d; best = c; } }
+    return best;
+  },
+  // Ray (desktop crosshair) against the controls' grab spheres.
+  atRay(o, dir, maxT) {
+    let best = null, bt = maxT;
+    for (const c of this.list) {
+      if (c.enabled && !c.enabled()) continue;
+      _v7.subVectors(c.grabPos, o); const t = _v7.dot(dir); if (t < 0 || t > bt) continue;
+      if (_v7.addScaledVector(dir, -t).length() < c.r * 0.7) { bt = t; best = c; }
+    }
+    return best;
+  },
+};
+
+/* ====================================== [OVEN] ====================================== */
+// Hinged door with a window + interior light, two sliding racks, temperature + mode dials, a display
+// with a preheat light. Thermal model: OvenThermo (two-node cavity) on the sim fixed step; anything
+// inside the cavity (pans, food) sees its air temperature, wall radiation and — broiling — the element.
+const OVEN_MODES = ['off', 'bake', 'convect', 'broil'];
+const Oven = {
+  isOven: true, name: 'Oven', thermo: null, angle: 0, target: 0, racks: [], alive: true,
+  set: 0, modeIdx: 0, renderPos: new THREE.Vector3(), env: { T: THERMO.Tamb, h: OVEN.hBake, radT: THERMO.Tamb },
+  _q: new THREE.Quaternion(), _hv: new THREE.Vector3(), lastShown: '', chimeArmed: false,
+  init() {
+    const O = Kitchen.oven, CT = CONFIG.kitchen.counterTop; this.O = O;
+    this.thermo = new OvenThermo();
+    const w = O.width, H = 0.655, th = 0.045; this.H = H;
+    // Door: pivot on the bottom hinge; local +Y runs up the closed door, +Z points out of the oven.
+    const P = Parts(), wy0 = 0.11, wy1 = H - 0.13, wx = w / 2 - 0.09;
+    P.add(MAT.steel, new THREE.BoxGeometry(w, H - wy1, th), [0, (H + wy1) / 2, th / 2]);
+    P.add(MAT.steel, new THREE.BoxGeometry(w, wy0, th), [0, wy0 / 2, th / 2]);
+    P.add(MAT.steel, new THREE.BoxGeometry(w / 2 - wx, wy1 - wy0, th), [-(w / 2 + wx) / 2, (wy0 + wy1) / 2, th / 2]);
+    P.add(MAT.steel, new THREE.BoxGeometry(w / 2 - wx, wy1 - wy0, th), [(w / 2 + wx) / 2, (wy0 + wy1) / 2, th / 2]);
+    P.add(MAT.blackGlass, new THREE.BoxGeometry(2 * wx + 0.02, wy1 - wy0 + 0.02, 0.004), [0, (wy0 + wy1) / 2, th - 0.001]);
+    P.add(MAT.steel, new THREE.CylinderGeometry(0.012, 0.012, w - 0.12, 16), [0, H - 0.055, th + 0.045], [0, 0, Math.PI / 2]);
+    for (const s of [1, -1]) P.add(MAT.steel, new THREE.BoxGeometry(0.018, 0.018, 0.05), [s * (w / 2 - 0.08), H - 0.055, th + 0.022]);
+    const built = P.done()[0];
+    this.pivot = new THREE.Group(); this.pivot.position.copy(O.hinge); scene.add(this.pivot);
+    const door = new THREE.Mesh(built.geo, UBER); door.castShadow = true; door.receiveShadow = true; this.pivot.add(door);
+    // Window: tinted glass you can see through (clearer when the light is on).
+    this.winMat = new THREE.MeshStandardMaterial({ color: 0x1a1512, roughness: 0.05, metalness: 0.1, transparent: true, opacity: 0.55, depthWrite: false });
+    const win = new THREE.Mesh(new THREE.PlaneGeometry(2 * wx, wy1 - wy0), this.winMat); win.position.set(0, (wy0 + wy1) / 2, th + 0.002); win.renderOrder = 5; this.pivot.add(win);
+    this.body = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(O.hinge.x, O.hinge.y, O.hinge.z));
+    const dc = world.createCollider(RAPIER.ColliderDesc.cuboid(w / 2, H / 2, th / 2).setTranslation(0, H / 2, th / 2).setCollisionGroups(GROUPS.static).setFriction(0.8), this.body);
+    Phys.surfaceByCollider.set(dc.handle, 'metal'); this.doorHandle = dc.handle;
+    // Racks (instanced, 1 draw) on kinematic bodies that slide out when the door is open.
+    const rw = O.x1 - O.x0 - 0.024, rd = O.z1 - O.z0 - 0.05, R = Parts();
+    for (let i = 0; i <= 22; i++) R.add(MAT.steel, new THREE.BoxGeometry(0.003, 0.004, rd), [-rw / 2 + i * rw / 22, 0, 0]);
+    for (const s of [1, -1]) { R.add(MAT.steel, new THREE.BoxGeometry(rw, 0.008, 0.008), [0, 0, s * rd / 2]); R.add(MAT.steel, new THREE.BoxGeometry(0.008, 0.008, rd), [s * rw / 2, 0, 0]); }
+    R.add(MAT.steel, new THREE.BoxGeometry(rw * 0.6, 0.006, 0.006), [0, 0.012, rd / 2 + 0.01]);
+    this.rackMesh = new THREE.InstancedMesh(R.done()[0].geo, UBER, 2); this.rackMesh.castShadow = true; this.rackMesh.receiveShadow = true; scene.add(this.rackMesh);
+    this.rw = rw; this.rd = rd; this.zc = (O.z0 + O.z1) / 2 - 0.005;
+    O.rackY.forEach((y, i) => {
+      const b = world.createRigidBody(RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(O.cx, y, this.zc));
+      const c = world.createCollider(RAPIER.ColliderDesc.cuboid(rw / 2, 0.004, rd / 2).setCollisionGroups(GROUPS.static).setFriction(0.9), b);
+      Phys.surfaceByCollider.set(c.handle, 'metal');
+      const rack = { i, y, out: 0, body: b, pos: new THREE.Vector3(O.cx, y, this.zc) };
+      this.racks.push(rack);
+      rack.ctrl = Controls.add({ name: 'Oven rack', r: 0.07, grabPos: new THREE.Vector3(), enabled: () => this.angle > 1.2,
+        begin: (h) => { rack.o0 = rack.out; rack.z0 = h.grabPoint(_v1).z; },
+        drag: (h) => { this.setRack(rack, rack.o0 + h.grabPoint(_v1).z - rack.z0); },
+        end: () => {}, mouse: (dx, dy) => this.setRack(rack, rack.out + dy * 0.0025) });
+    });
+    // Broil element (glows when on) and interior bulb.
+    this.elemMat = new THREE.MeshStandardMaterial({ color: 0x2a2522, roughness: 0.5, metalness: 0.6, emissive: 0x000000 });
+    const eg = []; for (let k = 0; k < 4; k++) { const c = new THREE.CylinderGeometry(0.005, 0.005, rw - 0.08, 8); c.rotateZ(Math.PI / 2); c.translate(0, 0, -0.18 + k * 0.12); eg.push(c); }
+    const el = new THREE.Mesh(mergeGeometries(eg, false), this.elemMat); el.position.set(O.cx, O.y1 - 0.03, this.zc); scene.add(el);
+    this.bulbMat = new THREE.MeshBasicMaterial({ color: 0x3a3228 });
+    const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.012, 10, 8), this.bulbMat); bulb.position.set(O.x1 - 0.04, O.y1 - 0.03, O.z0 + 0.06); scene.add(bulb);
+    // Display (set temperature, actual, mode, preheat light) between the burner knob pairs.
+    this.canvas = Tex.canvas(160, 96); this.ctx = this.canvas.getContext('2d');
+    this.tex = Tex.finish(this.canvas); this.tex.wrapS = this.tex.wrapT = THREE.ClampToEdgeWrapping;
+    const disp = new THREE.Mesh(new THREE.PlaneGeometry(0.075, 0.045), new THREE.MeshBasicMaterial({ map: this.tex, toneMapped: false }));
+    const bz1 = -CONFIG.kitchen.halfZ + CONFIG.kitchen.counterDepth;
+    disp.position.set(-0.21, CT - 0.075, bz1 + 0.0165); scene.add(disp);
+    // Door handle control: drag it down/out to open.
+    this.doorCtrl = Controls.add({ name: 'Oven door', r: 0.09, grabPos: new THREE.Vector3(),
+      begin: (h) => { this.a0 = this.angle; this.h0 = this.handAngle(h.grabPoint(_v1)); },
+      drag: (h) => { this.setAngle(this.a0 + this.handAngle(h.grabPoint(_v1)) - this.h0); },
+      end: () => this.release(), mouse: (dx, dy) => this.setAngle(this.angle + dy * 0.008) });
+    this.doorCtrl.mouseEnd = () => this.release();
+    this.draw(true);
+    this.update(0);
+  },
+  handAngle(p) { return Math.atan2(p.z - this.O.hinge.z, p.y - this.O.hinge.y); },
+  minAngle() { for (const r of this.racks) if (r.out > 0.02) return 1.25; return 0; },
+  setAngle(a) { this.angle = clamp(a, this.minAngle(), 1.52); this.target = this.angle; },
+  // Released door: a light spring closes it near the top; past ~65° it drops fully open.
+  release() { this.target = this.angle < 0.3 ? this.minAngle() : this.angle > 1.1 ? 1.52 : this.angle; },
+  setRack(r, out) { r.out = clamp(out, 0, this.angle > 1.2 ? 0.3 : 0); },
+  setDial(k) {
+    const S = CONFIG.stove;
+    if (k.oven === 'temp') this.set = k.angle < 0.3 ? 0 : Math.round((OVEN.minT + (k.angle - 0.3) / (S.knobMax - 0.3) * (OVEN.maxT - OVEN.minT)) / 5) * 5;
+    else this.modeIdx = clamp(Math.round(k.angle / 1.2), 0, 3);
+    const mode = OVEN_MODES[this.modeIdx], eff = mode === 'broil' ? 'broil' : this.set > 0 ? mode : 'off';
+    this.thermo.setTemp(this.set || OVEN.minT); this.thermo.setMode(eff);
+    if (this.thermo.preheat) this.chimeArmed = true;
+  },
+  contains(p, pad = 0) { const O = this.O; return p.x > O.x0 - pad && p.x < O.x1 + pad && p.y > O.y0 - pad && p.y < O.y1 + pad && p.z > O.z0 - pad && p.z < O.z1 + 0.02 + pad; },
+  // Broil view factor for a surface at height y (element sits under the cavity roof).
+  broilF(y) { return clamp(0.12 / (this.O.y1 - 0.03 - y + 0.08), 0.12, 0.7); },
+  reset() {
+    this.angle = this.target = 0; for (const r of this.racks) r.out = 0;
+    this.thermo = new OvenThermo(); this.set = 0; this.modeIdx = 0; this.chimeArmed = false; this.lastShown = '';
+  },
+  // Per frame (before physics): door/rack kinematics, light, element glow, display.
+  update(dt) {
+    if (!this.doorCtrl.grab) { const d = this.target - this.angle; if (Math.abs(d) > 1e-4) { const was = this.angle; this.angle += d * Math.min(1, dt * 7); if (Math.abs(this.target - this.angle) < 0.004) { this.angle = this.target; if (this.target === 0 && was > 0.01) AudioSys.impact(this.pivot.position, 'metal', 0.6); } } }
+    this.pivot.rotation.x = this.angle;
+    this._q.setFromAxisAngle(_v1.set(1, 0, 0), this.angle);
+    this.body.setNextKinematicRotation(this._q);
+    for (const r of this.racks) {
+      if (this.angle < 1.2 && r.out > 0) r.out = Math.max(0, r.out - dt * 0.8);
+      r.pos.set(this.O.cx, r.y, this.zc + r.out);
+      r.body.setNextKinematicTranslation(r.pos);
+      _m1.makeTranslation(r.pos.x, r.pos.y, r.pos.z); this.rackMesh.setMatrixAt(r.i, _m1);
+      r.ctrl.grabPos.set(r.pos.x, r.pos.y + 0.012, r.pos.z + this.rd / 2 + 0.01);
+    }
+    this.rackMesh.instanceMatrix.needsUpdate = true;
+    // Handle position (world) and a reference point for Chef's Eye.
+    const c = Math.cos(this.angle), s = Math.sin(this.angle), H = this.H;
+    this.doorCtrl.grabPos.set(this.O.hinge.x, this.O.hinge.y + c * (H - 0.055) - s * 0.09, this.O.hinge.z + s * (H - 0.055) + c * 0.09);
+    this.renderPos.set(this.O.hinge.x, this.O.hinge.y + c * H * 0.55, this.O.hinge.z + s * H * 0.55 + 0.05);
+    const t = this.thermo, lit = this.angle > 0.08 || t.mode !== 'off';
+    this.bulbMat.color.setHex(lit ? 0xffe0a8 : 0x3a3228);
+    this.winMat.opacity = lit ? 0.28 : 0.6;
+    const g = clamp((t.elemT - 420) / 380, 0, 1);
+    this.elemMat.emissive.setRGB(1.6 * g, 0.35 * g * g, 0.05 * g);
+    this.draw();
+  },
+  draw(force = false) {
+    const t = this.thermo, mode = OVEN_MODES[this.modeIdx], on = t.mode !== 'off';
+    const key = `${this.set}|${mode}|${Math.round(t.Ta)}|${t.preheat}|${settings.tempUnit}|${on && t.preheat ? Math.floor(Sim.clock * 2) % 2 : 0}`;
+    if (!force && key === this.lastShown) return; this.lastShown = key;
+    const c = this.ctx, F = settings.tempUnit === 'F', u = (x) => Math.round(F ? x * 9 / 5 + 32 : x) + '°';
+    c.fillStyle = '#07090a'; c.fillRect(0, 0, 160, 96);
+    c.textBaseline = 'middle'; c.textAlign = 'left';
+    if (!on) { c.fillStyle = '#2f4a52'; c.font = 'bold 30px ui-monospace, monospace'; c.fillText(mode === 'off' ? 'OFF' : 'SET', 12, 34); }
+    else { c.fillStyle = '#7fe3ff'; c.font = 'bold 36px ui-monospace, monospace'; c.fillText(mode === 'broil' ? 'BROIL' : u(this.set), 10, 34); }
+    c.font = 'bold 17px ui-monospace, monospace'; c.fillStyle = '#9fd9e8';
+    c.fillText(mode.toUpperCase(), 10, 70); c.textAlign = 'right'; c.fillText(u(t.Ta), 150, 70);
+    if (on) { const ready = !t.preheat; c.fillStyle = ready ? '#58ff7a' : (Math.floor(Sim.clock * 2) % 2 ? '#ffb347' : '#5a3d10'); c.beginPath(); c.arc(146, 20, 8, 0, Math.PI * 2); c.fill(); }
+    this.tex.needsUpdate = true;
+  },
+  // Sim fixed step: cavity thermals; env seen by pans/food inside; preheat chime; heat puff when opened hot.
+  simTick(dt) {
+    const t = this.thermo;
+    t.door = clamp(this.angle / 1.0, 0, 1);
+    t.step(dt);
+    this.env.T = t.Ta; this.env.h = t.hFood; this.env.radT = t.Tw;
+    if (this.chimeArmed && !t.preheat && t.mode !== 'off') { this.chimeArmed = false; AudioSys.ring(this.renderPos, 1.2); toast('Oven preheated', 1500); }
+    if (t.door > 0.2 && t.Ta > 90 && Math.random() < t.door * (t.Ta - 90) / 200) {
+      const O = this.O; Particles.emit('steam', O.cx + (Math.random() - 0.5) * 0.5, O.y1 - 0.02, O.z1 + 0.03);
+    }
+  },
+  // Food exposure inside the cavity (called from Foods.applyContacts): air, walls, and the broil element on the top face.
+  exposeFood(th, down, topFace, y, contact) {
+    const t = this.thermo, A = (fi) => th.faces[fi].area;
+    for (let fi = 0; fi < 3; fi++) {
+      if (A(fi) <= 0 || (contact && fi === down)) continue;
+      th.expose(fi, t.hFood, A(fi), t.Ta);
+      const F = t.mode === 'broil' && fi === topFace ? this.broilF(y) : 0;
+      th.exposeRad(fi, THERMO.foodEmissivity * A(fi) * (1 - F), t.Tw);
+      if (F > 0) th.exposeRad(fi, THERMO.foodEmissivity * A(fi) * F, t.elemT);
+      t.foodJ += t.hFood * A(fi) * (t.Ta - th.faces[fi].Ts) * (1 / CONFIG.sim.hz);
+    }
+    if (!contact && down >= 0 && A(down) > 0) th.expose(down, t.hFood * 1.6, A(down) * 0.5, t.Ta); // wire rack contact
+  },
+};
+
+/* =================================== [THERMOMETER] ================================== */
+// Instant-read probe: reports the thermal node the tip sits in (food), the liquid it is dipped in,
+// a pan surface it touches, the oven air, or room air. ~1 s response like a real thermocouple probe.
+const Thermometer = {
+  tip: new THREE.Vector3(0, 0, -0.165), _p: new THREE.Vector3(), _l: new THREE.Vector3(), _q: new THREE.Quaternion(), hitFood: null,
+  sampleAt(p) {
+    this.hitFood = null;
+    world.intersectionsWithPoint(p, (col) => { const f = Phys.propByCollider.get(col.handle); if (f && f.th) { this.hitFood = f; return false; } return true; }, undefined, GROUPS.qFood);
+    const f = this.hitFood;
+    if (f && f.alive) {
+      const l = this._l.copy(p).sub(f.renderPos).applyQuaternion(this._q.copy(f.renderQuat).invert());
+      const fr = f.frame, th = f.th;
+      const s = fr.shape === 'sphere' ? l.sub(fr.o).length() / fr.L : _v8.subVectors(l, fr.o).dot(fr.ax) / fr.L + 0.5;
+      return { T: th.T[clamp(Math.round(clamp(s, 0, 1) * (th.N - 1)), 0, th.N - 1)], what: f.fdef.name };
+    }
+    const v = Liquids.liquidAt(p);
+    if (v) return { T: v.contents.T, what: v.contents.stage() };
+    for (const pp of Stove.pans) {
+      if (!pp.alive) continue; const L = pp.lq; if (!L) continue;
+      const dx = p.x - L.B.x, dz = p.z - L.B.z;
+      if (dx * dx + dz * dz < pp.vspec.r * pp.vspec.r && p.y > L.B.y - 0.01 && p.y < L.B.y + 0.006) return { T: pp.thermo.T, what: 'pan surface' };
+    }
+    if (Oven.contains(p)) return { T: Oven.thermo.Ta, what: 'oven air' };
+    return { T: THERMO.Tamb, what: 'air' };
+  },
+  tick(prop, dt) {
+    const s = prop.state;
+    this._p.copy(this.tip).applyQuaternion(prop.renderQuat).add(prop.renderPos);
+    const r = this.sampleAt(this._p);
+    s.T += (r.T - s.T) * (1 - Math.exp(-dt / 0.9));
+    s.what = r.what;
+    this.draw(prop);
+  },
+  draw(prop) {
+    const s = prop.state, F = settings.tempUnit === 'F', v = F ? s.T * 9 / 5 + 32 : s.T, txt = v.toFixed(Math.abs(v) < 100 ? 1 : 0);
+    const key = txt + F + s.what; if (key === s.lastShown) return; s.lastShown = key;
+    const c = s.canvas.getContext('2d');
+    c.fillStyle = '#c7d3bf'; c.fillRect(0, 0, 128, 64);
+    c.fillStyle = '#1d2418'; c.textAlign = 'right'; c.textBaseline = 'middle'; c.font = 'bold 38px ui-monospace, monospace';
+    c.fillText(txt, 104, 28); c.font = 'bold 20px ui-monospace, monospace'; c.fillText(F ? '°F' : '°C', 126, 22);
+    c.textAlign = 'left'; c.font = '13px ui-monospace, monospace'; c.fillText(String(s.what).slice(0, 16), 4, 55);
+    s.tex.needsUpdate = true;
+  },
+};
+
+/* ===================================== [LIQUIDS] ==================================== */
+// Every vessel (pans, pots, bowls, jugs, bottles, ladle, spoon, rice bag) owns a Contents (lumped liquid/fat/grain
+// node from [THERMAL]). Fill surfaces are one instanced draw: the vessel-aligned column's top ring is flattened
+// onto the world-horizontal free surface (height found by sorting interior sample points), with wobble, boiling
+// bubbles, foam, rice grains and oil shimmer in the shader. Tilting past the lowest rim point pours a weir-law
+// stream (viscosity-scaled) traced ballistically; where it lands decides a transfer, basting, washing or a puddle.
+const LIQ_VIS = {
+  water: [0.62, 0.74, 0.80, 0.30], olive: [0.70, 0.60, 0.10, 0.78], vegetable: [0.93, 0.78, 0.30, 0.72], peanut: [0.90, 0.72, 0.36, 0.74],
+  butter: [0.99, 0.85, 0.40, 0.95], noisette: [0.60, 0.38, 0.14, 0.95], burnt: [0.16, 0.09, 0.05, 0.97],
+  rice: [0.93, 0.91, 0.84, 1.0], riceCooked: [0.98, 0.97, 0.94, 1.0], scorch: [0.42, 0.28, 0.14, 1.0],
+};
+const _lp = {}; // scratch parts for transfers (reused; no per-frame allocation)
+const _lp2 = {};
+const Liquids = {
+  vessels: [], lids: [], streams: [], puddles: [], beads: [], maxV: 32, maxSeg: 180, maxPud: 32, maxBead: 48,
+  _pv: new THREE.Vector3(), _pq: new THREE.Quaternion(), _col: new THREE.Color(), _dn: new THREE.Vector3(0, -1, 0),
+  init() {
+    // Fill surfaces
+    const g = new THREE.CylinderGeometry(1, 1, 1, 28, 1, false); g.translate(0, 0.5, 0);
+    this.iCol = new THREE.InstancedBufferAttribute(new Float32Array(this.maxV * 4), 4);
+    this.iSurf = new THREE.InstancedBufferAttribute(new Float32Array(this.maxV * 4), 4);
+    this.iExt = new THREE.InstancedBufferAttribute(new Float32Array(this.maxV * 4), 4);
+    for (const a of [this.iCol, this.iSurf, this.iExt]) a.setUsage(THREE.DynamicDrawUsage);
+    g.setAttribute('iCol', this.iCol); g.setAttribute('iSurf', this.iSurf); g.setAttribute('iExt', this.iExt);
+    this.mat = new THREE.ShaderMaterial({
+      uniforms: { uTime: { value: 0 } },
+      vertexShader: `attribute vec4 iCol; attribute vec4 iSurf; attribute vec4 iExt; uniform float uTime;
+        varying vec4 vC; varying vec4 vS; varying vec4 vE; varying vec3 vW; varying float vTop; varying vec3 vN;
+        void main(){
+          mat4 M = modelMatrix * instanceMatrix;
+          vec4 wp = M * vec4(position, 1.0);
+          vTop = step(0.999, position.y);
+          if (vTop > 0.5) {
+            vec3 c = (M * vec4(0.0, 1.0, 0.0, 1.0)).xyz;
+            float w = sin(uTime * 7.0 + iExt.w) * 0.35 + 0.65;
+            wp.y = iSurf.x + (iExt.x * (wp.x - c.x) + iExt.y * (wp.z - c.z)) * w
+                 + iSurf.y * 0.0012 * sin(wp.x * 180.0 + uTime * 13.0) * sin(wp.z * 170.0 - uTime * 11.0);
+          }
+          vC = iCol; vS = iSurf; vE = iExt; vW = wp.xyz;
+          vN = vTop > 0.5 ? normalize(vec3(-iExt.x, 1.0, -iExt.y)) : normalize(mat3(M) * normal);
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }`,
+      fragmentShader: `uniform float uTime; varying vec4 vC; varying vec4 vS; varying vec4 vE; varying vec3 vW; varying float vTop; varying vec3 vN;
+        float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+        float vn(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+          return mix(mix(h21(i), h21(i + vec2(1, 0)), f.x), mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), f.x), f.y); }
+        void main(){
+          vec3 col = vC.rgb; float a = vC.a; vec3 N = normalize(vN); vec3 V = normalize(cameraPosition - vW);
+          if (vTop > 0.5) {
+            vec2 q = vW.xz * 110.0;
+            if (vS.y > 0.01) { // bubbles: a share of cells nucleate, grow and pop
+              vec2 cell = floor(q); vec2 f = fract(q) - 0.5; float rn = h21(cell + vE.w);
+              float ph = fract(uTime * (1.2 + rn * 2.5) + rn * 7.0), on = step(1.0 - vS.y * 0.8, rn);
+              float ring = smoothstep(0.07, 0.0, abs(length(f) - ph * 0.42)) * on * (1.0 - ph);
+              col = mix(col, vec3(0.96), ring * 0.7); a = max(a, ring * 0.75); N = normalize(N + vec3(f.x, 0.0, f.y) * ring * 2.0);
+            }
+            if (vS.z > 0.01) { float fm = vS.z * smoothstep(0.3, 0.65, vn(q * 0.45 + vec2(uTime * 0.4, -uTime * 0.3)) * 0.6 + vn(q * 1.7) * 0.4);
+              col = mix(col, vec3(0.98, 0.95, 0.86), fm); a = max(a, fm); }
+            if (vE.z > 0.01) { vec2 r = vW.xz * 300.0; float ang = h21(floor(r)) * 6.28; vec2 f = fract(r) - 0.5;
+              f = mat2(cos(ang), -sin(ang), sin(ang), cos(ang)) * f; float gr = smoothstep(0.5, 0.3, length(f * vec2(1.0, 2.4)));
+              col *= mix(1.0, 0.72 + 0.28 * gr, vE.z); }
+            if (vS.w > 0.01) N = normalize(N + vS.w * 0.12 * vec3(sin(vW.x * 260.0 + uTime * 9.0), 0.0, cos(vW.z * 240.0 + uTime * 7.0)));
+          } else col *= 0.8;
+          vec3 L = normalize(vec3(0.3, 1.0, 0.25));
+          float dif = 0.55 + 0.45 * max(dot(N, L), 0.0);
+          float sp = pow(max(dot(reflect(-V, N), L), 0.0), 90.0);
+          float fr = 0.04 + 0.96 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
+          vec3 o = col * dif * 0.85 + vec3(sp * 0.7) + vec3(0.75, 0.8, 0.85) * fr * 0.25 * (1.0 - vE.z);
+          gl_FragColor = vec4(o, clamp(a + fr * 0.4 + sp, 0.0, 1.0));
+        }`,
+      transparent: true, depthWrite: false,
+    });
+    this.mesh = new THREE.InstancedMesh(g, this.mat, this.maxV); this.mesh.count = 0; this.mesh.frustumCulled = false; this.mesh.renderOrder = 4;
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); scene.add(this.mesh);
+    // Pour / faucet streams: instanced open cylinders between trace points
+    const sg = new THREE.CylinderGeometry(1, 1, 1, 6, 1, true); sg.translate(0, 0.5, 0);
+    this.segMesh = new THREE.InstancedMesh(sg, new THREE.MeshStandardMaterial({ roughness: 0.08, metalness: 0, transparent: true, opacity: 0.7, depthWrite: false }), this.maxSeg);
+    this.segMesh.count = 0; this.segMesh.frustumCulled = false; this.segMesh.renderOrder = 4; this.segMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.segMesh.setColorAt(0, this._col.set(0xffffff)); scene.add(this.segMesh);
+    for (let i = 0; i < 8; i++) this.streams.push({ P0: new THREE.Vector3(), v0: new THREE.Vector3(), pts: new Float32Array(3 * 34), n: 0, r: 0.003, col: new THREE.Color(), active: false });
+    // Puddles (decals) and Leidenfrost beads
+    const pg = new THREE.CircleGeometry(1, 20); pg.rotateX(-Math.PI / 2);
+    this.pudMesh = new THREE.InstancedMesh(pg, new THREE.MeshStandardMaterial({ roughness: 0.04, metalness: 0.1, transparent: true, opacity: 0.55, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 }), this.maxPud);
+    this.pudMesh.count = 0; this.pudMesh.frustumCulled = false; this.pudMesh.setColorAt(0, this._col.set(0xffffff)); scene.add(this.pudMesh);
+    this.beadMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 8, 6), new THREE.MeshStandardMaterial({ color: 0xd8ecff, roughness: 0.03, transparent: true, opacity: 0.75 }), this.maxBead);
+    this.beadMesh.count = 0; this.beadMesh.frustumCulled = false; scene.add(this.beadMesh);
+    Sink.init();
+  },
+  // Vessel spec from a prop def (explicit `vessel`, or derived from a pan's cooking-surface data). Cached per def.
+  specFor(def) {
+    if (def._vs !== undefined) return def._vs;
+    let s = null;
+    if (def.vessel) s = { ...def.vessel };
+    else if (def.pan) s = { c: def.pan.c, r: def.pan.r, h: def.pan.rim, rect: PAN_DEFS[def.pan.key].rect };
+    if (s) {
+      s.area = s.rect ? s.rect[0] * s.rect[1] : Math.PI * s.r * s.r;
+      s.cap = s.area * s.h;
+      const pts = [], hx = s.rect ? s.rect[0] / 2 : s.r, hz = s.rect ? s.rect[1] / 2 : s.r;
+      for (let k = 0; k < 8; k++) {
+        const y = s.c[1] + (k + 0.5) / 8 * s.h;
+        pts.push(s.c[0], y, s.c[2]);
+        for (let j = 0; j < 12; j++) { const inner = j < 4, a = (inner ? j / 4 : (j - 4) / 8) * Math.PI * 2 + (inner ? 0.4 + k : k * 0.3), rr = inner ? 0.45 : 0.86; pts.push(s.c[0] + Math.cos(a) * rr * hx, y, s.c[2] + Math.sin(a) * rr * hz); }
+      }
+      s.pts = new Float32Array(pts); s.ys = new Float32Array(pts.length / 3);
+    }
+    def._vs = s; return s;
+  },
+  attach(prop) {
+    const s = this.specFor(prop.def); if (!s) return;
+    prop.vspec = s; prop.contents = new Contents();
+    if (prop.def.fill) prop.contents.add(prop.def.fill, THERMO.Tamb);
+    if (prop.thermo) prop.thermo.contents = prop.contents;
+    prop.lq = { B: new THREE.Vector3(), u: new THREE.Vector3(), lip: new THREE.Vector3(), g: new THREE.Vector3(), rimC: new THREE.Vector3(), surfY: 0, level: 0, vol: 0, head: -1, rLip: 0, prevB: new THREE.Vector3(), wx: 0, wz: 0, wvx: 0, wvz: 0, steamAcc: 0, smokeAcc: 0, seed: Math.random() * 40 };
+  },
+  refill(prop) { if (!prop.vspec) return; prop.contents = new Contents(); if (prop.def.fill) prop.contents.add(prop.def.fill, THERMO.Tamb); if (prop.thermo) prop.thermo.contents = prop.contents; },
+  reset() { this.puddles.length = 0; this.beads.length = 0; Sink.flow = 0; Sink.temp = 0; for (const p of Props.list) this.refill(p); },
+  refresh() {
+    this.vessels.length = 0; this.lids.length = 0;
+    for (const p of Props.list) { if (!p.alive) continue; if (p.contents) this.vessels.push(p); else if (p.key === 'potLid') this.lids.push(p); }
+  },
+  // World geometry of a vessel's liquid: bottom centre, axis, free-surface height, pour lip and head.
+  geom(v) {
+    const s = v.vspec, L = v.lq, q = v.renderQuat, C = v.contents;
+    L.prevB.copy(L.B);
+    L.u.set(0, 1, 0).applyQuaternion(q);
+    L.B.set(s.c[0], s.c[1], s.c[2]).applyQuaternion(q).add(v.renderPos);
+    L.rimC.copy(L.B).addScaledVector(L.u, s.h);
+    const V = C.volume(); L.vol = V;
+    L.level = Math.min(s.h, V / s.area);
+    const uy = L.u.y;
+    if (uy > 0.995 || V <= 0) L.surfY = L.B.y + L.level * uy;
+    else {
+      const n = s.ys.length, P = s.pts;
+      for (let i = 0; i < n; i++) { this._pv.set(P[i * 3], P[i * 3 + 1], P[i * 3 + 2]).applyQuaternion(q); s.ys[i] = this._pv.y + v.renderPos.y; }
+      s.ys.sort();
+      const f = clamp(V / s.cap, 0, 1) * n - 0.5, i0 = clamp(Math.floor(f), 0, n - 1), i1 = Math.min(n - 1, i0 + 1);
+      L.surfY = f <= 0 ? s.ys[0] + (L.level * 0.5) : lerp(s.ys[i0], s.ys[i1], f - Math.floor(f));
+    }
+    // Lowest rim point (the pour lip): rim centre pushed along the downhill direction perpendicular to the axis.
+    L.g.set(0, -1, 0).addScaledVector(L.u, uy);
+    const gl = L.g.length();
+    if (gl < 0.02 || V <= 0) { L.head = -1; return; }
+    L.g.divideScalar(gl);
+    if (s.neck) L.rLip = s.neck;
+    else if (s.rect) { this._pq.copy(q).invert(); this._pv.copy(L.g).applyQuaternion(this._pq); L.rLip = Math.abs(this._pv.x) * s.rect[0] / 2 + Math.abs(this._pv.z) * s.rect[1] / 2; }
+    else L.rLip = s.r;
+    L.lip.copy(L.rimC).addScaledVector(L.g, L.rLip + 0.004);
+    L.head = L.surfY - L.lip.y;
+  },
+  // Is a world point inside a vessel's interior (below the rim)?
+  inside(v, p, pad = 0.01) {
+    const s = v.vspec; this._pq.copy(v.renderQuat).invert();
+    const l = this._pv.copy(p).sub(v.renderPos).applyQuaternion(this._pq);
+    const dy = l.y - s.c[1]; if (dy < -0.025 || dy > s.h + 0.03) return false;
+    const dx = l.x - s.c[0], dz = l.z - s.c[2];
+    return s.rect ? Math.abs(dx) < s.rect[0] / 2 + pad && Math.abs(dz) < s.rect[1] / 2 + pad : dx * dx + dz * dz < (s.r + pad) * (s.r + pad);
+  },
+  // The vessel whose liquid a world point is immersed in (for the thermometer and food submersion).
+  liquidAt(p, minDepth = 0.002) {
+    for (const v of this.vessels) {
+      if (!v.alive || v.lq.vol < 2e-6 || v.lq.level < minDepth) continue;
+      if (p.y > v.lq.surfY || !this.inside(v, p, -0.002)) continue;
+      return v;
+    }
+    return null;
+  },
+  viscosity(C) {
+    const m = C.m, M = C.mass || 1;
+    return (m.water * 1 + m.oil * 0.72 + (m.butterfat + m.milkSolids) * 0.65 + (m.riceDry + m.riceWater) * 0.45 + m.salt) / M;
+  },
+  // Per frame: geometry, pouring, dipping, lids, visuals, streams, faucet, beads, puddles, audio.
+  update(dt) {
+    this.mat.uniforms.uTime.value = Sim.clock;
+    this.refresh();
+    for (const s of this.streams) s.active = false;
+    this.segN = 0;
+    let n = 0;
+    for (const v of this.vessels) {
+      this.geom(v);
+      const L = v.lq, C = v.contents, s = v.vspec;
+      // Overflow: anything above the rim spills over the lip.
+      if (L.vol > s.cap * 1.02) { const got = C.takeInto(L.vol - s.cap, _lp); if (got > 0) this.deposit(L.head > -1 ? L.lip : L.rimC, _lp, v); L.vol = C.volume(); }
+      if (L.head > 0 && L.vol > 1e-8) this.pour(v, dt);
+      if (s.dip) this.dip(v, dt);
+      // Surface wobble: spring driven by the vessel's horizontal acceleration.
+      const ax = (L.B.x - L.prevB.x) / Math.max(dt, 1e-3), az = (L.B.z - L.prevB.z) / Math.max(dt, 1e-3);
+      L.wvx += (-60 * L.wx - 4 * L.wvx) * dt - (ax - (L.ax || 0)) * 0.9; L.wvz += (-60 * L.wz - 4 * L.wvz) * dt - (az - (L.az || 0)) * 0.9;
+      L.ax = ax; L.az = az; L.wx = clamp(L.wx + L.wvx * dt, -0.35, 0.35); L.wz = clamp(L.wz + L.wvz * dt, -0.35, 0.35);
+      if (!s.opaque && L.vol > 1e-7 && n < this.maxV) this.writeInstance(v, n++);
+    }
+    this.mesh.count = n; this.mesh.instanceMatrix.needsUpdate = true;
+    this.iCol.needsUpdate = true; this.iSurf.needsUpdate = true; this.iExt.needsUpdate = true;
+    this.lidCheck(dt);
+    Sink.update(dt);
+    this.updateBeads(dt);
+    this.drawStreams();
+    this.drawPuddles(dt);
+    BoilAudio.update(dt);
+  },
+  writeInstance(v, i) {
+    const L = v.lq, C = v.contents, s = v.vspec, m = C.m;
+    // Colour: volume-weighted blend of the components (water is clear, fats golden → brown, rice opaque white).
+    const vw = m.water / 1000, vo = m.oil / 915, vb = (m.butterfat + m.milkSolids) / 911, vr = (m.riceDry + m.riceWater) / 850, V = vw + vo + vb + vr + 1e-12;
+    let r = 0, g = 0, b = 0, a = 0;
+    const add = (c, w) => { r += c[0] * w; g += c[1] * w; b += c[2] * w; a += c[3] * w; };
+    add(LIQ_VIS.water, vw / V); add(LIQ_VIS[C.oilType] || LIQ_VIS.olive, vo / V);
+    if (vb > 0) { const bc = C.burnt > 0.3 ? LIQ_VIS.burnt : C.brown > 0.35 ? LIQ_VIS.noisette : LIQ_VIS.butter; add(bc, vb / V); }
+    if (vr > 0) add(C.scorch > 0.3 ? LIQ_VIS.scorch : C.riceHyd > 0.6 ? LIQ_VIS.riceCooked : LIQ_VIS.rice, vr / V);
+    const ic = this.iCol.array; ic[i * 4] = r; ic[i * 4 + 1] = g; ic[i * 4 + 2] = b; ic[i * 4 + 3] = a;
+    const boil = C.m.water > 1e-5 ? Math.max(C.boiling, C.T > 88 ? clamp((C.T - 88) / 12, 0, 1) * 0.35 : 0) : (C.fatFrac() > 0.5 && C.T > 110 && C.m.water > 0 ? 0.5 : 0);
+    const shimmer = m.oil > 0 ? clamp((C.T - (OILS[C.oilType].smoke - 45)) / 45, 0, 1) : 0;
+    const is = this.iSurf.array; is[i * 4] = L.surfY; is[i * 4 + 1] = boil; is[i * 4 + 2] = Math.max(C.foam, C.boiling > 0.7 ? 0.25 : 0); is[i * 4 + 3] = shimmer;
+    const ie = this.iExt.array; ie[i * 4] = L.wx; ie[i * 4 + 1] = L.wz; ie[i * 4 + 2] = vr / V; ie[i * 4 + 3] = L.seed;
+    // Thin films pool in the middle of a wide pan (partial coverage).
+    const cov = Math.sqrt(Math.max(0.12, C.coverage(s.area))), h = Math.max(0.0016, L.level);
+    const sx = (s.rect ? s.rect[0] / 2 : s.r) * cov * 0.985, sz = (s.rect ? s.rect[1] / 2 : s.r) * cov * 0.985;
+    this._pv.set(sx, h, sz); _m1.compose(L.B, v.renderQuat, this._pv); this.mesh.setMatrixAt(i, _m1);
+  },
+  // Tilted past the lip: weir-law outflow Q = k·w·√(2g)·H^1.5 (k folds in viscosity), traced as a stream.
+  pour(v, dt) {
+    const L = v.lq, C = v.contents, s = v.vspec, H = Math.min(L.head, 0.04);
+    const w = s.neck ? 2 * s.neck : Math.min(0.05, L.rLip * 0.6 + 0.01);
+    const Q = this.viscosity(C) * 0.4 * w * 4.43 * Math.pow(H, 1.5);
+    const got = C.takeInto(Math.min(L.vol, Q * dt), _lp); if (got <= 0) return;
+    const st = this.streams.find((x) => !x.active); if (!st) { this.deposit(L.lip, _lp, v); return; }
+    st.active = true; st.P0.copy(L.lip);
+    const sp = Math.sqrt(2 * 9.81 * H) * 0.8; st.v0.set(L.g.x, 0, L.g.z); if (st.v0.lengthSq() > 1e-6) st.v0.normalize(); st.v0.multiplyScalar(sp);
+    st.r = clamp(Math.sqrt(Q / (Math.PI * Math.max(0.6, sp + 0.5))), 0.0012, 0.012);
+    this.colorOf(C, st.col);
+    this.trace(st, v.body, _lp, v);
+  },
+  colorOf(C, out) {
+    const m = C.m;
+    if (m.riceDry + m.riceWater > m.water + m.oil) out.setRGB(0.95, 0.93, 0.86);
+    else if (m.oil + m.butterfat > m.water) { const c = m.butterfat > m.oil ? (C.brown > 0.35 ? LIQ_VIS.noisette : LIQ_VIS.butter) : LIQ_VIS[C.oilType] || LIQ_VIS.olive; out.setRGB(c[0], c[1], c[2]); }
+    else out.setRGB(0.78, 0.88, 0.95);
+    return out;
+  },
+  // March the parabola; ray-cast each segment (source vessel excluded) and deliver the parts where it lands.
+  trace(st, exclBody, parts, src) {
+    const R = Phys.ray, P = st.pts, g = -9.81, dtS = 0.028;
+    let px = st.P0.x, py = st.P0.y, pz = st.P0.z; P[0] = px; P[1] = py; P[2] = pz; st.n = 1;
+    for (let k = 1; k < 34; k++) {
+      const t = k * dtS, nx = st.P0.x + st.v0.x * t, ny = st.P0.y + st.v0.y * t + 0.5 * g * t * t, nz = st.P0.z + st.v0.z * t;
+      const dx = nx - px, dy = ny - py, dz = nz - pz, len = Math.hypot(dx, dy, dz);
+      R.origin.x = px; R.origin.y = py; R.origin.z = pz; R.dir.x = dx / len; R.dir.y = dy / len; R.dir.z = dz / len;
+      const hit = world.castRay(R, len, true, undefined, GROUPS.qPour, undefined, exclBody);
+      if (hit) {
+        const hx = px + R.dir.x * hit.timeOfImpact, hy = py + R.dir.y * hit.timeOfImpact, hz = pz + R.dir.z * hit.timeOfImpact;
+        P[st.n * 3] = hx; P[st.n * 3 + 1] = hy; P[st.n * 3 + 2] = hz; st.n++;
+        this._hit.set(hx, hy, hz);
+        this.land(hit.collider, this._hit, parts, src);
+        return;
+      }
+      P[st.n * 3] = nx; P[st.n * 3 + 1] = ny; P[st.n * 3 + 2] = nz; st.n++;
+      px = nx; py = ny; pz = nz;
+    }
+  },
+  _hit: new THREE.Vector3(),
+  land(collider, p, parts, src) {
+    const prop = Phys.propByCollider.get(collider.handle);
+    if (prop && prop !== src && prop.contents && this.inside(prop, p, 0.015)) { prop.contents.add(parts, parts.T); return; }
+    if (prop && prop.th && prop.alive) { this.onFood(prop, parts, parts.T); return; }
+    this.deposit(p, parts, src);
+  },
+  // Liquid poured over food: bastes (hot fat heats the top face), wets (water), then drips into the pan it sits in.
+  onFood(f, parts, T) {
+    const th = f.th, top = th.geo.shape === 'sphere' ? 0 : f.downFace === 0 ? 1 : f.downFace === 1 ? 0 : 1, face = th.faces[top];
+    const fat = (parts.oil || 0) + (parts.butterfat || 0), wat = parts.water || 0;
+    const Cp = fat * 2000 + wat * 4180 + (parts.milkSolids || 0) * 1500 + 1e-9;
+    const Ts = face.Ts ?? th.surfaceT(top), J = Cp * (T - Ts) * 0.45;
+    th.addHeat(top, J);
+    if (wat > 0 && face.area > 0) { face.wet = Math.min(0.1, face.wet + wat * 0.3 / face.area); f.washedAt = Sim.time; }
+    if (fat > 0) f.basted = (f.basted || 0) + fat;
+    if (parts.salt) th.salt += parts.salt * 0.3;
+    const dst = f.inLiquid ? f.inLiquid.contents : f.inPan ? f.inPan.contents : null, Tout = T - J / Cp;
+    if (dst) dst.add(parts, Tout); else this.deposit(f.renderPos, parts, null, Tout);
+  },
+  // Spilt liquid: drains in the sink, otherwise joins/creates a puddle where it lands.
+  deposit(p, parts, src, T = parts.T) {
+    const K = Kitchen.sink;
+    if (p.x > K.x0 && p.x < K.x1 && p.z > K.z0 && p.z < K.z1 && p.y < CONFIG.kitchen.counterTop + 0.02) return; // down the drain
+    const vol = (parts.water || 0) / 1000 + (parts.oil || 0) / 915 + ((parts.butterfat || 0) + (parts.milkSolids || 0)) / 911 + ((parts.riceDry || 0) + (parts.riceWater || 0)) / 850;
+    if (vol <= 0) return;
+    // Settle onto the surface below the landing point.
+    this._pv.copy(p); this._pv.y += 0.02;
+    const hit = Phys.castRay(this._pv, this._dn, 2.5, GROUPS.qStatic, this._pv, null); if (!hit) return;
+    const kind = (parts.riceDry || 0) + (parts.riceWater || 0) > vol * 400 ? 'rice' : (parts.oil || 0) + (parts.butterfat || 0) > (parts.water || 0) ? ((parts.butterfat || 0) > (parts.oil || 0) ? 'butter' : 'oil') : 'water';
+    for (const d of this.puddles) if (d.kind === kind && Math.abs(d.y - this._pv.y) < 0.02 && Math.hypot(d.x - this._pv.x, d.z - this._pv.z) < Math.max(0.05, d.r * 0.8)) { d.vol += vol; return; }
+    if (this.puddles.length >= this.maxPud) this.puddles.shift();
+    this.puddles.push({ x: this._pv.x, y: this._pv.y + 0.0015, z: this._pv.z, vol, kind, r: 0 });
+  },
+  // Spoon / ladle: dipping the bowl below another vessel's surface fills it (tilted shallow pans pool at the low edge).
+  dip(v, dt) {
+    const L = v.lq, C = v.contents, s = v.vspec; if (L.u.y < 0.5) return;
+    const room = s.cap - L.vol; if (room < 1e-7) return;
+    for (const w of this.vessels) {
+      if (w === v || w.lq.vol < 1e-6 || !this.inside(w, L.B, -0.003)) continue;
+      const W = w.lq, tilt = 1 - W.u.y;
+      let surf = W.surfY;
+      if (tilt > 0.01) surf = Math.max(surf, W.B.y + Math.min(0.03, W.vol / (w.vspec.area * 0.3)) * (this._pv.subVectors(L.B, W.B).dot(W.g) > 0.2 * w.vspec.r ? 1 : 0));
+      if (L.B.y > surf) continue;
+      const got = w.contents.takeInto(Math.min(room, 6e-5 * dt), _lp2);
+      if (got > 0) C.add(_lp2, _lp2.T);
+      return;
+    }
+  },
+  lidCheck(dt) {
+    for (const v of this.vessels) v.contents.lid = false;
+    for (const lid of this.lids) {
+      this._pv.set(0, 1, 0).applyQuaternion(lid.renderQuat); if (this._pv.y < 0.9) continue;
+      for (const v of this.vessels) {
+        const L = v.lq; if (v.vspec.r < 0.07 || v.vspec.rect) continue;
+        if (Math.hypot(lid.renderPos.x - L.rimC.x, lid.renderPos.z - L.rimC.z) < 0.04 && Math.abs(lid.renderPos.y - L.rimC.y) < 0.035) {
+          v.contents.lid = true;
+          // A hard boil under a lid makes it rattle.
+          if (v.contents.boiling > 0.55 && !lid.holders.length) { lid.rattle = (lid.rattle || 0) - dt; if (lid.rattle <= 0) { lid.rattle = 0.12 + Math.random() * 0.35; AudioSys.impact(lid.renderPos, 'metal', 0.12); lid.body.applyImpulse({ x: 0, y: lid.mass * 0.25, z: 0 }, true); } }
+        }
+      }
+    }
+  },
+  // Sim fixed step: unheated vessels drift to room/oven temperature; steam and smoke from all contents.
+  simTick(dt) {
+    for (const v of this.vessels) {
+      const C = v.contents, L = v.lq, s = v.vspec; if (C.mass < 1e-6) continue;
+      if (!v.thermo) { const inO = Oven.contains(v.renderPos); C.step(dt, inO ? Oven.env.T : THERMO.Tamb, inO ? 4 : 1.2, s.area, inO ? Oven.env.T : THERMO.Tamb, dt); }
+      L.steamAcc += C.evapRate * dt * (C.lid ? 2500 : 7000);
+      while (L.steamAcc > 1) { L.steamAcc -= 1; const a = Math.random() * 6.28, rr = (C.lid ? 1 : Math.sqrt(Math.random())) * (s.rect ? s.rect[0] / 2 : s.r); Particles.emit('steam', L.B.x + Math.cos(a) * rr, (C.lid ? L.rimC.y : L.surfY) + 0.01, L.B.z + Math.sin(a) * rr); }
+      L.smokeAcc += C.smoke * dt * 9;
+      while (L.smokeAcc > 1) { L.smokeAcc -= 1; Particles.emit('smoke', L.B.x + (Math.random() - 0.5) * s.r, L.surfY + 0.01, L.B.z + (Math.random() - 0.5) * s.r); }
+    }
+    for (let i = this.puddles.length - 1; i >= 0; i--) { const d = this.puddles[i]; if (d.kind === 'water') { d.vol -= dt * 6e-7 * Math.PI * d.r * d.r * 60; if (d.vol < 2e-7) this.puddles.splice(i, 1); } }
+  },
+  // Salt: a shake releases grams onto whatever is below the spout.
+  shake(prop, grams) {
+    this._pv.set(0.022, 0.14, 0).applyQuaternion(prop.renderQuat).add(prop.renderPos);
+    for (let i = 0; i < 6; i++) Particles.emit('salt', this._pv.x + (Math.random() - 0.5) * 0.02, this._pv.y, this._pv.z + (Math.random() - 0.5) * 0.02);
+    AudioSys.rustle(this._pv);
+    Phys.ray.origin.x = this._pv.x; Phys.ray.origin.y = this._pv.y; Phys.ray.origin.z = this._pv.z; Phys.ray.dir.x = 0; Phys.ray.dir.y = -1; Phys.ray.dir.z = 0;
+    const h = world.castRay(Phys.ray, 1.5, true, undefined, GROUPS.qPour, undefined, prop.body); if (!h) return;
+    this._hit.set(this._pv.x, this._pv.y - h.timeOfImpact, this._pv.z);
+    const p = Phys.propByCollider.get(h.collider.handle);
+    if (p && p.contents && this.inside(p, this._hit, 0.015)) p.contents.m.salt += grams / 1000;
+    else if (p && p.th) p.th.salt += grams / 1000;
+  },
+  /* ---- droplets (wet-hand flicks) and the Leidenfrost effect ---- */
+  flick(from, vel, count = 5) {
+    for (let i = 0; i < count && this.beads.length < this.maxBead; i++)
+      this.beads.push({ x: from.x, y: from.y, z: from.z, vx: vel.x + (Math.random() - 0.5) * 0.5, vy: vel.y + (Math.random() - 0.3) * 0.5, vz: vel.z + (Math.random() - 0.5) * 0.5, r: 0.0022 + Math.random() * 0.0016, mode: 'fly', life: 3, pan: null, ox: 0, oz: 0, svx: 0, svz: 0, tick: 0 });
+  },
+  updateBeads(dt) {
+    const B = this.beads; let n = 0;
+    for (let i = B.length - 1; i >= 0; i--) {
+      const d = B[i]; d.life -= dt; let dead = d.life <= 0;
+      if (d.mode === 'fly') {
+        const px = d.x, py = d.y, pz = d.z;
+        d.vy -= 9.81 * dt; d.x += d.vx * dt; d.y += d.vy * dt; d.z += d.vz * dt;
+        // Landing in a pan? (inner cooking surface, analytic)
+        for (const p of Stove.pans) {
+          if (!p.alive || !p.lq || p.lq.u.y < 0.85) continue;
+          const L = p.lq, s = p.vspec, dx = d.x - L.B.x, dz = d.z - L.B.z;
+          if (dx * dx + dz * dz > s.r * s.r || d.y > L.B.y + 0.004 + L.level || py < L.B.y - 0.01) continue;
+          const C = p.contents, T = p.thermo.T;
+          if (C.m.water > 0.02) { dead = true; break; }                          // into a pot of water
+          if (C.m.oil + C.m.butterfat > 0.005 && C.T > 140) { dead = true; this.spatter(d, C.T); break; } // water in hot fat spits
+          const fate = dropletFate(T, p.def.pan.key);
+          d.pan = p; d.ox = dx; d.oz = dz;
+          if (fate === 'skate') { d.mode = 'skate'; d.life = 2.5 + Math.random() * 3.5; const a = Math.random() * 6.28, sp = 0.18 + Math.random() * 0.25; d.svx = Math.cos(a) * sp; d.svz = Math.sin(a) * sp; AudioSys.pop(this._pv.set(d.x, d.y, d.z), 0.3); }
+          else if (fate === 'sizzle') { dead = true; this.hiss(d, T); }
+          else { d.mode = 'sit'; d.life = 20; }
+          break;
+        }
+        if (d.mode === 'fly' && !dead) {
+          const dx = d.x - px, dy = d.y - py, dz = d.z - pz, len = Math.hypot(dx, dy, dz) + 1e-9, R = Phys.ray;
+          R.origin.x = px; R.origin.y = py; R.origin.z = pz; R.dir.x = dx / len; R.dir.y = dy / len; R.dir.z = dz / len;
+          if (world.castRay(R, len, true, undefined, GROUPS.qPoint) || d.y < -0.1) dead = true;
+        }
+      } else if (d.pan && d.pan.alive) {
+        const p = d.pan, L = p.lq, s = p.vspec, T = p.thermo.T;
+        if (d.mode === 'skate') {
+          // Vapour cushion: the bead glides frictionlessly, jitters, bounces off the wall and slowly shrinks.
+          d.svx += (Math.random() - 0.5) * 2.2 * dt; d.svz += (Math.random() - 0.5) * 2.2 * dt;
+          d.ox += d.svx * dt; d.oz += d.svz * dt;
+          const rr = Math.hypot(d.ox, d.oz), lim = s.r - d.r * 1.5;
+          if (rr > lim) { const nx = d.ox / rr, nz = d.oz / rr, vn = d.svx * nx + d.svz * nz; if (vn > 0) { d.svx -= 2 * vn * nx; d.svz -= 2 * vn * nz; } d.ox = nx * lim; d.oz = nz * lim; }
+          d.r = Math.max(0.0009, d.r - dt * 0.00018);
+          d.tick -= dt; if (d.tick <= 0) { d.tick = 0.25 + Math.random() * 0.5; AudioSys.pop(this._pv.set(d.x, d.y, d.z), 0.08); }
+          if (T < 170) { dead = true; this.hiss(d, T); }
+        } else if (T > 102) { dead = true; this.hiss(d, T); }
+        d.x = L.B.x + d.ox; d.z = L.B.z + d.oz; d.y = L.B.y + d.r * 0.8;
+      } else dead = true;
+      if (dead) { B[i] = B[B.length - 1]; B.pop(); continue; }
+    }
+    for (const d of B) { if (n >= this.maxBead) break; this._pv.set(d.r, d.mode === 'fly' ? d.r * 1.3 : d.r * 0.7, d.r); _m1.makeScale(this._pv.x, this._pv.y, this._pv.z); _m1.setPosition(d.x, d.y, d.z); this.beadMesh.setMatrixAt(n++, _m1); }
+    this.beadMesh.count = n; this.beadMesh.instanceMatrix.needsUpdate = true;
+  },
+  hiss(d, T) { this._pv.set(d.x, d.y, d.z); for (let k = 0; k < 3; k++) AudioSys.pop(this._pv, 0.5); Particles.emit('steam', d.x, d.y + 0.01, d.z); },
+  spatter(d, T) { this._pv.set(d.x, d.y, d.z); for (let k = 0; k < 6; k++) AudioSys.pop(this._pv, 0.9); for (let k = 0; k < 4; k++) Particles.emit('spatter', d.x, d.y + 0.01, d.z); },
+  drawStreams() {
+    let n = 0;
+    const seg = (x0, y0, z0, x1, y1, z1, r, col) => {
+      if (n >= this.maxSeg) return;
+      const dx = x1 - x0, dy = y1 - y0, dz = z1 - z0, len = Math.hypot(dx, dy, dz); if (len < 1e-4) return;
+      this._pv.set(dx / len, dy / len, dz / len); this._pq.setFromUnitVectors(UP, this._pv);
+      _v8.set(x0, y0, z0); this._sc.set(r, len, r); _m1.compose(_v8, this._pq, this._sc);
+      this.segMesh.setMatrixAt(n, _m1); this.segMesh.setColorAt(n, col); n++;
+    };
+    for (const st of this.streams) {
+      if (!st.active) continue; const P = st.pts;
+      for (let k = 0; k + 1 < st.n; k++) seg(P[k * 3], P[k * 3 + 1], P[k * 3 + 2], P[k * 3 + 3], P[k * 3 + 4], P[k * 3 + 5], st.r * (1 - 0.35 * k / st.n), st.col);
+    }
+    if (Sink.flow > 0.02) { const S = Sink.spout; seg(S.x, Sink.hitY, S.z, S.x, S.y, S.z, 0.002 + 0.004 * Sink.flow, this._col.setRGB(0.8, 0.9, 0.97)); }
+    this.segMesh.count = n; this.segMesh.instanceMatrix.needsUpdate = true; if (this.segMesh.instanceColor) this.segMesh.instanceColor.needsUpdate = true;
+  },
+  _sc: new THREE.Vector3(),
+  drawPuddles() {
+    let n = 0;
+    for (const d of this.puddles) {
+      d.r = clamp(Math.sqrt(d.vol / (Math.PI * 0.0015)), 0.012, 0.32);
+      _m1.makeScale(d.r, 1, d.r); _m1.setPosition(d.x, d.y, d.z); this.pudMesh.setMatrixAt(n, _m1);
+      const c = d.kind === 'water' ? LIQ_VIS.water : d.kind === 'rice' ? LIQ_VIS.rice : d.kind === 'butter' ? LIQ_VIS.butter : LIQ_VIS.olive;
+      this.pudMesh.setColorAt(n, this._col.setRGB(c[0], c[1], c[2])); n++;
+    }
+    this.pudMesh.count = n; this.pudMesh.instanceMatrix.needsUpdate = true; if (this.pudMesh.instanceColor) this.pudMesh.instanceColor.needsUpdate = true;
+  },
+};
+
+/* ======================================= [SINK] ===================================== */
+// Single-lever faucet: lift for flow (0–8.4 L/min), swing for temperature (12–52°C). The stream fills whatever
+// is under it, washes food and hands (wet hands can flick droplets), and drains in the basin.
+const Sink = {
+  flow: 0, temp: 0, hitY: 0, spout: new THREE.Vector3(), _p: new THREE.Vector3(), voice: null,
+  init() {
+    const F = Kitchen.faucet; this.spout.copy(F.spout); this.hitY = Kitchen.sink.y;
+    const P = Parts();
+    P.add(MAT.steel, new THREE.CylinderGeometry(0.014, 0.016, 0.03, 14), [0, 0, 0]);
+    P.add(MAT.steel, new THREE.CapsuleGeometry(0.006, 0.075, 4, 8), [0, 0.012, 0.045], [Math.PI / 2, 0, 0]);
+    this.lever = new THREE.Mesh(P.done()[0].geo, UBER); this.lever.castShadow = true;
+    this.lever.position.copy(F.pivot); scene.add(this.lever);
+    this.ctrl = Controls.add({ name: 'Faucet', r: 0.07, grabPos: new THREE.Vector3(),
+      begin: (h) => { const p = h.grabPoint(_v1); this.f0 = this.flow; this.t0 = this.temp; this.y0 = p.y; this.x0 = p.x; },
+      drag: (h) => { const p = h.grabPoint(_v1); this.setLever(this.f0 + (p.y - this.y0) * 7, this.t0 + (p.x - this.x0) * 9); },
+      end: () => {}, mouse: (dx, dy) => this.setLever(this.flow - dy * 0.005, this.temp + dx * 0.005) });
+    this.update(0);
+  },
+  setLever(f, t) { const was = this.flow; this.flow = clamp(f, 0, 1); this.temp = clamp(t, -1, 1); if ((was < 0.02) !== (this.flow < 0.02)) AudioSys.knobTick(this.lever.position); },
+  waterT() { return lerp(12, 52, (this.temp + 1) / 2); },
+  update(dt) {
+    this.lever.rotation.set(-this.flow * 0.6, this.temp * 0.6, 0, 'YXZ');
+    this.ctrl.grabPos.set(0, 0.012, 0.085).applyEuler(this.lever.rotation).add(this.lever.position);
+    const K = Kitchen.sink, S = this.spout;
+    this.hitY = K.y; this.fillFrac = 0;
+    if (this.flow < 0.02) { this.audio(0, 0); return; }
+    const Q = this.flow * 1.4e-4, Tw = this.waterT(), R = Phys.ray;
+    R.origin.x = S.x; R.origin.y = S.y - 0.012; R.origin.z = S.z; R.dir.x = 0; R.dir.y = -1; R.dir.z = 0;
+    const hit = world.castRay(R, 0.6, true, undefined, GROUPS.qPour);
+    let hitY = hit ? S.y - 0.012 - hit.timeOfImpact : K.y;
+    // Hands under the stream get washed (and wet).
+    for (const h of HANDS) {
+      if (!h.active) continue; const gp = h.grabPoint(this._p);
+      if (Math.hypot(gp.x - S.x, gp.z - S.z) < 0.06 && gp.y < S.y && gp.y > hitY - 0.03) {
+        h.wet = 1; h.washedAt = Sim.time; hitY = Math.max(hitY, gp.y + 0.02); if (Input.mode === 'xr') haptic(h.side, 0.06, 30);
+      }
+    }
+    this.hitY = hitY;
+    if (hit) {
+      const p = Phys.propByCollider.get(hit.collider.handle); this._p.set(S.x, hitY, S.z);
+      if (p && p.contents && Liquids.inside(p, this._p, 0.015)) { p.contents.add({ water: Q * dt * 1000 }, Tw); this.fillFrac = clamp(p.lq.vol / p.vspec.cap, 0, 1); }
+      else if (p && p.th) {
+        for (let fi = 0; fi < 3; fi++) { const f = p.th.faces[fi]; if (f.area <= 0) continue; f.wet = Math.max(f.wet, 0.03); p.th.addHeat(fi, 900 * f.area * (Tw - (f.Ts ?? p.th.surfaceT(fi))) * dt); }
+        p.washedAt = Sim.time;
+      }
+    }
+    if (Math.random() < this.flow * 0.5) Particles.emit('splash', S.x + (Math.random() - 0.5) * 0.03, hitY + 0.01, S.z + (Math.random() - 0.5) * 0.03);
+    this.audio(this.flow, this.fillFrac);
+  },
+  // Running water: band-passed noise; a filling vessel's cavity resonance rises in pitch as it fills.
+  audio(level, fill) {
+    if (!AudioSys.ready) return;
+    const c = AudioSys.ctx, t = c.currentTime;
+    if (!this.voice) {
+      if (level < 0.02) return;
+      const src = c.createBufferSource(); src.buffer = AudioSys.noise; src.loop = true;
+      const bp = c.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.2; bp.frequency.value = 1200;
+      const pk = c.createBiquadFilter(); pk.type = 'peaking'; pk.Q.value = 6; pk.gain.value = 0; pk.frequency.value = 500;
+      const g = c.createGain(); g.gain.value = 0;
+      const pan = new PannerNode(c, { panningModel: 'HRTF', distanceModel: 'inverse', refDistance: 0.6, rolloffFactor: 1.1, positionX: this.spout.x, positionY: this.spout.y - 0.15, positionZ: this.spout.z });
+      src.connect(bp); bp.connect(pk); pk.connect(g); g.connect(pan); pan.connect(AudioSys.sfx); src.start();
+      this.voice = { g, bp, pk };
+    }
+    const v = this.voice;
+    v.g.gain.setTargetAtTime(level * 0.32, t, 0.08);
+    v.bp.frequency.setTargetAtTime(900 + 900 * level, t, 0.1);
+    v.pk.gain.setTargetAtTime(fill > 0 ? 12 : 0, t, 0.1); v.pk.frequency.setTargetAtTime(380 + 1500 * fill * fill, t, 0.15);
+  },
+};
+
+/* =================================== [BOIL AUDIO] =================================== */
+// Per-vessel low bubbling rumble: simmer → rolling boil; oil gets a faint crackle via Sizzle.
+const BoilAudio = {
+  voices: new Map(),
+  update(dt) {
+    if (!AudioSys.ready) return;
+    const t = AudioSys.ctx.currentTime;
+    for (const v of Liquids.vessels) {
+      const C = v.contents, lvl = C.m.water > 0.01 ? clamp(C.boiling * 0.9 + (C.T > 85 ? (C.T - 85) / 15 * 0.25 : 0), 0, 1) : 0;
+      let voice = this.voices.get(v);
+      if (!voice && lvl < 0.03) continue;
+      if (!voice) {
+        const c = AudioSys.ctx, src = c.createBufferSource(); src.buffer = AudioSys.noise; src.loop = true;
+        const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 420; lp.Q.value = 3;
+        const g = c.createGain(); g.gain.value = 0;
+        const pan = new PannerNode(c, { panningModel: 'HRTF', distanceModel: 'inverse', refDistance: 0.5, rolloffFactor: 1.1 });
+        src.connect(lp); lp.connect(g); g.connect(pan); pan.connect(AudioSys.sfx); src.start(0, Math.random());
+        voice = { src, g, lp, pan }; this.voices.set(v, voice);
+      }
+      const bub = lvl * (0.55 + 0.45 * Math.random());
+      voice.g.gain.setTargetAtTime(bub * 0.4 * (C.lid ? 0.6 : 1), t, 0.04);
+      voice.lp.frequency.setTargetAtTime(260 + 500 * lvl + Math.random() * 200, t, 0.05);
+      const B = v.lq.B; voice.pan.positionX.setTargetAtTime(B.x, t, 0.05); voice.pan.positionY.setTargetAtTime(B.y + 0.05, t, 0.05); voice.pan.positionZ.setTargetAtTime(B.z, t, 0.05);
+    }
+    for (const [p, v] of this.voices) if (!p.alive || !p.contents) { try { v.src.stop(); v.g.disconnect(); v.pan.disconnect(); } catch (e) { /* gone */ } this.voices.delete(p); }
+  },
+};
 /* ====================================== [INPUT] ===================================== */
 function makeHandInput(side) {
   return {
@@ -3554,6 +4863,7 @@ class Hand {
     this.held = null; this.offPos = new THREE.Vector3(); this.offQuat = new THREE.Quaternion(); this.localHand = new THREE.Vector3();
     this.hover = null; this.forceTarget = null; this.forceArmed = null; this.forceIncoming = null; this.forceT = 0; this.forceAuto = false;
     this.uiHover = false; this.gripTeleport = false;
+    this.ctrl = null; this.wet = 0; this.washedAt = -1e9; this.lastFlick = 0; // fixture drag, wet from the faucet (flick droplets)
     // Velocity history (ring buffer) for throwing & flick detection
     const N = H.historyFrames;
     this.histP = Array.from({ length: N }, () => new THREE.Vector3()); this.histQ = Array.from({ length: N }, () => new THREE.Quaternion());
@@ -3811,7 +5121,18 @@ const Grab = {
     const H = CONFIG.hands;
     for (const h of HANDS) {
       const inp = h.input;
-      if (!h.active) { if (h.hover) { h.hover.setHighlight(false); h.hover = null; } if (h.knob) { h.knob.grab = null; h.knob = null; } continue; }
+      if (!h.active) { if (h.hover) { h.hover.setHighlight(false); h.hover = null; } if (h.knob) { h.knob.grab = null; h.knob = null; } if (h.ctrl) { h.ctrl.end(h); h.ctrl.grab = null; h.ctrl = null; } continue; }
+      // Wet hands: a quick flick throws droplets (try it over a hot pan: Leidenfrost).
+      if (h.wet > 0) {
+        h.wet = Math.max(0, h.wet - dt / 60);
+        if (!h.held && h.vel.length() > 1.7 && Sim.clock - h.lastFlick > 0.35) { h.lastFlick = Sim.clock; Liquids.flick(h.grabPoint(_v1), _v2.copy(h.vel).multiplyScalar(0.85), 4); h.wet = Math.max(0, h.wet - 0.2); }
+      }
+      // Dragging a fixture (oven door / rack / faucet lever).
+      if (h.ctrl) {
+        if (inp.gripReleased) { h.ctrl.end(h); h.ctrl.grab = null; h.ctrl = null; }
+        else h.ctrl.drag(h, dt);
+        continue;
+      }
       // Twisting a stove knob: the wrist roll about the knob axis (+Z) drives the knob angle.
       if (h.knob) {
         if (inp.gripReleased) { h.knob.grab = null; h.knob = null; }
@@ -3834,6 +5155,8 @@ const Grab = {
       if (near !== h.hover) { if (h.hover && !this.isTargeted(h.hover, h)) h.hover.setHighlight(false); h.hover = near; }
       if (near) near.setHighlight(true);
       if (inp.gripPressed && !h.uiHover) {
+        const ctl = Controls.near(h.grabPoint(_v1));
+        if (ctl && !ctl.grab && (!near || ctl.grabPos.distanceTo(_v1) < near.renderPos.distanceTo(_v1))) { h.ctrl = ctl; ctl.grab = h; ctl.begin(h); haptic(h.side, 0.3, 18); continue; }
         const knob = Stove.knobNear(h.grabPoint(_v1), 0.05);
         if (knob && (!near || knob.pos.distanceTo(_v1) < near.renderPos.distanceTo(_v1))) {
           h.knob = knob; knob.grab = h; h.knobRoll0 = this.rollOf(h); haptic(h.side, 0.3, 18); continue;
@@ -4386,12 +5709,13 @@ const UI = {
     this.label('Controls', X, y, 26, this.C.accent, 'left', 700);
     const lines = ['Grip: grab. Trigger: use held item (peel onion, crack egg, close tongs) / click UI.',
       'Cut: push a knife edge down through food. Flat of the blade crushes garlic.',
-      'Stove: grip a knob and twist your wrist (off → HI → LO). Pat steak dry with towels.',
+      'Stove: grip a knob and twist your wrist (off → HI → LO). Oven: dials left & right, pull the door handle.',
+      'Faucet: lift the lever (swing it for hot/cold). Tilt any vessel to pour. Flick wet hands to throw droplets.',
       'Point + grip + flick = force grab. Palm to face opens this menu; Y/B pins it.'];
     lines.forEach((t, i) => this.label(t, X, y + 36 + i * 32, 20, this.C.muted, 'left', 500));
   },
   drawSpawn(y) {
-    const X = 44, W = S_UI_W, cats = ['Food', 'Tools', 'Cookware', 'Produce', 'Tableware', 'Misc'];
+    const X = 44, W = S_UI_W, cats = ['Food', 'Tools', 'Cookware', 'Pantry', 'Produce', 'Tableware', 'Misc'];
     this.segment('cat', X, y, W, 52, cats.map((c) => ({ v: c, l: c })), this.spawnCat, (v) => { this.spawnCat = v; }, 24);
     y += 70;
     this.label('Quantity', X, y + 24, 26, this.C.muted);
@@ -4431,9 +5755,9 @@ const UI = {
     y += 100;
     this.button('recenter2', X, y, half, 64, 'Return to start', () => Loco.recenter(), { size: 26 });
     y += 110;
-    this.label('Milestone 2 build', X, y, 28, this.C.accent, 'left', 700);
-    const lines = ['Tools & cutting (slices keep their thermal state), minced piles, garlic crush,', 'gas range with twist knobs, pan thermal nodes, 1D food thermal sim,',
-      'steak / egg / onion, Maillard browning & char, sizzle, smoke & steam, Chef\'s Eye.', 'Next (M3): thermometer, oven, water & boiling, pasta, liquids, butter.'];
+    this.label('Milestone 3 build', X, y, 28, this.C.accent, 'left', 700);
+    const lines = ['Cutting, gas range, 1D food thermal sim, browning/char, Chef\'s Eye (M2);', 'thermometer, oven (bake/convect/broil, door, racks), sink & faucet,',
+      'water & boiling, pasta & rice, pouring & puddles, oils, butter stages, crowding, Leidenfrost.', 'Next (M4): fryer, grill, more foods, seasoning, eating & taste cards.'];
     lines.forEach((t, i) => this.label(t, X, y + 44 + i * 36, 22, this.C.muted, 'left', 500));
     this.label(`Props: ${Props.list.length}`, X + W, y, 22, this.C.muted, 'right', 500);
   },
@@ -4468,9 +5792,11 @@ const Sim = {
     while (this.acc >= step && n < 50) {
       this.time += step;
       Stove.refreshPans();
-      if (!this._food) { this._food = Foods.simTick.bind(Foods); this._stove = Stove.simTick.bind(Stove); }
-      safe('foodSim', this._food, step);   // food contacts + thermal steps (draw energy from pans)
-      safe('stoveSim', this._stove, step); // burners heat pans; pans lose to air and contents
+      if (!this._food) { this._food = Foods.simTick.bind(Foods); this._stove = Stove.simTick.bind(Stove); this._oven = Oven.simTick.bind(Oven); this._liq = Liquids.simTick.bind(Liquids); }
+      safe('ovenSim', this._oven, step);   // oven cavity (air + walls), thermostat
+      safe('foodSim', this._food, step);   // food contacts + thermal steps (draw energy from pans, liquids, oven air)
+      safe('stoveSim', this._stove, step); // burners heat pans; pans heat their contents; losses to air / oven
+      safe('liquidSim', this._liq, step);  // unheated vessels, steam & smoke from contents, puddles
       Props.tick(step);
       this.acc -= step; n++;
     }
@@ -4496,6 +5822,7 @@ const Desktop = {
       if (Input.mode !== 'desktop') return;
       if (this.locked) {
         if (this.knob) { Stove.setAngle(this.knob, this.knob.angle - e.movementX * 0.012 + e.movementY * 0.006); return; }
+        if (this.ctrl) { this.ctrl.mouse(e.movementX, e.movementY); return; }
         if (this.rDown && Hands.dominant().held) { this.rotateHeld(e.movementX, e.movementY); return; }
         rig.rotation.y -= e.movementX * D.mouseSens;
         this.pitch = clamp(this.pitch - e.movementY * D.mouseSens, -1.45, 1.45);
@@ -4531,6 +5858,7 @@ const Desktop = {
         case 'KeyT': this.tHeld = true; break;
         case 'KeyR': this.rDown = true; break;
         case 'KeyF': this.forceGrab(); break;
+        case 'KeyV': this.flick(); break;
         case 'KeyX': settings.chefsEye = !settings.chefsEye; settingsChanged(); toast(settings.chefsEye ? "Chef's Eye on" : "Chef's Eye off", 900); break;
       }
     });
@@ -4582,7 +5910,7 @@ const Desktop = {
     }
     if (hover !== this.hoverProp) { if (this.hoverProp) this.hoverProp.setHighlight(false); this.hoverProp = hover; }
     if (hover) hover.setHighlight(true);
-    const knobHot = !held && !UI.open && !!this.knobAtCrosshair();
+    const knobHot = !held && !UI.open && (!!this.knobAtCrosshair() || !!this.ctrlAtCrosshair());
     if ((!!hover || knobHot) !== this._hot) { this._hot = !!hover || knobHot; $('crosshair').classList.toggle('hot', this._hot); }
   },
   // Ray from the view centre against the stove knobs (they are not physics bodies).
@@ -4592,11 +5920,20 @@ const Desktop = {
     for (const k of Stove.knobs) { _v7.subVectors(k.pos, o); const t = _v7.dot(_v6); if (t < 0 || t > bt) continue; if (_v7.addScaledVector(_v6, -t).length() < 0.03) { bt = t; best = k; } }
     return best;
   },
+  ctrlAtCrosshair() { _v6.set(0, 0, -1).applyQuaternion(Loco.headQuat); return Controls.atRay(Loco.headPos, _v6, CONFIG.desktop.reach); },
+  // V: flick water off a wet hand toward the crosshair (wet it under the faucet first).
+  flick() {
+    const h = Hands.dominant();
+    if (h.wet <= 0.05) { toast('Wet your hand under the faucet first', 1200); return; }
+    Loco.updateHead(); _v2.set(0, 0, -1).applyQuaternion(Loco.headQuat).multiplyScalar(2.0); _v2.y += 0.6;
+    Liquids.flick(h.grabPoint(_v1), _v2, 4); h.wet = Math.max(0, h.wet - 0.2);
+  },
   lmbDown() {
     this.lmb = true;
     const h = Hands.dominant(); if (h.held) return;
     Loco.updateHead();
-    const k = this.knobAtCrosshair();
+    const k = this.knobAtCrosshair(), c = this.ctrlAtCrosshair();
+    if (c && (!k || c.grabPos.distanceTo(Loco.headPos) < k.pos.distanceTo(Loco.headPos))) { this.ctrl = c; c.grab = { side: null }; return; }
     if (k) { this.knob = k; k.grab = { side: null }; return; }
     const fwd = _v2.set(0, 0, -1).applyQuaternion(Loco.headQuat);
     const hit = Phys.castRay(Loco.headPos, fwd, CONFIG.desktop.reach, GROUPS.qPoint, _v1, null);
@@ -4610,7 +5947,7 @@ const Desktop = {
     h.snapBody(); h.resetHistory();
     Grab.attach(h, p);
   },
-  lmbUp() { this.lmb = false; if (this.knob) { this.knob.grab = null; this.knob = null; return; } const h = Hands.dominant(); if (h.held) Grab.release(h, true); },
+  lmbUp() { this.lmb = false; if (this.knob) { this.knob.grab = null; this.knob = null; return; } if (this.ctrl) { if (this.ctrl.mouseEnd) this.ctrl.mouseEnd(); this.ctrl.grab = null; this.ctrl = null; return; } const h = Hands.dominant(); if (h.held) Grab.release(h, true); },
   chopT: 0, chopDur: 0.5, crushMode: false, chopAim: new THREE.Vector3(),
   rmbDown() {
     const h = Hands.dominant(), p = h.held; if (!p) return;
@@ -4789,6 +6126,7 @@ function frame() {
   safe('ui', U.ui, dt);
   safe('grab', U.grab, dt);
   safe('tongs', U.tongs, dt);
+  safe('oven', U.oven, dt);
   const step = PHYS_DT; Main.physAcc += dt; let n = 0;
   while (Main.physAcc >= step && n < CONFIG.physics.maxSubSteps) { safe('physics', physicsStep, step); Main.physAcc -= step; n++; }
   if (Main.physAcc > step) Main.physAcc = step * 0.5;
@@ -4797,6 +6135,7 @@ function frame() {
   safe('handsRender', U.handsRender, alpha, dt);
   safe('cutting', U.cutting, dt);
   safe('piles', U.piles);
+  safe('liquids', U.liquids, dt);
   safe('sim', U.sim, dt);
   safe('stove', U.stove, dt);
   safe('particles', U.particles, dt);
@@ -4820,6 +6159,8 @@ async function boot() {
     buildMaterials();
     Kitchen.build();
     Stove.init();
+    Oven.init();
+    Liquids.init();
     Particles.init();
     Foods.init();
     ChefEye.init();
@@ -4839,6 +6180,7 @@ async function boot() {
       clock: Kitchen.updateClock.bind(Kitchen), audio: AudioSys.updateListener.bind(AudioSys), hud: PerfHUD.update.bind(PerfHUD),
       rescue: Props.rescue.bind(Props), tongs: Tongs.update.bind(Tongs), cutting: Cutting.update.bind(Cutting), piles: PileBits.update.bind(PileBits),
       stove: Stove.update.bind(Stove), particles: Particles.update.bind(Particles), chefsEye: ChefEye.update.bind(ChefEye),
+      oven: Oven.update.bind(Oven), liquids: Liquids.update.bind(Liquids),
     });
     renderer.xr.addEventListener('sessionstart', () => XRSession.onStart());
     renderer.xr.addEventListener('sessionend', () => XRSession.onEnd());
@@ -4849,7 +6191,7 @@ async function boot() {
     if (new URLSearchParams(location.search).has('test')) setTimeout(() => safe('testMode', () => TestMode.run()), 50);
     renderer.setAnimationLoop(frame);
     // Debug handle for the browser console (inspect state, tweak CONFIG live).
-    window.MEP = { THREE, RAPIER, CONFIG, resolveLayout, Nav, Phys, Main, PerfHUD, THERMO, FOOD_DEFS, PAN_DEFS, Thermo, PanThermo, simPanCook, simRest, preheat, Foods, FoodPiece, Stove, Cutting, Tongs, Particles, ChefEye, TestMode, settings, scene, camera, rig, renderer, world, Hands, Props, Loco, UI, Grab, Input, Desktop, Sim, Kitchen, U };
+    window.MEP = { THREE, RAPIER, CONFIG, resolveLayout, Nav, Phys, Main, PerfHUD, THERMO, FOOD_DEFS, PAN_DEFS, Thermo, PanThermo, simPanCook, simRest, preheat, Foods, FoodPiece, Stove, Oven, OvenThermo, Contents, Liquids, Sink, Controls, Thermometer, simPot, simPanMulti, exposeSubmerged, dropletFate, LIQ, OVEN, OILS, Cutting, Tongs, Particles, ChefEye, TestMode, settings, scene, camera, rig, renderer, world, Hands, Props, Loco, UI, Grab, Input, Desktop, Sim, Kitchen, U };
 
     const btnVR = $('btnVR'), btnD = $('btnDesktop');
     btnD.disabled = false;
