@@ -1,0 +1,3171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<link rel="icon" href="data:,">
+<title>Mise en Place VR</title>
+<style>
+  :root { --bg:#17110d; --panel:#231a14; --cream:#f4e9d8; --muted:#b7a58f; --accent:#e0a458; --accent2:#c8553d; }
+  html, body { margin:0; height:100%; background:var(--bg); overflow:hidden; color:var(--cream);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  canvas { display:block; }
+  #overlay { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    background:radial-gradient(ellipse at 50% 30%, rgba(60,40,25,.55), rgba(15,10,7,.92)); z-index:10; padding:16px; box-sizing:border-box; }
+  #overlay.hidden { display:none; }
+  .card { max-width:620px; width:100%; background:rgba(35,26,20,.92); border:1px solid rgba(224,164,88,.35);
+    border-radius:18px; padding:28px 28px 22px; box-shadow:0 20px 60px rgba(0,0,0,.5); box-sizing:border-box; }
+  h1 { margin:0 0 4px; font-size:34px; letter-spacing:.06em; }
+  h1 span { color:var(--accent); }
+  .sub { color:var(--muted); margin:0 0 20px; font-size:15px; }
+  .btns { display:flex; gap:12px; flex-wrap:wrap; margin:18px 0 14px; }
+  button.big { flex:1 1 200px; font-size:18px; font-weight:700; padding:16px 18px; border-radius:12px; border:0; cursor:pointer;
+    background:var(--accent); color:#2a1a0c; }
+  button.big.alt { background:transparent; color:var(--cream); border:1px solid rgba(244,233,216,.35); }
+  button.big:disabled { opacity:.4; cursor:not-allowed; }
+  #status { font-size:14px; color:var(--muted); min-height:20px; }
+  #status.err { color:#ff8a70; }
+  details { margin-top:10px; font-size:13.5px; color:var(--muted); }
+  details summary { cursor:pointer; color:var(--cream); }
+  kbd { background:#3a2c21; border:1px solid #5a4636; border-radius:4px; padding:1px 5px; font-size:12px; color:var(--cream); }
+  ul.keys { columns:2; padding-left:18px; margin:8px 0; }
+  ul.keys li { margin:3px 0; break-inside:avoid; }
+  #crosshair { position:fixed; left:50%; top:50%; width:18px; height:18px; margin:-9px 0 0 -9px; pointer-events:none; z-index:5; display:none; }
+  #crosshair::before, #crosshair::after { content:""; position:absolute; background:rgba(255,245,230,.85); box-shadow:0 0 2px #000; }
+  #crosshair::before { left:8px; top:2px; width:2px; height:14px; }
+  #crosshair::after { top:8px; left:2px; height:2px; width:14px; }
+  #crosshair.hot::before, #crosshair.hot::after { background:#ffb35c; }
+  #hint { position:fixed; left:12px; bottom:10px; font-size:12.5px; color:rgba(244,233,216,.8); z-index:5; display:none;
+    background:rgba(20,14,10,.55); padding:6px 10px; border-radius:8px; pointer-events:none; max-width:calc(100% - 24px); }
+  #toast { position:fixed; left:50%; top:16px; transform:translateX(-50%); z-index:6; background:rgba(30,22,16,.85);
+    border:1px solid rgba(224,164,88,.4); padding:8px 14px; border-radius:10px; font-size:14px; opacity:0; transition:opacity .25s; pointer-events:none; }
+  @media (max-width:560px) { ul.keys { columns:1; } h1 { font-size:26px; } }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/",
+    "@dimforge/rapier3d-compat": "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.21.0/dist/rapier.mjs"
+  }
+}
+</script>
+</head>
+<body>
+<div id="overlay">
+  <div class="card">
+    <h1>MISE EN PLACE <span>VR</span></h1>
+    <p class="sub">A physics-driven cooking simulator &middot; Milestone 1: kitchen, hands, grabbing, locomotion, wrist menu</p>
+    <div id="status">Loading physics&hellip;</div>
+    <div class="btns">
+      <button class="big" id="btnVR" disabled>Enter VR</button>
+      <button class="big alt" id="btnDesktop" disabled>Play on Desktop</button>
+    </div>
+    <details>
+      <summary>Controls</summary>
+      <p><b>VR (Quest):</b> Grip = grab (large items take two hands) &middot; Trigger = use / click UI &middot; Left stick = smooth move &middot; Right stick = push forward to teleport, flick left/right to snap turn &middot; Turn your left palm toward your face to open the wrist menu, or press <b>Y</b> to pin it in front of you &middot; Point at a distant item, hold grip, and flick your wrist to force-pull it. Change stick functions per hand in <b>Menu &rarr; Comfort</b>.</p>
+      <ul class="keys">
+        <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move &middot; mouse look</li>
+        <li><kbd>LMB</kbd> hold to grab, release to drop/throw</li>
+        <li><kbd>RMB</kbd> use held item</li>
+        <li><kbd>Wheel</kbd> hold distance</li>
+        <li><kbd>R</kbd> + mouse: rotate held item</li>
+        <li><kbd>1</kbd>&ndash;<kbd>9</kbd> tools, <kbd>0</kbd> empty hand</li>
+        <li><kbd>F</kbd> force-grab the item you're aiming at</li>
+        <li>Hold <kbd>T</kbd> to aim a teleport, release to jump</li>
+        <li><kbd>Q</kbd>/<kbd>E</kbd> snap turn</li>
+        <li><kbd>M</kbd> or <kbd>Tab</kbd> menu &middot; <kbd>P</kbd> perf HUD</li>
+      </ul>
+    </details>
+  </div>
+</div>
+<div id="crosshair"></div>
+<div id="hint">WASD move &middot; LMB grab/throw &middot; RMB use &middot; Wheel distance &middot; R rotate &middot; 1&ndash;9 tools &middot; F force-grab &middot; T teleport &middot; Q/E turn &middot; M menu &middot; P perf &middot; Esc release mouse</div>
+<div id="toast"></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import RAPIER from '@dimforge/rapier3d-compat';
+
+/* =====================================================================================
+ *  MISE EN PLACE VR  —  single-file WebXR cooking simulator
+ *  Milestone 1: kitchen blockout, XR session, physics hands, grabbing / throwing,
+ *  full per-hand locomotion, wrist menu, desktop fallback.
+ *
+ *  Module map (search for the banner to jump):
+ *    [CONFIG] [UTIL] [SAVE] [RENDERER] [TEXTURES] [AUDIO] [PHYSICS] [KITCHEN]
+ *    [PROPS] [INPUT] [HANDS] [GRAB] [LOCOMOTION] [UI] [SIM] [DESKTOP] [MAIN]
+ * ===================================================================================== */
+
+/* ===================================== [CONFIG] ===================================== */
+const CONFIG = {
+  physics: {
+    hz: 72,                 // Hz — fixed physics rate (matches Quest 72 Hz; interpolated for 90 Hz displays)
+    maxSubSteps: 4,         // steps — cap per frame to avoid a spiral of death
+    gravity: -9.81,         // m/s²
+  },
+  sim: {
+    hz: 10,                 // Hz — cooking / timer simulation fixed step (thermal model arrives in M2)
+  },
+  render: {
+    foveation: 1,           // 0..1 — fixed foveated rendering strength
+    framebufferScale: 1.0,  // × — XR framebuffer scale factor
+    shadowMapSize: 1024,    // px — single directional shadow map
+    maxPixelRatio: 2,       // desktop only
+    near: 0.03, far: 40,    // m
+  },
+  kitchen: {
+    halfX: 3.0, halfZ: 2.5, // m — room is 6 × 5 m
+    height: 2.8,            // m — ceiling
+    counterTop: 0.92,       // m — work surface height
+    counterDepth: 0.65,     // m
+    topThick: 0.04,         // m — countertop slab thickness
+  },
+  player: {
+    radius: 0.2,            // m — collision capsule radius
+    capsuleBottom: 0.2,     // m — capsule starts above the floor (ignores the floor itself)
+    capsuleTop: 1.25,       // m — top of capsule (counters at 0.92 m are blocked)
+    defaultEye: 1.65,       // m — desktop eye height / seated target
+    spawn: { x: 0, z: 1.35, yaw: 0 }, // m, m, rad — facing −Z toward the island
+  },
+  loco: {
+    deadzone: 0.18,         // stick units — radial deadzone
+    teleportEngage: 0.65,   // stick units — forward push to start aiming
+    teleportRelease: 0.25,  // stick units — below this the aim is released (teleport fires)
+    teleportFacingMin: 0.5, // stick units — magnitude before stick rotation sets arrival facing
+    turnEngage: 0.7,        // stick units — snap-turn trigger
+    turnReset: 0.35,        // stick units — re-arm snap turn
+    arcStep: 0.025,         // s — arc integration step
+    arcMaxSegments: 72,     // segments
+    arcGravity: 9.81,       // m/s²
+    blinkMs: 100,           // ms — total fade-to-black blink (out + in)
+    navMargin: 0.2,         // m — keep teleport targets this far from obstacles
+    snapVignetteMs: 140,    // ms — vignette flash on snap turn
+    vignetteMax: 0.85,      // 0..1 — maximum vignette coverage
+    smoothMoveAccel: 12,    // 1/s — stick-to-velocity smoothing
+  },
+  hands: {
+    maxLinSpeed: 14,        // m/s — velocity drive clamp for hand proxies
+    maxAngSpeed: 50,        // rad/s
+    heldMaxLinSpeed: 16,    // m/s — velocity drive clamp for held items
+    heldMaxAngSpeed: 45,    // rad/s
+    snapDistance: 0.35,     // m — beyond this a proxy / held item teleports to its target
+    heldSnapDistance: 0.6,  // m
+    visualSnapTol: 0.012,   // m — render at the tracked pose when the proxy is this close (zero-latency)
+    grabRadius: 0.06,       // m — grab sphere radius
+    toolPitchDeg: -40,      // deg — tool grip pitch so blades/pans sit level with a natural wrist
+    throwFrames: 6,         // frames — velocity averaging window for throws
+    historyFrames: 10,      // frames — ring buffer size
+    throwScale: 1.0,        // × — throw velocity multiplier
+    proxyReenableDelay: 0.3,// s — hand collider stays off after releasing (no pop)
+    forceRange: 6,          // m — force-grab reach
+    forceFlickSpeed: 1.1,   // m/s — hand speed toward the head that counts as a flick
+    forceFlickAngular: 7,   // rad/s — wrist flick angular speed that also counts
+    forceFlightTime: 0.5,   // s — ballistic flight time to the hand
+    forceCatchDist: 0.22,   // m — auto-grab radius when a pulled item arrives
+    gripPress: 0.6, gripRelease: 0.35,       // squeeze thresholds (hysteresis)
+    triggerPress: 0.6, triggerRelease: 0.35, // trigger thresholds
+    handMass: 0.8,          // kg — proxy mass
+  },
+  ui: {
+    canvas: 1024,           // px — wrist menu canvas (square)
+    wristSize: 0.26,        // m — panel size on the wrist
+    floatSize: 0.56,        // m — panel size when pinned in the world
+    floatDistance: 0.72,    // m
+    peekFacing: 0.55,       // dot — palm-toward-head threshold
+    peekGaze: 0.82,         // dot — head-looking-at-hand threshold
+    peekOpenDelay: 0.3,     // s
+    peekCloseDelay: 0.45,   // s
+    laserMax: 3.0,          // m
+  },
+  audio: {
+    maxVoices: 24,          // concurrent one-shot voices
+    impactMinForce: 1.5,    // N·(scaled) — contact force event threshold
+    impactCooldown: 0.07,   // s — per-body sound cooldown
+  },
+  desktop: {
+    mouseSens: 0.0022,      // rad/px
+    reach: 3.0,             // m — click-to-grab reach
+    holdMin: 0.3, holdMax: 2.2, holdRest: 0.45, // m
+    walkSpeed: 2.0,         // m/s
+  },
+};
+
+const DEFAULT_SETTINGS = {
+  version: 1,
+  dominant: 'right',
+  stickL: 'move',           // move | teleport | turn | teleturn | none
+  stickR: 'teleturn',
+  turnType: 'snap',         // snap | smooth
+  snapAngle: 30,            // deg
+  smoothTurnSpeed: 90,      // deg/s
+  moveSpeed: 1.8,           // m/s
+  moveRelative: 'head',     // head | controller
+  vignetteMove: true,
+  vignetteTurn: true,
+  vignetteStrength: 0.55,   // 0..1
+  blink: true,
+  arcVelocity: 7.5,         // m/s
+  gripTriggerTeleport: true,
+  seated: false,
+  heightOffset: 0,          // m — rig vertical offset (seated / recalibrated)
+  targetEyeHeight: 1.65,    // m
+  masterVolume: 0.8,
+  ambience: 0.35,
+  haptics: true,
+  hapticStrength: 1.0,
+  forceGrab: true,
+  shadows: true,
+  perfHud: false,
+  refresh: 72,              // Hz — requested XR refresh rate
+  glove: 0,                 // palette index
+};
+
+const GLOVE_COLORS = [0x23324a, 0x1d1d22, 0x3c6e71, 0x7a2e2e, 0xd8d2c4];
+
+/* ====================================== [UTIL] ====================================== */
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const lerp = (a, b, t) => a + (b - a) * t;
+const smoothstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+const DEG = Math.PI / 180;
+const $ = (id) => document.getElementById(id);
+
+// Deterministic PRNG (mulberry32) so procedural textures are stable between loads.
+function rng(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Errors inside the loop are logged once per subsystem instead of freezing the headset.
+const _loggedErrors = new Map();
+function logError(key, e) {
+  const n = (_loggedErrors.get(key) || 0) + 1;
+  _loggedErrors.set(key, n);
+  if (n <= 3 || n % 600 === 0) console.error(`[${key}] (${n}×)`, e);
+}
+function safe(key, fn, a, b) {
+  try { fn(a, b); } catch (e) { logError(key, e); }
+}
+
+let _toastTimer = 0;
+function toast(msg, ms = 1800) {
+  const el = $('toast'); el.textContent = msg; el.style.opacity = '1';
+  clearTimeout(_toastTimer); _toastTimer = setTimeout(() => { el.style.opacity = '0'; }, ms);
+}
+
+// Preallocated temporaries (the render loop never allocates vectors/quaternions).
+const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3(), _v4 = new THREE.Vector3();
+const _v5 = new THREE.Vector3(), _v6 = new THREE.Vector3(), _v7 = new THREE.Vector3(), _v8 = new THREE.Vector3();
+const _q1 = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _q3 = new THREE.Quaternion(), _q4 = new THREE.Quaternion();
+const _m1 = new THREE.Matrix4(), _m2 = new THREE.Matrix4();
+const _e1 = new THREE.Euler();
+const UP = new THREE.Vector3(0, 1, 0);
+const SIDES = ['left', 'right'];
+const FWD = new THREE.Vector3(0, 0, -1);
+const _r1 = { x: 0, y: 0, z: 0 }, _r2 = { x: 0, y: 0, z: 0 }, _rq = { x: 0, y: 0, z: 0, w: 1 }; // Rapier scratch
+
+// Shortest-arc angular velocity (rad/s) that rotates qFrom into qTo over dt; writes into out.
+function angularVelocity(qFrom, qTo, dt, out) {
+  _q4.copy(qFrom).invert().premultiply(qTo); // qTo * inv(qFrom)
+  if (_q4.w < 0) { _q4.x = -_q4.x; _q4.y = -_q4.y; _q4.z = -_q4.z; _q4.w = -_q4.w; }
+  const s = Math.sqrt(1 - Math.min(1, _q4.w * _q4.w));
+  const angle = 2 * Math.acos(clamp(_q4.w, -1, 1));
+  if (s < 1e-6 || angle < 1e-6) return out.set(0, 0, 0);
+  return out.set(_q4.x / s, _q4.y / s, _q4.z / s).multiplyScalar(angle / dt);
+}
+function yawOf(q) { _v8.set(0, 0, -1).applyQuaternion(q); return Math.atan2(-_v8.x, -_v8.z); }
+
+/* ====================================== [SAVE] ====================================== */
+const Save = {
+  KEY: 'mep.settings.v1',
+  PROGRESS_KEY: 'mep.progress.v1',
+  _timer: 0,
+  load() {
+    let s = null;
+    try { const raw = localStorage.getItem(this.KEY); if (raw) s = JSON.parse(raw); } catch (e) { console.warn('settings load failed', e); }
+    const out = Object.assign({}, DEFAULT_SETTINGS);
+    if (s && typeof s === 'object') for (const k in DEFAULT_SETTINGS) if (k in s && typeof s[k] === typeof DEFAULT_SETTINGS[k]) out[k] = s[k];
+    return out;
+  },
+  save(settings) {
+    clearTimeout(this._timer);
+    this._timer = setTimeout(() => {
+      try { localStorage.setItem(this.KEY, JSON.stringify(settings)); } catch (e) { console.warn('settings save failed', e); }
+    }, 250);
+  },
+  loadProgress() {
+    try { const raw = localStorage.getItem(this.PROGRESS_KEY); return raw ? JSON.parse(raw) : {}; } catch (e) { return {}; }
+  },
+  saveProgress(p) {
+    try { localStorage.setItem(this.PROGRESS_KEY, JSON.stringify(p)); } catch (e) { console.warn('progress save failed', e); }
+  },
+};
+const settings = Save.load();
+function settingsChanged() { Save.save(settings); UI.dirty = true; applyRenderSettings(); }
+
+/* ==================================== [RENDERER] ==================================== */
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, CONFIG.render.maxPixelRatio));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.shadowMap.enabled = settings.shadows;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+renderer.xr.setFramebufferScaleFactor(CONFIG.render.framebufferScale);
+renderer.xr.setFoveation(CONFIG.render.foveation);
+renderer.info.autoReset = false; // we reset once per frame so both eyes are counted
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1b140f);
+
+const camera = new THREE.PerspectiveCamera(72, window.innerWidth / window.innerHeight, CONFIG.render.near, CONFIG.render.far);
+const rig = new THREE.Group(); // player origin on the floor; head/hands are children in tracking space
+rig.name = 'PlayerRig';
+scene.add(rig);
+rig.add(camera);
+
+// Image-based lighting from a procedural room (PMREM) gives metals and glazes believable reflections.
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.5;
+pmrem.dispose();
+
+const hemi = new THREE.HemisphereLight(0xfff0dc, 0x4a3526, 0.85);
+scene.add(hemi);
+
+// One shadow-casting "window sun" (warm, late afternoon) coming through the left-wall window.
+const sun = new THREE.DirectionalLight(0xffdcb0, 2.4);
+sun.position.set(-5.5, 5.2, 0.8);
+sun.target.position.set(0.3, 0, -0.3);
+sun.castShadow = settings.shadows;
+sun.shadow.mapSize.set(CONFIG.render.shadowMapSize, CONFIG.render.shadowMapSize);
+sun.shadow.camera.left = -4; sun.shadow.camera.right = 4;
+sun.shadow.camera.top = 4; sun.shadow.camera.bottom = -4;
+sun.shadow.camera.near = 1; sun.shadow.camera.far = 14;
+sun.shadow.bias = -0.0006; sun.shadow.normalBias = 0.025;
+scene.add(sun, sun.target);
+
+// Warm pendant fill over the island (no shadows).
+const pendantLight = new THREE.PointLight(0xffc98a, 6, 4.5, 2);
+pendantLight.position.set(0, 2.05, 0);
+scene.add(pendantLight);
+
+function applyRenderSettings() {
+  if (renderer.shadowMap.enabled !== settings.shadows) {
+    renderer.shadowMap.enabled = settings.shadows;
+    sun.castShadow = settings.shadows;
+    scene.traverse((o) => { if (o.material) { const m = o.material; (Array.isArray(m) ? m : [m]).forEach((x) => { x.needsUpdate = true; }); } });
+  }
+  if (typeof PerfHUD !== 'undefined') PerfHUD.setVisible(settings.perfHud);
+  for (const h of (typeof HANDS !== 'undefined' ? HANDS : [])) h.setGlove(GLOVE_COLORS[settings.glove % GLOVE_COLORS.length]);
+  if (typeof AudioSys !== 'undefined') AudioSys.applyVolumes();
+}
+
+window.addEventListener('resize', () => {
+  if (renderer.xr.isPresenting) return;
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+/* ==================================== [TEXTURES] ==================================== */
+// Every texture is generated at load with Canvas2D. Noise is lattice-periodic, so textures tile seamlessly.
+const Noise = {
+  make(seed, size = 256) { const r = rng(seed); const g = new Float32Array(size * size); for (let i = 0; i < g.length; i++) g[i] = r(); return { size, g }; },
+  v(n, x, y, px, py) {
+    const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+    const x0 = ((xi % px) + px) % px, y0 = ((yi % py) + py) % py, x1 = (x0 + 1) % px, y1 = (y0 + 1) % py, S = n.size;
+    const a = n.g[y0 * S + x0], b = n.g[y0 * S + x1], c = n.g[y1 * S + x0], d = n.g[y1 * S + x1];
+    const u = xf * xf * (3 - 2 * xf), w = yf * yf * (3 - 2 * yf);
+    return a + (b - a) * u + (c - a) * w + (a - b - c + d) * u * w;
+  },
+  // Tileable fBm; fx/fy are integer base frequencies in each axis.
+  fbm(n, u, v, fx, fy, oct = 4) {
+    let sum = 0, amp = 0.5, norm = 0, mx = fx, my = fy;
+    for (let o = 0; o < oct; o++) {
+      sum += amp * Noise.v(n, u * mx, v * my, mx, my); norm += amp; amp *= 0.5; mx *= 2; my *= 2;
+    }
+    return sum / norm;
+  },
+};
+
+const Tex = {
+  canvas(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; },
+  finish(c, { srgb = true, aniso = 4 } = {}) {
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.anisotropy = aniso;
+    return t;
+  },
+  // Generic per-pixel painter: fn(u, v) → [r, g, b] (0..255)
+  paint(w, h, fn) {
+    const c = Tex.canvas(w, h), ctx = c.getContext('2d'), img = ctx.createImageData(w, h), d = img.data;
+    const col = [0, 0, 0];
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      fn(x / w, y / h, col);
+      const i = (y * w + x) * 4; d[i] = col[0]; d[i + 1] = col[1]; d[i + 2] = col[2]; d[i + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    return c;
+  },
+  wood({ seed = 1, light = [196, 150, 104], dark = [140, 96, 60], rings = 9, w = 512, h = 512, warp = 2.2 } = {}) {
+    const n = Noise.make(seed);
+    return Tex.paint(w, h, (u, v, o) => {
+      const warpv = Noise.fbm(n, u, v, 2, 4, 4) * warp;
+      const r = 0.5 + 0.5 * Math.sin((v * rings + warpv) * Math.PI * 2);
+      const fiber = Noise.fbm(n, u, v, 4, 64, 2);
+      const t = Math.pow(r, 2.2) * 0.75 + fiber * 0.35;
+      for (let k = 0; k < 3; k++) o[k] = clamp(lerp(light[k], dark[k], t), 0, 255);
+    });
+  },
+  butcher() {
+    // Edge-grain butcher block: strips of maple/walnut-ish tones with grain along V.
+    const w = 512, h = 512, c = Tex.canvas(w, h), ctx = c.getContext('2d'), r = rng(77), n = Noise.make(78);
+    let x = 0;
+    const tones = [[214, 170, 118], [196, 146, 96], [226, 186, 134], [178, 128, 82], [205, 160, 108]];
+    const img = ctx.createImageData(w, h), d = img.data;
+    const strips = [];
+    while (x < w) { const sw = Math.round(28 + r() * 34); strips.push([x, Math.min(w, x + sw), tones[Math.floor(r() * tones.length)], r() * 10]); x += sw; }
+    for (const [x0, x1, tone, off] of strips) {
+      for (let py = 0; py < h; py++) for (let px = x0; px < x1; px++) {
+        const u = px / w, v = py / h;
+        const g = Noise.fbm(n, u + off, v, 8, 2, 3);
+        const fib = 0.5 + 0.5 * Math.sin((u * 90 + g * 6 + off) * Math.PI);
+        const t = fib * 0.22 + g * 0.25 + (px === x0 ? 0.35 : 0);
+        const i = (py * w + px) * 4;
+        d[i] = clamp(tone[0] * (1 - t * 0.5), 0, 255); d[i + 1] = clamp(tone[1] * (1 - t * 0.55), 0, 255); d[i + 2] = clamp(tone[2] * (1 - t * 0.6), 0, 255); d[i + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    return c;
+  },
+  marble() {
+    const n = Noise.make(11), n2 = Noise.make(12);
+    return Tex.paint(1024, 1024, (u, v, o) => {
+      const t = Noise.fbm(n, u, v, 3, 3, 5);
+      const vein = Math.abs(Math.sin((u * 2 + v * 1 + t * 2.4) * Math.PI * 2));
+      const vein2 = Math.abs(Math.sin((u * 1 - v * 3 + Noise.fbm(n2, u, v, 4, 4, 4) * 3.1) * Math.PI * 2));
+      const k = Math.pow(1 - vein, 18) * 0.55 + Math.pow(1 - vein2, 40) * 0.35;
+      const cloud = Noise.fbm(n2, u, v, 6, 6, 3) * 0.07;
+      const base = 238 - cloud * 255;
+      o[0] = clamp(base - k * 120, 0, 255); o[1] = clamp(base - 2 - k * 118, 0, 255); o[2] = clamp(base - 6 - k * 110, 0, 255);
+    });
+  },
+  steel() {
+    const w = 256, h = 256, c = Tex.canvas(w, h), ctx = c.getContext('2d'), r = rng(5);
+    ctx.fillStyle = '#b9bcc0'; ctx.fillRect(0, 0, w, h);
+    for (let i = 0; i < 2600; i++) {
+      const y = r() * h, len = 20 + r() * 180, x = r() * w, a = r() * 0.18;
+      ctx.strokeStyle = r() < 0.5 ? `rgba(255,255,255,${a})` : `rgba(60,64,70,${a})`;
+      ctx.lineWidth = 0.6 + r() * 0.8;
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + len, y); ctx.stroke();
+      if (x + len > w) { ctx.beginPath(); ctx.moveTo(x - w, y); ctx.lineTo(x + len - w, y); ctx.stroke(); }
+    }
+    return c;
+  },
+  tile() {
+    // White subway tile, running bond, 2:1 tiles, subtle glaze variation.
+    const w = 512, h = 512, c = Tex.canvas(w, h), ctx = c.getContext('2d'), r = rng(21);
+    ctx.fillStyle = '#b8b0a4'; ctx.fillRect(0, 0, w, h);
+    const tw = w / 2, th = h / 4, g = 5;
+    for (let row = 0; row < 4; row++) {
+      const off = row % 2 ? tw / 2 : 0;
+      for (let col = -1; col < 3; col++) {
+        const x = col * tw + off, y = row * th;
+        const tone = 236 + Math.floor(r() * 14);
+        const grad = ctx.createLinearGradient(0, y, 0, y + th);
+        grad.addColorStop(0, `rgb(${tone + 8},${tone + 6},${tone + 2})`);
+        grad.addColorStop(0.5, `rgb(${tone},${tone - 2},${tone - 8})`);
+        grad.addColorStop(1, `rgb(${tone - 22},${tone - 24},${tone - 28})`);
+        ctx.fillStyle = grad;
+        ctx.beginPath(); ctx.roundRect(x + g / 2, y + g / 2, tw - g, th - g, 7); ctx.fill();
+      }
+    }
+    return c;
+  },
+  planks() {
+    // Warm oak floor, 6 planks across, random butt joints.
+    const w = 1024, h = 1024, c = Tex.canvas(w, h), ctx = c.getContext('2d'), r = rng(31), n = Noise.make(32);
+    const img = ctx.createImageData(w, h), d = img.data, rows = 6, ph = h / rows;
+    const joints = [], tones = [];
+    for (let i = 0; i < rows; i++) { joints.push(r()); tones.push(0.85 + r() * 0.3); }
+    for (let y = 0; y < h; y++) {
+      const row = Math.floor(y / ph), tone = tones[row], jy = y - row * ph;
+      for (let x = 0; x < w; x++) {
+        const u = x / w, v = y / h;
+        const warpv = Noise.fbm(n, u, v, 4, 6, 3) * 1.8;
+        const ring = 0.5 + 0.5 * Math.sin((v * 42 + warpv + row * 3.1) * Math.PI);
+        const fiber = Noise.fbm(n, u + row * 0.37, v, 64, 8, 2);
+        let t = Math.pow(ring, 3) * 0.35 + fiber * 0.3;
+        const ju = (u - joints[row] + 1) % 1;
+        if (jy < 2 || jy > ph - 2 || ju < 0.0025) t = 1.4;
+        const i = (y * w + x) * 4;
+        d[i] = clamp((178 - t * 70) * tone, 0, 255); d[i + 1] = clamp((126 - t * 56) * tone, 0, 255); d[i + 2] = clamp((82 - t * 40) * tone, 0, 255); d[i + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    return c;
+  },
+  plaster(base = [238, 229, 214]) {
+    const n = Noise.make(41);
+    return Tex.paint(256, 256, (u, v, o) => {
+      const t = Noise.fbm(n, u, v, 4, 4, 5) - 0.5;
+      for (let k = 0; k < 3; k++) o[k] = clamp(base[k] + t * 26, 0, 255);
+    });
+  },
+  brushed(base) {
+    const n = Noise.make(51);
+    return Tex.paint(256, 256, (u, v, o) => {
+      const t = (Noise.fbm(n, u, v, 2, 32, 3) - 0.5) * 16 + (Noise.fbm(n, u, v, 8, 8, 2) - 0.5) * 8;
+      for (let k = 0; k < 3; k++) o[k] = clamp(base[k] + t, 0, 255);
+    });
+  },
+  castIron() {
+    const n = Noise.make(61);
+    return Tex.paint(256, 256, (u, v, o) => {
+      const t = Noise.fbm(n, u, v, 16, 16, 3);
+      const g = 30 + t * 26; o[0] = g + 2; o[1] = g; o[2] = g - 2;
+    });
+  },
+  sky() {
+    const w = 512, h = 512, c = Tex.canvas(w, h), ctx = c.getContext('2d'), r = rng(91);
+    const g = ctx.createLinearGradient(0, 0, 0, h);
+    g.addColorStop(0, '#8fb7d9'); g.addColorStop(0.55, '#e9d3b0'); g.addColorStop(0.75, '#f3c18a'); g.addColorStop(1, '#6f7f55');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+    const sg = ctx.createRadialGradient(w * 0.7, h * 0.55, 5, w * 0.7, h * 0.55, 180);
+    sg.addColorStop(0, 'rgba(255,240,200,0.95)'); sg.addColorStop(1, 'rgba(255,220,160,0)');
+    ctx.fillStyle = sg; ctx.fillRect(0, 0, w, h);
+    ctx.filter = 'blur(6px)';
+    for (let i = 0; i < 26; i++) {
+      const x = r() * w, y = h * (0.62 + r() * 0.2), rad = 30 + r() * 60;
+      ctx.fillStyle = `rgba(${60 + r() * 30},${85 + r() * 30},${50 + r() * 20},0.9)`;
+      ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.filter = 'none';
+    return c;
+  },
+  // Organic produce skins: base colour + speckles + streaks, mapped with sphere UVs.
+  skin({ seed, base, speck = null, streak = null, eyes = 0, rings = 0, w = 256, h = 128 }) {
+    const n = Noise.make(seed);
+    const c = Tex.paint(w, h, (u, v, o) => {
+      const t = Noise.fbm(n, u, v, 8, 4, 4) - 0.5;
+      let r = base[0] + t * 40, g = base[1] + t * 34, b = base[2] + t * 24;
+      if (streak) {
+        const s = 0.5 + 0.5 * Math.sin((u * 18 + Noise.fbm(n, u, v, 4, 2, 3) * 4) * Math.PI);
+        const k = Math.pow(s, 3) * streak[3];
+        r = lerp(r, streak[0], k); g = lerp(g, streak[1], k); b = lerp(b, streak[2], k);
+      }
+      if (rings) {
+        const s = Math.pow(0.5 + 0.5 * Math.sin(v * rings * Math.PI * 2), 8) * 0.25;
+        r *= 1 - s; g *= 1 - s; b *= 1 - s;
+      }
+      o[0] = clamp(r, 0, 255); o[1] = clamp(g, 0, 255); o[2] = clamp(b, 0, 255);
+    });
+    const ctx = c.getContext('2d'), rr = rng(seed + 1);
+    if (speck) for (let i = 0; i < speck[3]; i++) { ctx.fillStyle = `rgba(${speck[0]},${speck[1]},${speck[2]},${0.25 + rr() * 0.5})`; ctx.fillRect(rr() * w, rr() * h, 1 + rr() * 1.5, 1 + rr() * 1.5); }
+    for (let i = 0; i < eyes; i++) { ctx.fillStyle = 'rgba(70,45,25,0.8)'; ctx.beginPath(); ctx.ellipse(rr() * w, 20 + rr() * (h - 40), 3, 2, 0, 0, 7); ctx.fill(); }
+    return c;
+  },
+};
+
+/* Materials: one "uber" PBR material for everything opaque (static kitchen + props).
+ * Surfaces are specs {cell, color, rough, metal, emis}; geometry carries per-vertex colour (tint × baked AO),
+ * pbr (roughness, metalness, emissive) and an atlas rect. All tiling textures live in one 2048² atlas and are
+ * sampled with fract() + textureGrad, so the whole static kitchen is 2 draw calls and each prop is 1. */
+const MAT = {};
+const TEX = {};
+let UBER = null;
+const ATLAS = { size: 2048, cells: {} };
+function buildAtlas() {
+  const S = ATLAS.size, c = Tex.canvas(S, S), ctx = c.getContext('2d');
+  ctx.fillStyle = '#808080'; ctx.fillRect(0, 0, S, S);
+  const put = (name, canvas, x, y, w, h) => {
+    ctx.drawImage(canvas, x, y, w, h);
+    const inset = 2; // texels — keeps bilinear taps inside the cell
+    ATLAS.cells[name] = [(x + inset) / S, 1 - (y + h - inset) / S, (w - 2 * inset) / S, (h - 2 * inset) / S];
+  };
+  put('planks', Tex.planks(), 0, 0, 1024, 1024);
+  put('marble', Tex.marble(), 1024, 0, 1024, 1024);
+  put('tile', Tex.tile(), 0, 1024, 512, 512);
+  put('butcher', Tex.butcher(), 512, 1024, 512, 512);
+  put('oak', Tex.wood({ seed: 3, light: [200, 156, 108], dark: [150, 104, 64], rings: 7 }), 1024, 1024, 512, 512);
+  put('board', Tex.wood({ seed: 8, light: [214, 170, 118], dark: [170, 120, 74], rings: 13 }), 1536, 1024, 512, 512);
+  put('walnut', Tex.wood({ seed: 4, light: [120, 80, 52], dark: [64, 40, 26], rings: 11 }), 0, 1536, 512, 512);
+  put('beech', Tex.wood({ seed: 6, light: [226, 196, 150], dark: [196, 156, 108], rings: 5, warp: 1.2 }), 512, 1536, 512, 512);
+  put('paint', Tex.brushed([92, 114, 96]), 1024, 1536, 256, 256);
+  put('steel', Tex.steel(), 1280, 1536, 256, 256);
+  put('plaster', Tex.plaster(), 1536, 1536, 256, 256);
+  put('castIron', Tex.castIron(), 1792, 1536, 256, 256);
+  const skins = {
+    tomato: { seed: 101, base: [196, 34, 26], speck: [255, 200, 180, 120], streak: [230, 70, 40, 0.3] },
+    onion: { seed: 102, base: [176, 112, 58], streak: [120, 70, 34, 0.6], speck: [230, 190, 140, 200] },
+    lemon: { seed: 103, base: [240, 206, 54], speck: [200, 160, 30, 500] },
+    apple: { seed: 104, base: [178, 30, 36], streak: [226, 170, 60, 0.5], speck: [250, 230, 180, 160] },
+    potato: { seed: 105, base: [186, 146, 96], speck: [120, 90, 60, 600], eyes: 9 },
+    carrot: { seed: 106, base: [236, 116, 24], rings: 22, speck: [180, 80, 20, 200] },
+    egg: { seed: 107, base: [236, 214, 186], speck: [200, 170, 140, 300] },
+  };
+  Object.entries(skins).forEach(([k, o], i) => put(k, Tex.skin(o), 1024 + (i % 4) * 256, 1792 + Math.floor(i / 4) * 128, 256, 128));
+  const t = Tex.finish(c, { aniso: 8 });
+  return t;
+}
+// Shader patch: per-vertex PBR + atlas tiling. Shared by UBER and its highlight clone (same program).
+function uberPatch(shader) {
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', '#include <common>\nattribute vec3 pbr;\nattribute vec4 atlas;\nvarying vec3 vPbr;\nvarying vec4 vAtlas;\nvarying vec2 vUvRaw;')
+    .replace('#include <uv_vertex>', '#include <uv_vertex>\nvPbr = pbr; vAtlas = atlas; vUvRaw = uv;');
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', '#include <common>\nvarying vec3 vPbr;\nvarying vec4 vAtlas;\nvarying vec2 vUvRaw;')
+    .replace('#include <map_fragment>', `
+      if (vAtlas.z > 0.0) {
+        vec2 auv = vAtlas.xy + fract(vUvRaw) * vAtlas.zw;
+        diffuseColor *= textureGrad(map, auv, dFdx(vUvRaw) * vAtlas.zw, dFdy(vUvRaw) * vAtlas.zw);
+      }`)
+    .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = vPbr.x;')
+    .replace('#include <metalnessmap_fragment>', 'float metalnessFactor = vPbr.y;')
+    .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += diffuseColor.rgb * vPbr.z;');
+}
+function makeUber(map) {
+  const m = new THREE.MeshStandardMaterial({ map, vertexColors: true, roughness: 1, metalness: 1 });
+  m.onBeforeCompile = uberPatch; m.customProgramCacheKey = () => 'uber-v1';
+  return m;
+}
+// Surface spec helper
+const spec = (color, rough, metal = 0, cell = null, emis = 0, uvScale = 1) => ({ color: new THREE.Color(color), rough, metal, cell, emis, uvScale, isSpec: true });
+const _uc = new THREE.Color();
+// Write uber attributes onto a (non-indexed) geometry. uvFn(i) may rewrite UVs (world-space tiling for the kitchen).
+function uberize(geo, sp, { tint = 0xffffff, ao = null, uvWorld = 0 } = {}) {
+  geo = geo.index ? geo.toNonIndexed() : geo;
+  const pos = geo.attributes.position, nor = geo.attributes.normal, n = pos.count;
+  let uvA = geo.attributes.uv;
+  if (!uvA) { uvA = new THREE.BufferAttribute(new Float32Array(n * 2), 2); geo.setAttribute('uv', uvA); }
+  if (uvWorld) {
+    for (let i = 0; i < n; i++) {
+      const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i), ax = Math.abs(nor.getX(i)), ay = Math.abs(nor.getY(i)), az = Math.abs(nor.getZ(i));
+      let u, v; if (ay >= ax && ay >= az) { u = x; v = z; } else if (ax >= az) { u = z; v = y; } else { u = x; v = y; }
+      uvA.setXY(i, u * uvWorld, v * uvWorld);
+    }
+  } else if (sp.uvScale !== 1) for (let i = 0; i < n; i++) uvA.setXY(i, uvA.getX(i) * sp.uvScale, uvA.getY(i) * sp.uvScale);
+  const col = new Float32Array(n * 3), pbr = new Float32Array(n * 3), atl = new Float32Array(n * 4);
+  _uc.set(tint).multiply(sp.color);
+  const rect = sp.cell ? ATLAS.cells[sp.cell] : null;
+  for (let i = 0; i < n; i++) {
+    const k = ao ? ao(pos.getX(i), pos.getY(i), pos.getZ(i), nor.getY(i)) : 1;
+    col[i * 3] = _uc.r * k; col[i * 3 + 1] = _uc.g * k; col[i * 3 + 2] = _uc.b * k;
+    pbr[i * 3] = sp.rough; pbr[i * 3 + 1] = sp.metal; pbr[i * 3 + 2] = sp.emis;
+    if (rect) { atl[i * 4] = rect[0]; atl[i * 4 + 1] = rect[1]; atl[i * 4 + 2] = rect[2]; atl[i * 4 + 3] = rect[3]; }
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  geo.setAttribute('pbr', new THREE.BufferAttribute(pbr, 3));
+  geo.setAttribute('atlas', new THREE.BufferAttribute(atl, 4));
+  for (const key of Object.keys(geo.attributes)) if (!['position', 'normal', 'uv', 'color', 'pbr', 'atlas'].includes(key)) geo.deleteAttribute(key);
+  return geo;
+}
+function buildMaterials() {
+  TEX.atlas = buildAtlas();
+  UBER = makeUber(TEX.atlas);
+  TEX.sky = Tex.finish(Tex.sky()); TEX.sky.wrapS = TEX.sky.wrapT = THREE.ClampToEdgeWrapping;
+  // Kitchen surfaces
+  Object.assign(MAT, {
+    floor: spec(0xffffff, 0.58, 0, 'planks'), wall: spec(0xffffff, 0.95, 0, 'plaster'), ceiling: spec(0xf1ebe0, 0.95),
+    tile: spec(0xffffff, 0.22, 0, 'tile'), marble: spec(0xffffff, 0.16, 0, 'marble'), butcher: spec(0xffffff, 0.5, 0, 'butcher'),
+    cabinet: spec(0xffffff, 0.5, 0, 'paint'), trim: spec(0xeee6d8, 0.5), shelf: spec(0xffffff, 0.6, 0, 'oak'),
+    steel: spec(0xdfe2e5, 0.3, 0.9, 'steel'), darkSteel: spec(0x252322, 0.55, 0.7), blackGlass: spec(0x0a0b0d, 0.06, 0.3),
+    brass: spec(0xc9a25a, 0.28, 1.0), rubber: spec(0x1a1817, 0.85), painted: spec(0xffffff, 0.6),
+    glow: spec(0xffd6a0, 0.9, 0, null, 2.4), oil: spec(0x5e3a06, 0.03, 0.15),
+  });
+  // Prop surfaces
+  Object.assign(MAT, {
+    knife: spec(0xe6e9ec, 0.18, 1.0, 'steel'), handle: spec(0xffffff, 0.45, 0, 'walnut'), beech: spec(0xffffff, 0.62, 0, 'beech'),
+    board: spec(0xffffff, 0.6, 0, 'board'), castIron: spec(0xffffff, 0.55, 0.65, 'castIron'), nonstick: spec(0x232427, 0.35, 0.2),
+    potSteel: spec(0xe8eaec, 0.22, 1.0, 'steel'), ceramic: spec(0xf6f2ea, 0.12), ceramicBlue: spec(0x2f5d7c, 0.15),
+    plastic: spec(0x1c1c1e, 0.5), red: spec(0xc0231d, 0.35, 0.1), cardboard: spec(0xe8a33a, 0.8), silicone: spec(0xc8553d, 0.6),
+    tomato: spec(0xffffff, 0.28, 0, 'tomato'), onion: spec(0xffffff, 0.6, 0, 'onion'), lemon: spec(0xffffff, 0.4, 0, 'lemon'),
+    apple: spec(0xffffff, 0.3, 0, 'apple'), potato: spec(0xffffff, 0.85, 0, 'potato'), carrot: spec(0xffffff, 0.55, 0, 'carrot'),
+    egg: spec(0xffffff, 0.5, 0, 'egg'), leaf: spec(0x3d7a2a, 0.6),
+  });
+  // Real (non-uber) materials
+  MAT.sky = new THREE.MeshBasicMaterial({ map: TEX.sky, color: 0xffffff });
+  MAT.glass = new THREE.MeshStandardMaterial({ color: 0xd6e6ec, roughness: 0.05, metalness: 0.0, transparent: true, opacity: 0.3, depthWrite: false });
+  MAT._highlight = new Map();
+}
+// Highlight variant (shared) swapped in when a prop is hovered for grabbing.
+function highlightOf(mat) {
+  let h = MAT._highlight.get(mat);
+  if (!h) {
+    h = mat.clone(); h.emissive = new THREE.Color(0xffa040); h.emissiveIntensity = 0.3;
+    if (mat.onBeforeCompile === uberPatch) { h.onBeforeCompile = uberPatch; h.customProgramCacheKey = mat.customProgramCacheKey; }
+    MAT._highlight.set(mat, h);
+  }
+  return h;
+}
+
+/* ====================================== [AUDIO] ===================================== */
+// All sound is synthesized live with Web Audio and spatialized with PannerNode (HRTF).
+const AudioSys = {
+  ctx: null, master: null, sfx: null, amb: null, noise: null, voices: 0, ready: false,
+  init() {
+    if (this.ctx) { if (this.ctx.state !== 'running') this.ctx.resume(); return; }
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      this.ctx = new AC({ latencyHint: 'interactive' });
+      const c = this.ctx;
+      this.master = c.createGain(); this.master.connect(c.destination);
+      this.sfx = c.createGain(); this.sfx.connect(this.master);
+      this.amb = c.createGain(); this.amb.connect(this.master);
+      const len = c.sampleRate * 2, buf = c.createBuffer(1, len, c.sampleRate), d = buf.getChannelData(0);
+      const r = rng(999); for (let i = 0; i < len; i++) d[i] = r() * 2 - 1;
+      this.noise = buf;
+      this.applyVolumes();
+      this.startAmbience();
+      this.ready = true;
+    } catch (e) { console.warn('Audio init failed', e); }
+  },
+  applyVolumes() {
+    if (!this.ctx) return;
+    this.master.gain.value = settings.masterVolume;
+    this.amb.gain.value = settings.ambience;
+  },
+  updateListener(cam) {
+    if (!this.ready) return;
+    const L = this.ctx.listener, e = cam.matrixWorld.elements;
+    const px = e[12], py = e[13], pz = e[14];
+    const fx = -e[8], fy = -e[9], fz = -e[10], ux = e[4], uy = e[5], uz = e[6];
+    if (L.positionX) {
+      const t = this.ctx.currentTime;
+      L.positionX.setTargetAtTime(px, t, 0.01); L.positionY.setTargetAtTime(py, t, 0.01); L.positionZ.setTargetAtTime(pz, t, 0.01);
+      L.forwardX.setTargetAtTime(fx, t, 0.01); L.forwardY.setTargetAtTime(fy, t, 0.01); L.forwardZ.setTargetAtTime(fz, t, 0.01);
+      L.upX.setTargetAtTime(ux, t, 0.01); L.upY.setTargetAtTime(uy, t, 0.01); L.upZ.setTargetAtTime(uz, t, 0.01);
+    } else { L.setPosition(px, py, pz); L.setOrientation(fx, fy, fz, ux, uy, uz); }
+  },
+  // Returns an input node spatialized at pos (or non-spatial when pos is null); null if voice budget exhausted.
+  voice(pos, dur, gain = 1) {
+    if (!this.ready || this.voices >= CONFIG.audio.maxVoices) return null;
+    const c = this.ctx, g = c.createGain(); g.gain.value = gain;
+    let out = g;
+    if (pos) {
+      const p = new PannerNode(c, { panningModel: 'HRTF', distanceModel: 'inverse', refDistance: 0.5, rolloffFactor: 1.1, maxDistance: 25,
+        positionX: pos.x, positionY: pos.y, positionZ: pos.z });
+      g.connect(p); p.connect(this.sfx); out = p;
+    } else g.connect(this.sfx);
+    this.voices++;
+    setTimeout(() => { this.voices--; try { g.disconnect(); if (out !== g) out.disconnect(); } catch (e) { /* already gone */ } }, (dur + 0.1) * 1000);
+    return g;
+  },
+  osc(dst, type, f, t0, dur, peak, decay = dur, f1 = null) {
+    const c = this.ctx, o = c.createOscillator(), g = c.createGain();
+    o.type = type; o.frequency.setValueAtTime(f, t0); if (f1) o.frequency.exponentialRampToValueAtTime(f1, t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(peak, t0 + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + decay);
+    o.connect(g); g.connect(dst); o.start(t0); o.stop(t0 + dur + 0.02);
+  },
+  burst(dst, t0, dur, peak, filterType, f, q = 1, f1 = null) {
+    const c = this.ctx, s = c.createBufferSource(), fl = c.createBiquadFilter(), g = c.createGain();
+    s.buffer = this.noise; s.loopStart = 0; s.loop = true;
+    fl.type = filterType; fl.frequency.setValueAtTime(f, t0); fl.Q.value = q; if (f1) fl.frequency.exponentialRampToValueAtTime(f1, t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(peak, t0 + 0.003); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    s.connect(fl); fl.connect(g); g.connect(dst); s.start(t0, Math.random() * 1.5); s.stop(t0 + dur + 0.02);
+  },
+  uiClick() { const v = this.voice(null, 0.08, 0.25); if (!v) return; const t = this.ctx.currentTime; this.osc(v, 'sine', 1500, t, 0.05, 0.6, 0.05); },
+  uiTick() { const v = this.voice(null, 0.06, 0.12); if (!v) return; const t = this.ctx.currentTime; this.osc(v, 'triangle', 2200, t, 0.03, 0.4, 0.03); },
+  grab(pos) { const v = this.voice(pos, 0.1, 0.35); if (!v) return; const t = this.ctx.currentTime; this.burst(v, t, 0.05, 0.5, 'bandpass', 2400, 1.2); },
+  whoosh() { const v = this.voice(null, 0.35, 0.22); if (!v) return; const t = this.ctx.currentTime; this.burst(v, t, 0.3, 0.8, 'bandpass', 350, 0.8, 2200); },
+  snap() { const v = this.voice(null, 0.08, 0.1); if (!v) return; const t = this.ctx.currentTime; this.burst(v, t, 0.05, 0.6, 'highpass', 3000, 0.7); },
+  impact(pos, material, strength) {
+    const s = clamp(strength, 0, 1); if (s < 0.02) return;
+    const v = this.voice(pos, 0.9, 0.2 + s * 0.8); if (!v) return;
+    const t = this.ctx.currentTime, j = 0.92 + Math.random() * 0.16;
+    switch (material) {
+      case 'metal':
+        this.burst(v, t, 0.02, 0.5 * s, 'highpass', 3500, 0.7);
+        this.osc(v, 'sine', 520 * j, t, 0.7, 0.35 * s, 0.6);
+        this.osc(v, 'sine', 1435 * j, t, 0.45, 0.22 * s, 0.4);
+        this.osc(v, 'sine', 2810 * j, t, 0.25, 0.14 * s, 0.22);
+        break;
+      case 'ceramic':
+        this.burst(v, t, 0.015, 0.4 * s, 'highpass', 4000, 0.7);
+        this.osc(v, 'sine', 1850 * j, t, 0.16, 0.3 * s, 0.14);
+        this.osc(v, 'sine', 3950 * j, t, 0.1, 0.18 * s, 0.08);
+        break;
+      case 'wood':
+        this.burst(v, t, 0.035, 0.7 * s, 'bandpass', 900 * j, 1.4);
+        this.osc(v, 'sine', 240 * j, t, 0.07, 0.4 * s, 0.07);
+        break;
+      case 'stone':
+        this.burst(v, t, 0.03, 0.7 * s, 'bandpass', 1900 * j, 1.1);
+        this.osc(v, 'sine', 640 * j, t, 0.03, 0.25 * s, 0.03);
+        break;
+      default: // produce / soft
+        this.burst(v, t, 0.06, 0.7 * s, 'lowpass', 420 * j, 0.8);
+        this.osc(v, 'sine', 115 * j, t, 0.08, 0.4 * s, 0.08);
+    }
+  },
+  ring(pos, seconds = 3) {
+    const v = this.voice(pos, seconds, 0.35); if (!v) return;
+    const t = this.ctx.currentTime;
+    for (let i = 0; i < seconds * 8; i++) { const ti = t + i * 0.125; if ((i % 8) < 6) this.osc(v, 'square', 2650, ti, 0.07, 0.25, 0.06); }
+  },
+  startAmbience() {
+    const c = this.ctx;
+    // Soft room tone: looped noise, low-passed, very quiet.
+    const s = c.createBufferSource(); s.buffer = this.noise; s.loop = true;
+    const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 320;
+    const g = c.createGain(); g.gain.value = 0.05;
+    s.connect(lp); lp.connect(g); g.connect(this.amb); s.start();
+    // Fridge compressor hum, spatialized at the fridge.
+    const p = new PannerNode(c, { panningModel: 'HRTF', refDistance: 0.6, rolloffFactor: 1.4, positionX: 1.75, positionY: 0.3, positionZ: -2.2 });
+    const hg = c.createGain(); hg.gain.value = 0.02; hg.connect(p); p.connect(this.amb);
+    for (const [f, a] of [[59, 1], [118, 0.5], [177, 0.2]]) { const o = c.createOscillator(); o.frequency.value = f; const og = c.createGain(); og.gain.value = a; o.connect(og); og.connect(hg); o.start(); }
+  },
+};
+
+/* ===================================== [HAPTICS] ==================================== */
+function haptic(side, intensity, ms) {
+  if (!settings.haptics) return;
+  const src = Input.hands[side].source; const gp = src && src.gamepad; if (!gp) return;
+  const k = clamp(intensity * settings.hapticStrength, 0, 1); if (k <= 0.001) return;
+  try {
+    if (gp.hapticActuators && gp.hapticActuators[0] && gp.hapticActuators[0].pulse) gp.hapticActuators[0].pulse(k, ms);
+    else if (gp.vibrationActuator && gp.vibrationActuator.playEffect) gp.vibrationActuator.playEffect('dual-rumble', { duration: ms, strongMagnitude: k, weakMagnitude: k });
+  } catch (e) { /* haptics are best-effort */ }
+}
+
+/* ===================================== [PHYSICS] ==================================== */
+const G = { STATIC: 1, PROP: 2, HAND: 4, PLAYER: 8, HELD: 16 };
+const groups = (member, filter) => (((member & 0xffff) << 16) | (filter & 0xffff)) >>> 0;
+const GROUPS = {
+  static: groups(G.STATIC, G.PROP | G.HAND | G.PLAYER | G.HELD),
+  prop: groups(G.PROP, G.STATIC | G.PROP | G.HAND | G.HELD),
+  held: groups(G.HELD, G.STATIC | G.PROP | G.HELD),
+  hand: groups(G.HAND, G.STATIC | G.PROP),
+  player: groups(G.PLAYER, G.STATIC),
+  qStatic: groups(G.PLAYER, G.STATIC),          // teleport arcs & movement
+  qGrab: groups(G.HELD, G.PROP | G.HELD),       // grab sphere (includes items held by the other hand)
+  qPoint: groups(G.HELD, G.PROP | G.STATIC),    // force-grab & desktop pointing (walls occlude)
+};
+let world = null, eventQueue = null;
+const Phys = {
+  surfaceByCollider: new Map(), // static collider handle → sound material
+  propByCollider: new Map(),    // dynamic collider handle → prop
+  floorHandle: -1,
+  ray: null, grabBall: null,
+  async init() {
+    await RAPIER.init();
+    world = new RAPIER.World({ x: 0, y: CONFIG.physics.gravity, z: 0 });
+    world.timestep = 1 / CONFIG.physics.hz;
+    eventQueue = new RAPIER.EventQueue(true);
+    this.ray = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: -1 });
+    this.grabBall = new RAPIER.Ball(CONFIG.hands.grabRadius);
+  },
+  staticBox(hx, hy, hz, x, y, z, rotY = 0, surface = 'stone') {
+    const d = RAPIER.ColliderDesc.cuboid(hx, hy, hz).setTranslation(x, y, z).setCollisionGroups(GROUPS.static).setFriction(0.8);
+    if (rotY) { _q1.setFromAxisAngle(UP, rotY); d.setRotation({ x: _q1.x, y: _q1.y, z: _q1.z, w: _q1.w }); }
+    const c = world.createCollider(d);
+    this.surfaceByCollider.set(c.handle, surface);
+    return c;
+  },
+  staticCylinder(hh, r, x, y, z, surface = 'metal') {
+    const c = world.createCollider(RAPIER.ColliderDesc.cylinder(hh, r).setTranslation(x, y, z).setCollisionGroups(GROUPS.static).setFriction(0.8));
+    this.surfaceByCollider.set(c.handle, surface);
+    return c;
+  },
+  // Ray against the world. Returns hit or null; writes the point into outPoint and normal into outNormal.
+  castRay(origin, dir, maxDist, filterGroups, outPoint, outNormal) {
+    this.ray.origin.x = origin.x; this.ray.origin.y = origin.y; this.ray.origin.z = origin.z;
+    this.ray.dir.x = dir.x; this.ray.dir.y = dir.y; this.ray.dir.z = dir.z;
+    const hit = outNormal ? world.castRayAndGetNormal(this.ray, maxDist, true, undefined, filterGroups)
+                          : world.castRay(this.ray, maxDist, true, undefined, filterGroups);
+    if (!hit) return null;
+    if (outPoint) outPoint.copy(origin).addScaledVector(dir, hit.timeOfImpact);
+    if (outNormal) outNormal.set(hit.normal.x, hit.normal.y, hit.normal.z);
+    return hit;
+  },
+};
+
+/* ===================================== [KITCHEN] ==================================== */
+// Static geometry is authored as primitives, baked with world-space UVs + vertex-colour AO,
+// then merged into one mesh per material. Every solid piece also gets a fixed Rapier collider.
+const Nav = {
+  rects: [], // floor-standing obstacle footprints [minX, minZ, maxX, maxZ]
+  obstacle(x0, z0, x1, z1) { this.rects.push([Math.min(x0, x1), Math.min(z0, z1), Math.max(x0, x1), Math.max(z0, z1)]); },
+  walkable(x, z) {
+    const m = CONFIG.loco.navMargin, K = CONFIG.kitchen;
+    if (x < -K.halfX + m || x > K.halfX - m || z < -K.halfZ + m || z > K.halfZ - m) return false;
+    for (let i = 0; i < this.rects.length; i++) { const r = this.rects[i]; if (x > r[0] - m && x < r[2] + m && z > r[1] - m && z < r[3] + m) return false; }
+    return true;
+  },
+  // Distance from a point to the nearest obstacle / wall (used to bake floor AO).
+  clearance(x, z) {
+    const K = CONFIG.kitchen;
+    let d = Math.min(x + K.halfX, K.halfX - x, z + K.halfZ, K.halfZ - z);
+    for (const r of this.rects) {
+      const dx = Math.max(r[0] - x, 0, x - r[2]), dz = Math.max(r[1] - z, 0, z - r[3]);
+      d = Math.min(d, Math.hypot(dx, dz));
+    }
+    return d;
+  },
+};
+
+// World-scale UV density per material (texture repeats per metre).
+const UV_SCALE = { floor: 0.5, wall: 0.8, tile: 1 / 0.3, marble: 0.55, butcher: 0.9, cabinet: 1.2, shelf: 1.1, steel: 1.5 };
+const SURFACE = { marble: 'stone', butcher: 'wood', tile: 'stone', steel: 'metal', darkSteel: 'metal', shelf: 'wood', cabinet: 'wood', floor: 'wood', wall: 'stone', trim: 'wood', blackGlass: 'stone', painted: 'wood', rubber: 'produce', brass: 'metal' };
+
+const KB = {
+  casters: [], flat: [], special: new Map(),
+  noShadowCast: new Set(['floor', 'ceiling', 'wall', 'tile', 'glow', 'oil']),
+  // Add a geometry that is already in world space.
+  add(mat, geo, { tint = 0xffffff, uv = true, ao = null } = {}) {
+    const real = MAT[mat] && !MAT[mat].isSpec;
+    if (real) { // non-uber (transparent glass, emissive sky): kept as separate meshes
+      geo = geo.index ? geo.toNonIndexed() : geo;
+      for (const key of Object.keys(geo.attributes)) if (!['position', 'normal', 'uv'].includes(key)) geo.deleteAttribute(key);
+      if (!this.special.has(mat)) this.special.set(mat, []);
+      this.special.get(mat).push(geo); return;
+    }
+    const sp = MAT[mat];
+    const g = uberize(geo, sp, { tint, ao: mat === 'glow' ? null : (ao || KB.aoDefault), uvWorld: uv && sp.cell ? (UV_SCALE[mat] || 1) : 0 });
+    (this.noShadowCast.has(mat) ? this.flat : this.casters).push(g);
+  },
+  // Cheap baked ambient occlusion: darker toward the floor, under overhangs and near the ceiling.
+  aoDefault(x, y, z, ny) {
+    let k = 0.7 + 0.3 * smoothstep(0.0, 0.45, y);
+    if (ny < -0.5) k *= 0.62;
+    k *= 1 - 0.12 * smoothstep(2.45, 2.8, y);
+    return k;
+  },
+  box(mat, sx, sy, sz, x, y, z, o = {}) {
+    const g = new THREE.BoxGeometry(sx, sy, sz, o.sw || 1, o.sh || 1, o.sd || 1);
+    if (o.rotY) g.rotateY(o.rotY);
+    g.translate(x, y, z);
+    this.add(mat, g, o);
+    if (o.collide !== false) Phys.staticBox(sx / 2, sy / 2, sz / 2, x, y, z, o.rotY || 0, o.surface || SURFACE[mat] || 'stone');
+  },
+  cyl(mat, rt, rb, h, x, y, z, o = {}) {
+    const g = new THREE.CylinderGeometry(rt, rb, h, o.seg || 20, 1, !!o.open);
+    if (o.rotX) g.rotateX(o.rotX);
+    if (o.rotZ) g.rotateZ(o.rotZ);
+    g.translate(x, y, z);
+    this.add(mat, g, o);
+    if (o.collide) Phys.staticCylinder(h / 2, Math.max(rt, rb), x, y, z, o.surface || SURFACE[mat] || 'metal');
+  },
+  geo(mat, g, x, y, z, o = {}) { if (o.rotX) g.rotateX(o.rotX); if (o.rotY) g.rotateY(o.rotY); if (o.rotZ) g.rotateZ(o.rotZ); if (o.scale) g.scale(o.scale[0], o.scale[1], o.scale[2]); g.translate(x, y, z); this.add(mat, g, o); },
+  // Merge everything: shadow casters (1 draw), non-casting shell (1 draw), plus sky and glass.
+  build() {
+    const meshes = [];
+    const mk = (list, mat, name, cast, receive) => {
+      if (!list.length) return;
+      const merged = mergeGeometries(list, false);
+      if (!merged) { console.warn('merge failed for', name); return; }
+      merged.computeBoundingSphere();
+      const m = new THREE.Mesh(merged, mat); m.name = name; m.castShadow = cast; m.receiveShadow = receive;
+      m.matrixAutoUpdate = false; m.updateMatrix(); scene.add(m); meshes.push(m);
+    };
+    mk(this.casters, UBER, 'static_casters', true, true);
+    mk(this.flat, UBER, 'static_shell', false, true);
+    for (const [mat, list] of this.special) mk(list, MAT[mat], 'static_' + mat, false, mat !== 'sky');
+    this.casters = []; this.flat = []; this.special.clear();
+    return meshes;
+  },
+};
+
+// Lower-cabinet run with toe kick, door/drawer fronts, handles and a countertop slab.
+// front: '+z' | '-z' | '+x' | '-x' — which side faces the room.
+function counterRun(x0, x1, z0, z1, front, top = 'marble', o = {}) {
+  const CT = CONFIG.kitchen.counterTop, TT = CONFIG.kitchen.topThick;
+  const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2, w = x1 - x0, d = z1 - z0;
+  const alongX = front === '+z' || front === '-z';
+  const sgn = front[0] === '+' ? 1 : -1;
+  const kick = 0.07, kickH = 0.1, bodyH = (o.bodyTop ?? CT - TT) - kickH; // bodyTop lowers the carcass under sinks/wells
+  // Carcass (inset at the toe kick)
+  const ix = alongX ? 0 : sgn * kick / 2, iz = alongX ? sgn * kick / 2 : 0;
+  KB.box('cabinet', w, bodyH, d, cx, kickH + bodyH / 2, cz, { collide: false, sh: 3 });
+  KB.box('rubber', alongX ? w : w - kick, kickH, alongX ? d - kick : d, cx - ix, kickH / 2, cz - iz, { collide: false });
+  // Countertop slab with 2 cm front overhang
+  if (!o.noTop) {
+    const oh = 0.02;
+    KB.box(top, alongX ? w : w + oh, TT, alongX ? d + oh : d, cx + (alongX ? 0 : sgn * oh / 2), CT - TT / 2, cz + (alongX ? sgn * oh / 2 : 0), { collide: false });
+  }
+  // Door + drawer fronts
+  const len = alongX ? w : d, n = Math.max(1, Math.round(len / 0.55)), seg = len / n, gap = 0.006;
+  const faceX = front === '+x' ? x1 + 0.009 : front === '-x' ? x0 - 0.009 : 0;
+  const faceZ = front === '+z' ? z1 + 0.009 : front === '-z' ? z0 - 0.009 : 0;
+  const drawerH = 0.17, doorTop = CT - TT - drawerH - 0.012;
+  for (let i = 0; i < n; i++) {
+    if (o.skipDoors && o.skipDoors(i)) continue;
+    const a = (alongX ? x0 : z0) + seg * (i + 0.5);
+    const px = alongX ? a : faceX, pz = alongX ? faceZ : a;
+    const fw = seg - gap * 2;
+    const doorH = doorTop - kickH - 0.01;
+    KB.box('cabinet', alongX ? fw : 0.018, doorH, alongX ? 0.018 : fw, px, kickH + 0.005 + doorH / 2, pz, { collide: false, tint: 0xf4f4f4 });
+    KB.box('cabinet', alongX ? fw : 0.018, drawerH - gap, alongX ? 0.018 : fw, px, doorTop + drawerH / 2 + 0.006, pz, { collide: false, tint: 0xf4f4f4 });
+    const hx = alongX ? 0 : sgn * 0.022, hz = alongX ? sgn * 0.022 : 0;
+    KB.box('brass', alongX ? 0.14 : 0.012, 0.012, alongX ? 0.012 : 0.14, px + hx, doorTop + drawerH / 2 + 0.006, pz + hz, { collide: false });
+    KB.box('brass', alongX ? 0.12 : 0.012, 0.012, alongX ? 0.012 : 0.12, px + hx, doorTop - 0.07, pz + hz, { collide: false });
+  }
+  if (!o.noCollide) Phys.staticBox(w / 2, CT / 2, d / 2, cx, CT / 2, cz, 0, SURFACE[top] || 'stone');
+  if (!o.noNav) Nav.obstacle(x0, z0, x1, z1);
+}
+
+function latheGeo(points, seg = 24) { return new THREE.LatheGeometry(points.map((p) => new THREE.Vector2(p[0], p[1])), seg); }
+
+const Kitchen = {
+  meshes: [], clock: null, knobs: null,
+  build() {
+    const K = CONFIG.kitchen, CT = K.counterTop, TT = K.topThick, HX = K.halfX, HZ = K.halfZ, H = K.height;
+
+    /* ---------- Shell: walls, window, ceiling ---------- */
+    const wt = 0.1;
+    KB.box('wall', 2 * HX + 2 * wt, H, wt, 0, H / 2, -HZ - wt / 2, { sw: 12, sh: 10 });          // back
+    KB.box('wall', 2 * HX + 2 * wt, H, wt, 0, H / 2, HZ + wt / 2, { sw: 12, sh: 10 });           // front
+    KB.box('wall', wt, H, 2 * HZ, HX + wt / 2, H / 2, 0, { sd: 10, sh: 10 });                     // right
+    // Left wall with a window over the sink (opening z ∈ [-1.35, 0.15], y ∈ [1.08, 2.12])
+    const wz0 = -1.35, wz1 = 0.15, wy0 = 1.08, wy1 = 2.12, lx = -HX - wt / 2;
+    KB.box('wall', wt, wy0, 2 * HZ, lx, wy0 / 2, 0, { sd: 10, sh: 4 });
+    KB.box('wall', wt, H - wy1, 2 * HZ, lx, (H + wy1) / 2, 0, { sd: 10, sh: 2 });
+    KB.box('wall', wt, wy1 - wy0, wz0 + HZ, lx, (wy0 + wy1) / 2, (-HZ + wz0) / 2, { sh: 3 });
+    KB.box('wall', wt, wy1 - wy0, HZ - wz1, lx, (wy0 + wy1) / 2, (wz1 + HZ) / 2, { sh: 3 });
+    // Window: sky backdrop, frame, mullions, sill
+    const sky = new THREE.PlaneGeometry(wz1 - wz0 + 0.6, wy1 - wy0 + 0.5); sky.rotateY(Math.PI / 2);
+    KB.geo('sky', sky, -HX - 0.35, (wy0 + wy1) / 2, (wz0 + wz1) / 2, { uv: false });
+    const fz = (wz0 + wz1) / 2, fl = wz1 - wz0;
+    KB.box('trim', 0.07, 0.05, fl + 0.1, -HX + 0.0, wy0 - 0.005, fz, { collide: true });               // sill
+    KB.box('trim', 0.06, 0.05, fl + 0.1, -HX - 0.03, wy1 + 0.025, fz, { collide: false });
+    KB.box('trim', 0.06, wy1 - wy0, 0.05, -HX - 0.03, (wy0 + wy1) / 2, wz0 - 0.025, { collide: false });
+    KB.box('trim', 0.06, wy1 - wy0, 0.05, -HX - 0.03, (wy0 + wy1) / 2, wz1 + 0.025, { collide: false });
+    KB.box('trim', 0.04, wy1 - wy0, 0.035, -HX - 0.05, (wy0 + wy1) / 2, fz, { collide: false });
+    KB.box('trim', 0.04, 0.035, fl, -HX - 0.05, (wy0 + wy1) / 2 + 0.1, fz, { collide: false });
+    // Skirting boards
+    KB.box('trim', 2 * HX, 0.09, 0.015, 0, 0.045, HZ - 0.0075, { collide: false });
+    KB.box('trim', 0.015, 0.09, 2 * HZ, HX - 0.0075, 0.045, 0.9, { collide: false });
+    // Ceiling + recessed lights
+    const ceil = new THREE.PlaneGeometry(2 * HX, 2 * HZ, 6, 5); ceil.rotateX(Math.PI / 2);
+    KB.geo('ceiling', ceil, 0, H, 0, { ao: (x, y, z) => 0.8 + 0.2 * smoothstep(0, 0.8, Math.min(HX - Math.abs(x), HZ - Math.abs(z))) });
+    for (const [x, z] of [[-1.6, -1.2], [0.4, -1.2], [-1.6, 1.2], [1.6, 1.2], [1.8, -0.8]]) {
+      const g = new THREE.CircleGeometry(0.07, 20); g.rotateX(Math.PI / 2); KB.geo('glow', g, x, H - 0.012, z, { uv: false });
+      KB.cyl('trim', 0.085, 0.085, 0.01, x, H - 0.005, z, { collide: false, seg: 20 });
+    }
+    // Floor (subdivided so obstacle AO can be baked into vertices) — built last, after obstacles register.
+
+    /* ---------- Back run: counters, range, hood, uppers ---------- */
+    const bz0 = -HZ, bz1 = -HZ + K.counterDepth; // -2.5 .. -1.85
+    counterRun(-2.35, -0.6, bz0, bz1, '+z', 'marble');
+    counterRun(0.16, 1.25, bz0, bz1, '+z', 'marble');
+    // Left run (L-shape) with sink and plating station
+    const lx0 = -HX, lx1 = -HX + K.counterDepth; // -3 .. -2.35
+    counterRun(lx0, lx1, -HZ, -1.0, '+x', 'marble', { skipDoors: (i) => i === 0 });
+    counterRun(lx0, lx1, -1.0, -0.2, '+x', 'marble', { noTop: true, noCollide: true, bodyTop: CT - 0.23 });
+    counterRun(lx0, lx1, -0.2, 0.2, '+x', 'marble');
+    counterRun(lx0, lx1, 0.2, 0.9, '+x', 'steel');  // plating station (stainless top)
+    // Sink: basin cut into the countertop, z ∈ [-0.95, -0.25], x ∈ [-2.86, -2.46]
+    const sx0 = -2.86, sx1 = -2.46, sz0 = -0.95, sz1 = -0.25, sDepth = 0.22, sb = CT - sDepth;
+    KB.box('marble', sx0 - lx0, TT, 0.8, (lx0 + sx0) / 2, CT - TT / 2, -0.6);
+    KB.box('marble', lx1 + 0.02 - sx1, TT, 0.8, (sx1 + lx1 + 0.02) / 2, CT - TT / 2, -0.6);
+    KB.box('marble', sx1 - sx0, TT, sz0 + 1.0, (sx0 + sx1) / 2, CT - TT / 2, (-1.0 + sz0) / 2);
+    KB.box('marble', sx1 - sx0, TT, -0.2 - sz1, (sx0 + sx1) / 2, CT - TT / 2, (sz1 - 0.2) / 2);
+    KB.box('steel', sx1 - sx0, 0.01, sz1 - sz0, (sx0 + sx1) / 2, sb, (sz0 + sz1) / 2);
+    KB.box('steel', 0.01, sDepth, sz1 - sz0, sx0, sb + sDepth / 2, (sz0 + sz1) / 2);
+    KB.box('steel', 0.01, sDepth, sz1 - sz0, sx1, sb + sDepth / 2, (sz0 + sz1) / 2);
+    KB.box('steel', sx1 - sx0, sDepth, 0.01, (sx0 + sx1) / 2, sb + sDepth / 2, sz0);
+    KB.box('steel', sx1 - sx0, sDepth, 0.01, (sx0 + sx1) / 2, sb + sDepth / 2, sz1);
+    KB.cyl('darkSteel', 0.03, 0.03, 0.004, (sx0 + sx1) / 2, sb + 0.006, (sz0 + sz1) / 2, { collide: false });
+    Phys.staticBox((lx1 - lx0) / 2, (sb - 0.005) / 2, 0.4, (lx0 + lx1) / 2, (sb - 0.005) / 2, -0.6, 0, 'wood'); // cabinet under the sink
+    Nav.obstacle(lx0, -1.0, lx1, -0.2);
+    // Faucet: base, riser, gooseneck arc, lever
+    const fx = -2.93, fzz = -0.6;
+    KB.cyl('steel', 0.028, 0.032, 0.03, fx, CT + 0.015, fzz, { collide: false });
+    KB.cyl('steel', 0.017, 0.017, 0.3, fx, CT + 0.18, fzz, { collide: true, surface: 'metal' });
+    const neck = new THREE.TorusGeometry(0.11, 0.016, 10, 24, Math.PI); // arc from riser top out over the basin
+    KB.geo('steel', neck, fx + 0.11, CT + 0.33, fzz, {});
+    KB.cyl('steel', 0.018, 0.016, 0.08, fx + 0.22, CT + 0.29, fzz, { collide: false });
+    KB.box('steel', 0.012, 0.012, 0.09, fx, CT + 0.25, fzz + 0.05, { collide: false });
+
+    // Range (gas, 4 burners) at x ∈ [-0.6, 0.16]
+    const rx0 = -0.6, rx1 = 0.16, rcx = (rx0 + rx1) / 2;
+    KB.box('steel', rx1 - rx0, CT - 0.1, bz1 - bz0, rcx, 0.1 + (CT - 0.1) / 2, (bz0 + bz1) / 2, { collide: false, sh: 3 });
+    KB.box('rubber', rx1 - rx0 - 0.02, 0.1, bz1 - bz0 - 0.06, rcx, 0.05, (bz0 + bz1) / 2 - 0.03, { collide: false });
+    KB.box('blackGlass', rx1 - rx0, 0.012, bz1 - bz0 + 0.01, rcx, CT - 0.006, (bz0 + bz1) / 2, { collide: false });
+    Phys.staticBox((rx1 - rx0) / 2, CT / 2, (bz1 - bz0) / 2, rcx, CT / 2, (bz0 + bz1) / 2, 0, 'metal');
+    Nav.obstacle(rx0, bz0, rx1, bz1);
+    // Oven door with window + handle, knob panel
+    KB.box('steel', rx1 - rx0 - 0.04, 0.56, 0.03, rcx, 0.44, bz1 + 0.015, { collide: false });
+    KB.box('blackGlass', rx1 - rx0 - 0.2, 0.26, 0.006, rcx, 0.45, bz1 + 0.032, { collide: false });
+    KB.cyl('steel', 0.011, 0.011, rx1 - rx0 - 0.12, rcx, 0.77, bz1 + 0.07, { rotZ: Math.PI / 2, collide: false });
+    KB.box('steel', 0.02, 0.02, 0.05, rx0 + 0.08, 0.77, bz1 + 0.045, { collide: false });
+    KB.box('steel', 0.02, 0.02, 0.05, rx1 - 0.08, 0.77, bz1 + 0.045, { collide: false });
+    KB.box('blackGlass', rx1 - rx0 - 0.02, 0.11, 0.02, rcx, CT - 0.075, bz1 + 0.005, { collide: false });
+    // Burners: grates rest pans at CT + 0.036
+    const burners = [[-0.41, -2.02], [-0.03, -2.02], [-0.41, -2.33], [-0.03, -2.33]];
+    this.burners = burners.map(([x, z]) => new THREE.Vector3(x, CT + 0.036, z));
+    for (const [x, z] of burners) {
+      KB.cyl('darkSteel', 0.062, 0.066, 0.014, x, CT + 0.007, z, { collide: false, seg: 24 });
+      KB.cyl('darkSteel', 0.045, 0.045, 0.012, x, CT + 0.019, z, { collide: false, seg: 24 });
+      const gy = CT + 0.03, gs = 0.13;
+      KB.box('darkSteel', 2 * gs, 0.012, 0.012, x, gy, z - gs, { collide: false });
+      KB.box('darkSteel', 2 * gs, 0.012, 0.012, x, gy, z + gs, { collide: false });
+      KB.box('darkSteel', 0.012, 0.012, 2 * gs, x - gs, gy, z, { collide: false });
+      KB.box('darkSteel', 0.012, 0.012, 2 * gs, x + gs, gy, z, { collide: false });
+      for (const a of [0, Math.PI / 2, Math.PI / 4, -Math.PI / 4]) KB.box('darkSteel', 0.012, 0.012, 0.17, x, gy, z, { collide: false, rotY: a });
+      Phys.staticBox(gs, 0.006, gs, x, gy, z, 0, 'metal');
+    }
+    // Knobs (instanced; become grab-and-twist controls in M2)
+    const knobGeo = new THREE.CylinderGeometry(0.022, 0.024, 0.03, 20); knobGeo.rotateX(Math.PI / 2);
+    this.knobs = new THREE.InstancedMesh(uberize(knobGeo, MAT.plastic), UBER, 4);
+    [-0.47, -0.33, -0.09, 0.05].forEach((x, i) => { _m1.makeTranslation(x, CT - 0.075, bz1 + 0.03); this.knobs.setMatrixAt(i, _m1); });
+    this.knobs.castShadow = true; scene.add(this.knobs);
+    // Hood
+    KB.box('steel', 0.86, 0.22, 0.52, rcx, 1.82, bz0 + 0.26, { collide: false });
+    KB.box('steel', 0.36, H - 1.93, 0.3, rcx, (H + 1.93) / 2, bz0 + 0.15, { collide: false });
+    KB.box('glow', 0.5, 0.004, 0.06, rcx, 1.708, bz0 + 0.3, { collide: false, uv: false });
+    // Backsplash tile (back wall + left wall + behind range up to hood)
+    KB.box('tile', 2.35 - 0.6 + 0.65, 1.45 - CT, 0.012, (-HX + -0.6) / 2, (1.45 + CT) / 2, bz0 + 0.006, { collide: false });
+    KB.box('tile', rx1 - rx0, 1.71 - CT, 0.012, rcx, (1.71 + CT) / 2, bz0 + 0.006, { collide: false });
+    KB.box('tile', 1.25 - 0.16, 1.45 - CT, 0.012, (0.16 + 1.25) / 2, (1.45 + CT) / 2, bz0 + 0.006, { collide: false });
+    KB.box('tile', 0.012, wy0 - CT, 0.9 + HZ, -HX + 0.006, (wy0 + CT) / 2, (-HZ + 0.9) / 2, { collide: false });
+    // Upper cabinets on the back wall (+ built-in microwave) with under-cabinet light strips
+    const uy0 = 1.45, uy1 = 2.3, ud = 0.35;
+    const upper = (x0, x1) => {
+      KB.box('cabinet', x1 - x0, uy1 - uy0, ud, (x0 + x1) / 2, (uy0 + uy1) / 2, bz0 + ud / 2, { sh: 2 });
+      const n = Math.max(1, Math.round((x1 - x0) / 0.5)), s = (x1 - x0) / n;
+      for (let i = 0; i < n; i++) {
+        const px = x0 + s * (i + 0.5);
+        KB.box('cabinet', s - 0.012, uy1 - uy0 - 0.012, 0.018, px, (uy0 + uy1) / 2, bz0 + ud + 0.009, { collide: false, tint: 0xf4f4f4 });
+        KB.box('brass', 0.012, 0.12, 0.012, px + (i % 2 ? -1 : 1) * (s / 2 - 0.05), uy0 + 0.1, bz0 + ud + 0.03, { collide: false });
+      }
+      KB.box('glow', x1 - x0 - 0.1, 0.004, 0.03, (x0 + x1) / 2, uy0 - 0.003, bz0 + 0.08, { collide: false, uv: false });
+    };
+    upper(-HX, -0.72);
+    upper(0.28, 0.42);
+    upper(0.28 + 0.14 + 0.66, 1.25);
+    // Microwave (built into upper cabinets)
+    const mx0 = 0.42, mx1 = 1.08;
+    KB.box('steel', mx1 - mx0, 0.4, ud, (mx0 + mx1) / 2, uy0 + 0.2, bz0 + ud / 2);
+    KB.box('blackGlass', 0.44, 0.28, 0.01, mx0 + 0.25, uy0 + 0.2, bz0 + ud + 0.005, { collide: false });
+    KB.box('blackGlass', 0.14, 0.3, 0.01, mx1 - 0.09, uy0 + 0.2, bz0 + ud + 0.005, { collide: false, tint: 0x3a3a3a });
+    KB.box('cabinet', mx1 - mx0, uy1 - uy0 - 0.4, ud, (mx0 + mx1) / 2, (uy0 + 0.4 + uy1) / 2, bz0 + ud / 2);
+    KB.box('cabinet', mx1 - mx0 - 0.012, uy1 - uy0 - 0.412, 0.018, (mx0 + mx1) / 2, (uy0 + 0.4 + uy1) / 2, bz0 + ud + 0.009, { collide: false, tint: 0xf4f4f4 });
+    // Crown trim on uppers
+    KB.box('trim', -0.72 + HX, 0.05, ud + 0.04, (-HX - 0.72) / 2, uy1 + 0.025, bz0 + ud / 2 + 0.02, { collide: false });
+    KB.box('trim', 1.25 - 0.28, 0.05, ud + 0.04, (0.28 + 1.25) / 2, uy1 + 0.025, bz0 + ud / 2 + 0.02, { collide: false });
+
+    /* ---------- Fridge + pantry ---------- */
+    const fx0 = 1.3, fx1 = 2.2, fz0 = -HZ, fz1 = -1.75, fh = 1.95;
+    KB.box('steel', fx1 - fx0, fh, fz1 - fz0 - 0.03, (fx0 + fx1) / 2, fh / 2, (fz0 + fz1) / 2 - 0.015, { sh: 4 });
+    KB.box('steel', (fx1 - fx0) / 2 - 0.006, fh - 0.78, 0.03, fx0 + (fx1 - fx0) / 4, 0.78 + (fh - 0.78) / 2, fz1 - 0.015, { collide: false, tint: 0xf2f2f2 });
+    KB.box('steel', (fx1 - fx0) / 2 - 0.006, fh - 0.78, 0.03, fx1 - (fx1 - fx0) / 4, 0.78 + (fh - 0.78) / 2, fz1 - 0.015, { collide: false, tint: 0xf2f2f2 });
+    KB.box('steel', fx1 - fx0 - 0.01, 0.7, 0.03, (fx0 + fx1) / 2, 0.05 + 0.35, fz1 - 0.015, { collide: false, tint: 0xf2f2f2 });
+    KB.cyl('steel', 0.012, 0.012, 0.7, (fx0 + fx1) / 2 - 0.05, 1.3, fz1 + 0.04, { collide: false });
+    KB.cyl('steel', 0.012, 0.012, 0.7, (fx0 + fx1) / 2 + 0.05, 1.3, fz1 + 0.04, { collide: false });
+    KB.cyl('steel', 0.012, 0.012, 0.5, (fx0 + fx1) / 2, 0.66, fz1 + 0.04, { rotZ: Math.PI / 2, collide: false });
+    KB.box('trim', 0.05, fh, fz1 - fz0, 1.275, fh / 2, (fz0 + fz1) / 2);
+    KB.box('cabinet', fx1 - fx0 + 0.05, H - fh - 0.02, 0.6, (fx0 + fx1) / 2, (H + fh) / 2, fz0 + 0.3);
+    Nav.obstacle(1.25, fz0, fx1, fz1);
+    // Open pantry shelving on the right wall (x ∈ [2.6, 3.0], z ∈ [-1.6, -0.1])
+    const px0 = 2.6, px1 = HX, pz0 = -1.6, pz1 = -0.1, pd = px1 - px0;
+    KB.box('shelf', pd, 2.1, 0.03, (px0 + px1) / 2, 1.05, pz0);
+    KB.box('shelf', pd, 2.1, 0.03, (px0 + px1) / 2, 1.05, pz1);
+    const shelfY = [0.1, 0.48, 0.88, 1.28, 1.68, 2.08];
+    for (const y of shelfY) KB.box('shelf', pd, 0.025, pz1 - pz0, (px0 + px1) / 2, y, (pz0 + pz1) / 2);
+    Nav.obstacle(px0, pz0, px1, pz1);
+    // Pantry stock (decor until M4 food spawning): jars, canisters, boxes, bottles, sacks
+    const pr = rng(404);
+    const stockColors = [0xe8dcc4, 0xc9a66b, 0x8c4a2f, 0xd2b48c, 0x6b8e23, 0xb22222, 0xf5f5dc, 0x4a6fa5, 0xdaa520, 0x7b3f00];
+    for (let si = 0; si < shelfY.length - 1; si++) {
+      let z = pz0 + 0.06;
+      const y = shelfY[si] + 0.0125;
+      while (z < pz1 - 0.1) {
+        const kind = pr(), col = stockColors[Math.floor(pr() * stockColors.length)], x = px0 + 0.08 + pr() * 0.2;
+        if (kind < 0.35) { const r = 0.035 + pr() * 0.02, h = 0.1 + pr() * 0.1; KB.cyl('painted', r, r, h, x, y + h / 2, z + r, { tint: col, collide: false, seg: 14 }); KB.cyl('painted', r * 1.02, r * 1.02, 0.02, x, y + h + 0.01, z + r, { tint: 0x333333, collide: false, seg: 14 }); z += r * 2 + 0.03; }
+        else if (kind < 0.65) { const w = 0.06 + pr() * 0.06, h = 0.14 + pr() * 0.12; KB.box('painted', 0.12, h, w, x, y + h / 2, z + w / 2, { tint: col, collide: false }); z += w + 0.025; }
+        else if (kind < 0.85) { const r = 0.028, h = 0.24 + pr() * 0.08; if (y + h > shelfY[si + 1] - 0.04) { z += 0.05; continue; } KB.cyl('painted', r, r, h * 0.7, x, y + h * 0.35, z + r, { tint: col, collide: false, seg: 12 }); KB.cyl('painted', 0.012, r, h * 0.3, x, y + h * 0.85, z + r, { tint: col, collide: false, seg: 12 }); z += r * 2 + 0.03; }
+        else { const w = 0.16, h = 0.18; const g = new THREE.SphereGeometry(0.5, 12, 8); g.scale(0.14, h, w); KB.geo('painted', g, x + 0.02, y + h / 2, z + w / 2, { tint: 0xe9e2cf, collide: false }); z += w + 0.03; }
+      }
+    }
+
+    /* ---------- Island with butcher-block cutting zone + pendants ---------- */
+    const ix0 = -1.0, ix1 = 1.0, iz0 = -0.45, iz1 = 0.45;
+    counterRun(ix0, ix1, iz0, iz1, '-z', 'marble', { noTop: true });
+    KB.box('cabinet', ix1 - ix0, CT - TT - 0.1, 0.018, 0, 0.1 + (CT - TT - 0.1) / 2, iz1 + 0.009, { collide: false, tint: 0xf0f0f0 });
+    KB.box('marble', 1.03, TT, iz1 - iz0 + 0.1, -0.5, CT - TT / 2, 0, { collide: false });
+    KB.box('butcher', 0.995, TT + 0.02, iz1 - iz0 + 0.1, 0.5125, CT - TT / 2 + 0.01, 0, { collide: false });
+    Phys.staticBox(0.4975, 0.005, (iz1 - iz0 + 0.1) / 2, 0.5125, CT + 0.015, 0, 0, 'wood'); // raised butcher block surface
+    Phys.staticBox(0.515, CT / 2, (iz1 - iz0 + 0.1) / 2, -0.5, CT / 2, 0, 0, 'stone');     // marble half incl. overhang
+    Phys.staticBox(0.4975, CT / 2, (iz1 - iz0 + 0.1) / 2, 0.5125, CT / 2, 0, 0, 'wood');   // butcher half incl. overhang
+    this.cuttingZone = { x0: 0.015, x1: 1.01, z0: iz0 - 0.05, z1: iz1 + 0.05, y: CT + 0.02 };
+    for (const x of [-0.55, 0.55]) {
+      KB.cyl('darkSteel', 0.003, 0.003, H - 2.0, x, (H + 2.0) / 2, 0, { collide: false, seg: 6 });
+      KB.geo('brass', latheGeo([[0.012, 0.16], [0.03, 0.15], [0.08, 0.05], [0.13, 0.0], [0.128, -0.005], [0.075, 0.045], [0.026, 0.14], [0.01, 0.15]], 28), x, 1.84, 0, {});
+      const bulb = new THREE.SphereGeometry(0.045, 16, 10); KB.geo('glow', bulb, x, 1.87, 0, { uv: false });
+    }
+
+    /* ---------- Grill + deep fryer station (right wall), plating, bin ---------- */
+    const gx0 = 2.35, gx1 = HX, gz0 = 0.25, gz1 = 2.2;
+    counterRun(gx0, gx1, gz0, gz1, '-x', 'steel', { noTop: true, noCollide: true, bodyTop: CT - 0.27 });
+    // Station top pieces around grill (z ∈ [0.35, 1.15]) and fryer well (z ∈ [1.3, 1.78])
+    KB.box('steel', gx1 - gx0 + 0.02, TT, 0.1, (gx0 + gx1) / 2 - 0.01, CT - TT / 2, 0.3, { collide: false });
+    KB.box('steel', gx1 - gx0 + 0.02, TT, 0.15, (gx0 + gx1) / 2 - 0.01, CT - TT / 2, 1.225, { collide: false });
+    KB.box('steel', gx1 - gx0 + 0.02, TT, gz1 - 1.78, (gx0 + gx1) / 2 - 0.01, CT - TT / 2, (1.78 + gz1) / 2, { collide: false });
+    KB.box('steel', 0.08, TT, 1.48, gx0 + 0.03, CT - TT / 2, 1.04, { collide: false });
+    KB.box('steel', 0.1, TT, 1.48, gx1 - 0.05, CT - TT / 2, 1.04, { collide: false });
+    // Grill: dark firebox with cast-iron grates (bars along x) and ember bed
+    const grx0 = gx0 + 0.07, grx1 = gx1 - 0.1;
+    KB.box('darkSteel', grx1 - grx0, 0.012, 0.8, (grx0 + grx1) / 2, CT - 0.16, 0.75, { collide: false });
+    KB.box('painted', grx1 - grx0 - 0.04, 0.03, 0.74, (grx0 + grx1) / 2, CT - 0.14, 0.75, { collide: false, tint: 0x3b2a22 });
+    for (let i = 0; i < 17; i++) KB.box('darkSteel', grx1 - grx0, 0.014, 0.012, (grx0 + grx1) / 2, CT - 0.012, 0.37 + i * 0.047, { collide: false });
+    KB.box('darkSteel', 0.01, 0.17, 0.8, grx0, CT - 0.085, 0.75, { collide: false });
+    KB.box('darkSteel', 0.01, 0.17, 0.8, grx1, CT - 0.085, 0.75, { collide: false });
+    KB.box('darkSteel', grx1 - grx0, 0.17, 0.01, (grx0 + grx1) / 2, CT - 0.085, 0.35, { collide: false });
+    KB.box('darkSteel', grx1 - grx0, 0.17, 0.01, (grx0 + grx1) / 2, CT - 0.085, 1.15, { collide: false });
+    KB.box('steel', gx1 - gx0 - 0.02, CT - 0.27 - 0.1, 0.02, (gx0 + gx1) / 2, 0.1 + (CT - 0.37) / 2, 1.225, { collide: false });
+    Phys.staticBox((grx1 - grx0) / 2, 0.007, 0.4, (grx0 + grx1) / 2, CT - 0.012, 0.75, 0, 'metal');
+    this.grillArea = { x0: grx0, x1: grx1, z0: 0.35, z1: 1.15, y: CT - 0.005 };
+    // Fryer: steel well with oil and a thermometer dial
+    const fwx0 = gx0 + 0.07, fwx1 = gx1 - 0.1, fwz0 = 1.3, fwz1 = 1.78, well = 0.26;
+    KB.box('steel', fwx1 - fwx0, 0.01, fwz1 - fwz0, (fwx0 + fwx1) / 2, CT - well, (fwz0 + fwz1) / 2);
+    KB.box('steel', 0.01, well, fwz1 - fwz0, fwx0, CT - well / 2, (fwz0 + fwz1) / 2);
+    KB.box('steel', 0.01, well, fwz1 - fwz0, fwx1, CT - well / 2, (fwz0 + fwz1) / 2);
+    KB.box('steel', fwx1 - fwx0, well, 0.01, (fwx0 + fwx1) / 2, CT - well / 2, fwz0);
+    KB.box('steel', fwx1 - fwx0, well, 0.01, (fwx0 + fwx1) / 2, CT - well / 2, fwz1);
+    const oil = new THREE.PlaneGeometry(fwx1 - fwx0 - 0.01, fwz1 - fwz0 - 0.01); oil.rotateX(-Math.PI / 2);
+    KB.geo('oil', oil, (fwx0 + fwx1) / 2, CT - 0.1, (fwz0 + fwz1) / 2, { uv: false });
+    this.fryerWell = { x0: fwx0, x1: fwx1, z0: fwz0, z1: fwz1, oilY: CT - 0.1 };
+    KB.cyl('painted', 0.028, 0.028, 0.02, gx0 - 0.01, CT - 0.08, 1.54, { rotZ: Math.PI / 2, tint: 0x1a1a1a, collide: false });
+    KB.cyl('painted', 0.022, 0.024, 0.03, gx0 - 0.01, CT - 0.08, 0.75, { rotZ: Math.PI / 2, tint: 0x1a1a1a, collide: false });
+    Phys.staticBox((gx1 - gx0) / 2, (CT - well - 0.01) / 2, 0.93, (gx0 + gx1) / 2, (CT - well - 0.01) / 2, (gz0 + gz1) / 2, 0, 'metal');
+    Phys.staticBox((gx1 - gx0) / 2, TT / 2, 0.05, (gx0 + gx1) / 2, CT - TT / 2, 0.3, 0, 'metal');
+    Phys.staticBox((gx1 - gx0) / 2, TT / 2, 0.075, (gx0 + gx1) / 2, CT - TT / 2, 1.225, 0, 'metal');
+    Phys.staticBox((gx1 - gx0) / 2, TT / 2, (gz1 - 1.78) / 2, (gx0 + gx1) / 2, CT - TT / 2, (1.78 + gz1) / 2, 0, 'metal');
+    Phys.staticBox((gx1 - gx0) / 2, 0.08, 0.4, (gx0 + gx1) / 2, CT - 0.2, 0.75, 0, 'metal');
+    Phys.staticBox(0.04, TT / 2, 0.74, gx0 + 0.03, CT - TT / 2, 1.04, 0, 'metal');
+    Phys.staticBox(0.05, TT / 2, 0.74, gx1 - 0.05, CT - TT / 2, 1.04, 0, 'metal');
+    // Steel backsplash + small shelf above station
+    KB.box('steel', 0.012, 0.6, gz1 - gz0, HX - 0.006, CT + 0.3, (gz0 + gz1) / 2, { collide: false });
+    KB.box('steel', 0.25, 0.02, gz1 - gz0, HX - 0.125, 1.72, (gz0 + gz1) / 2);
+
+    // Plating station heat lamp + ticket rail (left wall)
+    KB.box('steel', 0.34, 0.05, 0.62, -2.72, 1.62, 0.55);
+    KB.box('steel', 0.03, 0.03, 0.34, -2.89, 1.66, 0.3, { collide: false, rotY: Math.PI / 2 });
+    KB.box('steel', 0.03, 0.03, 0.34, -2.89, 1.66, 0.8, { collide: false, rotY: Math.PI / 2 });
+    KB.box('glow', 0.26, 0.004, 0.52, -2.72, 1.593, 0.55, { collide: false, uv: false });
+    KB.box('steel', 0.04, 0.02, 0.8, -HX + 0.02, 1.52, 0.55, { collide: false });
+    KB.box('steel', 0.03, 0.015, 0.8, -HX + 0.04, 1.51, 0.55, { collide: false });
+
+    // Countertop appliance blockouts (interactive in M3/M4): kettle, toaster, stand mixer, blender
+    const kx = -2.02, kz = -2.2;
+    KB.cyl('rubber', 0.085, 0.085, 0.02, kx, CT + 0.01, kz, { collide: false });
+    KB.geo('steel', latheGeo([[0, 0], [0.085, 0.0], [0.09, 0.05], [0.085, 0.15], [0.06, 0.2], [0.03, 0.21], [0, 0.21]], 28), kx, CT + 0.02, kz, {});
+    KB.geo('painted', new THREE.TorusGeometry(0.07, 0.012, 8, 20, Math.PI), kx - 0.06, CT + 0.14, kz, { rotZ: Math.PI / 2, tint: 0x1a1a1a });
+    KB.cyl('steel', 0.012, 0.02, 0.1, kx + 0.1, CT + 0.14, kz, { rotZ: -Math.PI / 3, collide: false });
+    Phys.staticCylinder(0.115, 0.09, kx, CT + 0.115, kz, 'metal');
+    const tx = -1.55, tz = -2.25;
+    const toaster = new THREE.CapsuleGeometry(0.08, 0.14, 6, 16); toaster.rotateZ(Math.PI / 2); toaster.scale(1, 1.1, 0.95);
+    KB.geo('steel', toaster, tx, CT + 0.095, tz, {});
+    KB.box('blackGlass', 0.2, 0.004, 0.025, tx, CT + 0.18, tz - 0.035, { collide: false });
+    KB.box('blackGlass', 0.2, 0.004, 0.025, tx, CT + 0.18, tz + 0.035, { collide: false });
+    KB.box('painted', 0.03, 0.012, 0.02, tx + 0.16, CT + 0.12, tz, { tint: 0x1a1a1a, collide: false });
+    Phys.staticBox(0.16, 0.09, 0.08, tx, CT + 0.09, tz, 0, 'metal');
+    const smx = -1.08, smz = -2.24, cream = 0xefe3c8;
+    KB.box('painted', 0.18, 0.05, 0.3, smx, CT + 0.025, smz, { tint: cream, collide: false });
+    KB.box('painted', 0.12, 0.26, 0.1, smx, CT + 0.15, smz - 0.1, { tint: cream, collide: false });
+    const head = new THREE.CapsuleGeometry(0.065, 0.2, 6, 16); head.rotateX(Math.PI / 2);
+    KB.geo('painted', head, smx, CT + 0.32, smz + 0.0, { tint: cream });
+    KB.geo('steel', latheGeo([[0, 0], [0.06, 0], [0.1, 0.06], [0.105, 0.14], [0.1, 0.14], [0.094, 0.065], [0.056, 0.008], [0, 0.008]], 24), smx, CT + 0.05, smz + 0.06, {});
+    Phys.staticBox(0.1, 0.2, 0.17, smx, CT + 0.2, smz, 0, 'metal');
+    const blx = 0.98, blz = -2.22;
+    KB.box('painted', 0.16, 0.12, 0.16, blx, CT + 0.06, blz, { tint: 0x2a2a2a, collide: false });
+    KB.cyl('glass', 0.07, 0.055, 0.22, blx, CT + 0.23, blz, { collide: false, seg: 16 });
+    KB.cyl('painted', 0.073, 0.073, 0.025, blx, CT + 0.35, blz, { tint: 0x1a1a1a, collide: false, seg: 16 });
+    Phys.staticBox(0.08, 0.18, 0.08, blx, CT + 0.18, blz, 0, 'metal');
+
+    // Pedal trash bin
+    const tbx = -1.62, tbz = 0.95;
+    KB.cyl('steel', 0.17, 0.155, 0.6, tbx, 0.3, tbz, { collide: true, seg: 24 });
+    KB.cyl('steel', 0.175, 0.175, 0.03, tbx, 0.615, tbz, { collide: false, seg: 24 });
+    KB.box('darkSteel', 0.08, 0.015, 0.05, tbx, 0.03, tbz + 0.17, { collide: false });
+    Nav.obstacle(tbx - 0.18, tbz - 0.18, tbx + 0.18, tbz + 0.18);
+
+    // Front wall: a panelled door, cookbook shelf and a specials chalkboard (live canvas below)
+    const dz = HZ - 0.02;
+    KB.box('trim', 0.94, 2.14, 0.04, 0.9, 1.07, dz, { collide: false });
+    KB.box('shelf', 0.84, 2.06, 0.04, 0.9, 1.03, dz - 0.012, { collide: false });
+    for (const [py, ph] of [[0.5, 0.7], [1.45, 0.9]]) KB.box('shelf', 0.62, ph, 0.012, 0.9, py, dz - 0.036, { collide: false, tint: 0xd8c8b0 });
+    KB.cyl('brass', 0.028, 0.028, 0.02, 0.56, 1.02, dz - 0.05, { rotX: Math.PI / 2, collide: false });
+    KB.box('brass', 0.11, 0.018, 0.018, 0.6, 1.02, dz - 0.07, { collide: false });
+    KB.box('shelf', 0.9, 0.03, 0.24, 2.1, 1.55, HZ - 0.12);
+    const books = rng(606);
+    for (let bx = 1.72; bx < 2.5;) { const w = 0.025 + books() * 0.03, h = 0.18 + books() * 0.08; KB.box('painted', w, h, 0.16 + books() * 0.04, bx + w / 2, 1.565 + h / 2, HZ - 0.12, { collide: false, tint: [0x7a2e2e, 0x23324a, 0x3c6e71, 0xd8c8a0, 0x5a4636, 0xb8863b][Math.floor(books() * 6)] }); bx += w + 0.004; }
+    KB.box('shelf', 1.3, 0.9, 0.03, -1.55, 1.5, HZ - 0.02, { collide: false });
+
+    // Wall clock frame (face is a live canvas below)
+    KB.geo('painted', new THREE.TorusGeometry(0.165, 0.014, 10, 36), -HX + 0.015, 2.05, 1.75, { rotY: Math.PI / 2, tint: 0x3a2a1c });
+
+    /* ---------- Floor (last, so obstacle AO can be baked) ---------- */
+    const floor = new THREE.PlaneGeometry(2 * HX, 2 * HZ, 60, 50); floor.rotateX(-Math.PI / 2);
+    KB.geo('floor', floor, 0, 0, 0, { ao: (x, y, z) => 0.55 + 0.45 * smoothstep(0.0, 0.45, Nav.clearance(x, z)) });
+    const fc = Phys.staticBox(HX + 1, 0.1, HZ + 1, 0, -0.1, 0, 0, 'wood');
+    Phys.floorHandle = fc.handle;
+    // Window glass (invisible) and ceiling colliders; wall boxes above already carry colliders.
+    Phys.staticBox(0.02, (wy1 - wy0) / 2, (wz1 - wz0) / 2, -HX - 0.06, (wy0 + wy1) / 2, (wz0 + wz1) / 2, 0, 'stone');
+    Phys.staticBox(HX + 0.2, 0.1, HZ + 0.2, 0, H + 0.1, 0, 0, 'stone');
+
+    this.meshes = KB.build();
+    this.buildClock();
+    this.buildChalkboard();
+  },
+  buildClock() {
+    const c = Tex.canvas(256, 256), tex = Tex.finish(c); tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+    const m = new THREE.Mesh(new THREE.CircleGeometry(0.16, 40), new THREE.MeshStandardMaterial({ map: tex, roughness: 0.4 }));
+    m.position.set(-CONFIG.kitchen.halfX + 0.012, 2.05, 1.75); m.rotation.y = Math.PI / 2;
+    scene.add(m);
+    this.clock = { canvas: c, ctx: c.getContext('2d'), tex, last: -1 };
+  },
+  buildChalkboard() {
+    const c = Tex.canvas(1024, 640), ctx = c.getContext('2d'), r = rng(515);
+    ctx.fillStyle = '#26302a'; ctx.fillRect(0, 0, 1024, 640);
+    for (let i = 0; i < 900; i++) { ctx.fillStyle = `rgba(255,255,255,${r() * 0.035})`; ctx.fillRect(r() * 1024, r() * 640, 2 + r() * 40, 1 + r() * 3); }
+    ctx.fillStyle = '#f2efe6'; ctx.textAlign = 'center';
+    ctx.font = 'italic 700 74px Georgia, serif'; ctx.fillText('Mise en Place', 512, 110);
+    ctx.font = '36px Georgia, serif'; ctx.fillStyle = '#e8c07a'; ctx.fillText('~ tonight\u2019s board ~', 512, 170);
+    ctx.fillStyle = '#f2efe6'; ctx.font = '40px Georgia, serif'; ctx.textAlign = 'left';
+    ['Ribeye, butter-basted ..... 55\u00b0C', 'Crispy-skin salmon ........ 52\u00b0C', 'Double-fried frites', 'Carbonara (no scrambling!)', 'Caramel, not burnt'].forEach((t, i) => ctx.fillText(t, 110, 260 + i * 70));
+    ctx.font = 'italic 30px Georgia, serif'; ctx.fillStyle = '#b9c4b3'; ctx.textAlign = 'right'; ctx.fillText('Pat it dry. Preheat the pan. Let it rest.', 960, 610);
+    const tex = Tex.finish(c); tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(1.22, 0.82), new THREE.MeshStandardMaterial({ map: tex, roughness: 0.95 }));
+    m.position.set(-1.55, 1.5, CONFIG.kitchen.halfZ - 0.037); m.rotation.y = Math.PI;
+    scene.add(m);
+  },
+  updateClock() {
+    const now = new Date(), s = now.getSeconds();
+    if (s === this.clock.last) return;
+    this.clock.last = s;
+    const ctx = this.clock.ctx, W = 256, R = 120;
+    ctx.fillStyle = '#f7f1e6'; ctx.fillRect(0, 0, W, W);
+    ctx.save(); ctx.translate(128, 128);
+    ctx.fillStyle = '#2b1f16';
+    for (let i = 0; i < 60; i++) { ctx.save(); ctx.rotate(i * Math.PI / 30); ctx.fillRect(-1.5, -R + 6, 3, i % 5 ? 6 : 16); ctx.restore(); }
+    ctx.font = '600 26px Georgia, serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (let i = 1; i <= 12; i++) { const a = i * Math.PI / 6; ctx.fillText(String(i), Math.sin(a) * (R - 36), -Math.cos(a) * (R - 36)); }
+    const hand = (a, len, w, col) => { ctx.save(); ctx.rotate(a); ctx.fillStyle = col; ctx.fillRect(-w / 2, -len, w, len + 12); ctx.restore(); };
+    const h = now.getHours() % 12, mnt = now.getMinutes();
+    hand((h + mnt / 60) * Math.PI / 6, 60, 7, '#2b1f16');
+    hand((mnt + s / 60) * Math.PI / 30, 90, 5, '#2b1f16');
+    hand(s * Math.PI / 30, 100, 2, '#c8553d');
+    ctx.beginPath(); ctx.arc(0, 0, 6, 0, 7); ctx.fillStyle = '#c8553d'; ctx.fill();
+    ctx.restore();
+    this.clock.tex.needsUpdate = true;
+  },
+};
+
+/* ====================================== [PROPS] ===================================== */
+// Data-driven grabbables. Tool convention (so grip poses are trivial): the handle's grip centre
+// is the local origin, the working end points toward −Z, and the "down"/edge side is −Y.
+const Shp = {
+  box: (hx, hy, hz, x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0) => ({ t: 'box', a: [hx, hy, hz], p: [x, y, z], r: [rx, ry, rz], vol: 8 * hx * hy * hz }),
+  ball: (r, x = 0, y = 0, z = 0) => ({ t: 'ball', a: [r], p: [x, y, z], r: [0, 0, 0], vol: 4.18879 * r * r * r }),
+  cyl: (hh, r, x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0) => ({ t: 'cyl', a: [hh, r], p: [x, y, z], r: [rx, ry, rz], vol: Math.PI * r * r * 2 * hh }),
+  cap: (hh, r, x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0) => ({ t: 'cap', a: [hh, r], p: [x, y, z], r: [rx, ry, rz], vol: Math.PI * r * r * 2 * hh + 4.18879 * r * r * r }),
+  // Ring of wall boxes approximating a round vessel wall (hollow, so things can sit inside).
+  ring(out, radius, yMid, halfH, thick, n, cx = 0, cz = 0) {
+    const w = Math.tan(Math.PI / n) * radius + thick * 0.5;
+    for (let i = 0; i < n; i++) { const a = (i / n) * Math.PI * 2; out.push(Shp.box(thick / 2, halfH, w, cx + Math.cos(a) * radius, yMid, cz + Math.sin(a) * radius, 0, -a, 0)); }
+  },
+};
+
+// Collects a prop's parts (each with its own surface spec) into ONE uber-material geometry = 1 draw call.
+function Parts() {
+  const list = [];
+  return {
+    add(sp, geo, p = [0, 0, 0], r = null, s = null) {
+      if (s) geo.scale(s[0], s[1], s[2]);
+      if (r) { if (r[0]) geo.rotateX(r[0]); if (r[1]) geo.rotateY(r[1]); if (r[2]) geo.rotateZ(r[2]); }
+      geo.translate(p[0], p[1], p[2]);
+      list.push(uberize(geo, sp));
+      return this;
+    },
+    done() { const g = mergeGeometries(list, false); g.computeBoundingSphere(); return [{ mat: UBER, geo: g }]; },
+  };
+}
+const lathe = (pts, seg = 28) => new THREE.LatheGeometry(pts.map((p) => new THREE.Vector2(p[0], p[1])), seg);
+// Blade profile in (along, up) extruded to thickness, oriented so "along" → −Z.
+function bladeGeo(len, height, thick, { tipDrop = 0.004, serrated = false, square = false } = {}) {
+  const s = new THREE.Shape();
+  if (square) { s.moveTo(0, 0.004); s.lineTo(len, 0.004); s.lineTo(len, -height); s.lineTo(0, -height); s.closePath(); }
+  else {
+    s.moveTo(0, 0.004); s.lineTo(len * 0.72, 0.004); s.quadraticCurveTo(len * 0.95, 0.002, len, -tipDrop);
+    if (serrated) {
+      const n = 26;
+      for (let i = 1; i <= n; i++) { const x = len * (1 - i / n) * 0.97; s.lineTo(x, -height + (i % 2 ? 0.0035 : 0)); }
+      s.lineTo(0, -height);
+    } else { s.quadraticCurveTo(len * 0.82, -height * 0.95, len * 0.5, -height); s.lineTo(0, -height); }
+    s.closePath();
+  }
+  const g = new THREE.ExtrudeGeometry(s, { depth: thick, bevelEnabled: false, curveSegments: 12 });
+  g.translate(0, 0, -thick / 2); g.rotateY(Math.PI / 2);
+  return g;
+}
+function knifeHandle(P, len, rivets = true) {
+  const h = new THREE.CapsuleGeometry(0.0125, len - 0.025, 4, 12);
+  P.add(MAT.handle, h, [0, -0.002, 0.012], [Math.PI / 2, 0, 0], [0.8, 1.1, 1]);
+  if (rivets) for (const z of [-0.02, 0.012, 0.045]) P.add(MAT.brass, new THREE.CylinderGeometry(0.0035, 0.0035, 0.0215, 8), [0, -0.002, z], [0, 0, Math.PI / 2]);
+  P.add(MAT.knife, new THREE.CylinderGeometry(0.0115, 0.0125, 0.012, 14), [0, 0, -len / 2 + 0.006], [Math.PI / 2, 0, 0], [0.85, 1.15, 1]);
+}
+// Pan / pot body: outer profile [r, y] pairs from centre-bottom upward, with wall thickness.
+function vesselGeo(profile, wall = 0.004) {
+  const outer = profile, inner = profile.slice().reverse().map(([r, y]) => [Math.max(0, r - wall), Math.max(y, profile[0][1] + wall)]);
+  return lathe([[0, profile[0][1]], ...outer, ...inner, [0, profile[0][1] + wall]], 40);
+}
+// Organic produce: a displaced sphere with sphere UVs.
+function lumpySphere(r, sx, sy, sz, amp, seed, wSeg = 20, hSeg = 14) {
+  const g = new THREE.SphereGeometry(r, wSeg, hSeg), p = g.attributes.position, n = Noise.make(seed, 64);
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i), u = Math.atan2(z, x) / (Math.PI * 2) + 0.5, v = y / r * 0.5 + 0.5;
+    const k = 1 + (Noise.fbm(n, u, v, 4, 4, 3) - 0.5) * amp;
+    p.setXYZ(i, x * sx * k, y * sy * k, z * sz * k);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+
+const TOOL_GRIP = { zone: 1.0 };   // always snap to the authored grip
+const PROP_DEFS = {
+  /* ---------- Knives & tools ---------- */
+  chefKnife: { name: "Chef's Knife", cat: 'Tools', mass: 0.22, sound: 'metal', grip: TOOL_GRIP, size: 0.18,
+    build() { const P = Parts(); knifeHandle(P, 0.12); P.add(MAT.knife, bladeGeo(0.21, 0.045, 0.0022), [0, 0.004, -0.06]);
+      return { parts: P.done(), shapes: [Shp.box(0.011, 0.015, 0.06, 0, -0.002, 0.012), Shp.box(0.003, 0.021, 0.105, 0, -0.017, -0.165)] }; } },
+  paringKnife: { name: 'Paring Knife', cat: 'Tools', mass: 0.07, sound: 'metal', grip: TOOL_GRIP, size: 0.1,
+    build() { const P = Parts(); knifeHandle(P, 0.1, false); P.add(MAT.knife, bladeGeo(0.09, 0.022, 0.0018), [0, 0.004, -0.05]);
+      return { parts: P.done(), shapes: [Shp.box(0.011, 0.014, 0.05, 0, -0.002, 0.012), Shp.box(0.003, 0.011, 0.045, 0, -0.006, -0.095)] }; } },
+  breadKnife: { name: 'Bread Knife', cat: 'Tools', mass: 0.16, sound: 'metal', grip: TOOL_GRIP, size: 0.2,
+    build() { const P = Parts(); knifeHandle(P, 0.12); P.add(MAT.knife, bladeGeo(0.23, 0.028, 0.002, { serrated: true, tipDrop: 0.01 }), [0, 0.004, -0.06]);
+      return { parts: P.done(), shapes: [Shp.box(0.011, 0.015, 0.06, 0, -0.002, 0.012), Shp.box(0.003, 0.014, 0.115, 0, -0.01, -0.175)] }; } },
+  cleaver: { name: 'Cleaver', cat: 'Tools', mass: 0.55, sound: 'metal', grip: TOOL_GRIP, size: 0.16,
+    build() { const P = Parts(); knifeHandle(P, 0.12); P.add(MAT.knife, bladeGeo(0.18, 0.09, 0.005, { square: true }), [0, 0.004, -0.06]);
+      P.add(MAT.darkSteel, new THREE.CylinderGeometry(0.009, 0.009, 0.0055, 16), [0, -0.012, -0.215], [0, 0, Math.PI / 2]);
+      return { parts: P.done(), shapes: [Shp.box(0.011, 0.015, 0.06, 0, -0.002, 0.012), Shp.box(0.004, 0.045, 0.09, 0, -0.04, -0.15)] }; } },
+  spatula: { name: 'Fish Spatula', cat: 'Tools', mass: 0.12, sound: 'metal', grip: TOOL_GRIP, size: 0.15,
+    build() { const P = Parts();
+      P.add(MAT.handle, new THREE.CapsuleGeometry(0.012, 0.13, 4, 12), [0, 0, 0.02], [Math.PI / 2, 0, 0], [0.8, 1, 1]);
+      P.add(MAT.knife, new THREE.BoxGeometry(0.012, 0.004, 0.08), [0, -0.012, -0.08], [-0.35, 0, 0]);
+      const bl = new THREE.Shape(); bl.moveTo(-0.035, 0); bl.lineTo(0.035, 0); bl.lineTo(0.04, 0.11); bl.quadraticCurveTo(0, 0.125, -0.036, 0.11); bl.closePath();
+      for (let i = 0; i < 4; i++) { const h = new THREE.Path(); const x = -0.018 + i * 0.012; h.moveTo(x, 0.02); h.lineTo(x + 0.004, 0.02); h.lineTo(x + 0.005, 0.09); h.lineTo(x + 0.001, 0.09); h.closePath(); bl.holes.push(h); }
+      const bg = new THREE.ExtrudeGeometry(bl, { depth: 0.0018, bevelEnabled: false }); bg.rotateX(-Math.PI / 2);
+      P.add(MAT.knife, bg, [0, -0.026, -0.115], [-0.12, 0, 0]);
+      return { parts: P.done(), shapes: [Shp.box(0.011, 0.011, 0.075, 0, 0, 0.02), Shp.box(0.037, 0.004, 0.058, 0, -0.035, -0.17)] }; } },
+  tongs: { name: 'Tongs', cat: 'Tools', mass: 0.14, sound: 'metal', grip: TOOL_GRIP, size: 0.16,
+    build() { const P = Parts();
+      for (const s of [1, -1]) {
+        P.add(MAT.knife, new THREE.BoxGeometry(0.018, 0.0025, 0.27), [0, s * 0.014, -0.05], [s * 0.05, 0, 0]);
+        P.add(MAT.silicone, new THREE.BoxGeometry(0.02, 0.004, 0.08), [0, s * 0.012, 0.03], [s * 0.05, 0, 0]);
+        P.add(MAT.knife, new THREE.CylinderGeometry(0.012, 0.012, 0.003, 12), [0, s * 0.022, -0.185], [0, 0, 0]);
+      }
+      P.add(MAT.knife, new THREE.TorusGeometry(0.012, 0.003, 6, 12, Math.PI), [0, 0, 0.085], [0, Math.PI / 2, Math.PI / 2]);
+      return { parts: P.done(), shapes: [Shp.box(0.012, 0.022, 0.14, 0, 0, -0.05)] }; } },
+  woodenSpoon: { name: 'Wooden Spoon', cat: 'Tools', mass: 0.05, sound: 'wood', grip: TOOL_GRIP, size: 0.15,
+    build() { const P = Parts();
+      P.add(MAT.beech, new THREE.CapsuleGeometry(0.0075, 0.24, 4, 10), [0, 0, 0.0], [Math.PI / 2, 0, 0]);
+      const b = new THREE.SphereGeometry(1, 16, 10, 0, Math.PI * 2, 0, Math.PI * 0.62); b.rotateX(Math.PI);
+      P.add(MAT.beech, b, [0, -0.004, -0.15], null, [0.03, 0.012, 0.042]);
+      return { parts: P.done(), shapes: [Shp.box(0.008, 0.008, 0.12, 0, 0, 0), Shp.box(0.028, 0.009, 0.04, 0, -0.008, -0.15)] }; } },
+  whisk: { name: 'Whisk', cat: 'Tools', mass: 0.1, sound: 'metal', grip: TOOL_GRIP, size: 0.14,
+    build() { const P = Parts();
+      P.add(MAT.knife, new THREE.CylinderGeometry(0.012, 0.01, 0.14, 14), [0, 0, 0.02], [Math.PI / 2, 0, 0]);
+      for (let i = 0; i < 6; i++) { const t = new THREE.TorusGeometry(0.036, 0.0011, 4, 28); t.scale(1, 2.2, 1); t.rotateX(Math.PI / 2); t.rotateZ(i * Math.PI / 6); P.add(MAT.knife, t, [0, 0, -0.105]); }
+      return { parts: P.done(), shapes: [Shp.box(0.012, 0.012, 0.07, 0, 0, 0.02), Shp.box(0.03, 0.03, 0.07, 0, 0, -0.12)] }; } },
+  ladle: { name: 'Ladle', cat: 'Tools', mass: 0.16, sound: 'metal', grip: TOOL_GRIP, size: 0.16,
+    build() { const P = Parts();
+      P.add(MAT.knife, new THREE.BoxGeometry(0.014, 0.004, 0.28), [0, 0, -0.02], [-0.2, 0, 0]);
+      P.add(MAT.potSteel, vesselGeo([[0.001, -0.045], [0.03, -0.04], [0.044, -0.02], [0.046, 0.0]], 0.0015), [0, -0.035, -0.19]);
+      return { parts: P.done(), shapes: [Shp.box(0.008, 0.006, 0.14, 0, 0, -0.02), Shp.cyl(0.022, 0.045, 0, -0.057, -0.19)] }; } },
+  rollingPin: { name: 'Rolling Pin', cat: 'Tools', mass: 0.6, sound: 'wood', twoHanded: true, size: 0.22,
+    build() { const P = Parts();
+      P.add(MAT.beech, new THREE.CylinderGeometry(0.028, 0.028, 0.3, 20), [0, 0, 0], [0, 0, Math.PI / 2]);
+      for (const s of [1, -1]) P.add(MAT.beech, new THREE.CapsuleGeometry(0.014, 0.07, 4, 10), [s * 0.205, 0, 0], [0, 0, Math.PI / 2]);
+      return { parts: P.done(), shapes: [Shp.cyl(0.15, 0.028, 0, 0, 0, 0, 0, Math.PI / 2), Shp.cap(0.035, 0.014, 0.205, 0, 0, 0, 0, Math.PI / 2), Shp.cap(0.035, 0.014, -0.205, 0, 0, 0, 0, Math.PI / 2)] }; } },
+
+  /* ---------- Cookware ---------- */
+  castIron: { name: 'Cast-Iron Skillet', cat: 'Cookware', mass: 2.4, sound: 'metal', grip: { zone: 0.1 }, twoHanded: true, size: 0.3,
+    build() { const P = Parts(), R = 0.13, cz = -0.06 - R;
+      P.add(MAT.castIron, vesselGeo([[0.118, -0.05], [0.124, -0.048], [0.132, 0.0]], 0.006), [0, 0, cz]);
+      P.add(MAT.castIron, new THREE.BoxGeometry(0.03, 0.018, 0.15), [0, -0.006, 0.0], [0.12, 0, 0]);
+      P.add(MAT.castIron, new THREE.TorusGeometry(0.008, 0.004, 6, 10), [0, 0.0, 0.068], [Math.PI / 2, 0, 0]);
+      P.add(MAT.castIron, new THREE.BoxGeometry(0.05, 0.012, 0.035), [0, -0.006, cz - R - 0.012]);
+      const s = [Shp.cyl(0.004, 0.12, 0, -0.046, cz), Shp.box(0.015, 0.009, 0.075, 0, -0.006, 0, 0.12, 0, 0), Shp.box(0.025, 0.006, 0.018, 0, -0.006, cz - R - 0.012)];
+      Shp.ring(s, 0.127, -0.024, 0.024, 0.008, 12, 0, cz);
+      return { parts: P.done(), shapes: s }; } },
+  nonstick: { name: 'Nonstick Pan', cat: 'Cookware', mass: 0.95, sound: 'metal', grip: { zone: 0.1 }, size: 0.28,
+    build() { const P = Parts(), R = 0.125, cz = -0.075 - R;
+      P.add(MAT.nonstick, vesselGeo([[0.1, -0.045], [0.11, -0.042], [0.126, 0.0]], 0.003), [0, 0, cz]);
+      P.add(MAT.plastic, new THREE.CapsuleGeometry(0.012, 0.15, 4, 10), [0, 0.0, 0.02], [Math.PI / 2 - 0.12, 0, 0], [1.3, 1, 0.8]);
+      P.add(MAT.potSteel, new THREE.BoxGeometry(0.02, 0.01, 0.05), [0, -0.01, -0.07]);
+      const s = [Shp.cyl(0.003, 0.105, 0, -0.043, cz), Shp.box(0.015, 0.01, 0.1, 0, 0, 0.0)];
+      Shp.ring(s, 0.118, -0.022, 0.022, 0.006, 12, 0, cz);
+      return { parts: P.done(), shapes: s }; } },
+  saucepan: { name: 'Saucepan', cat: 'Cookware', mass: 1.1, sound: 'metal', grip: { zone: 0.1 }, size: 0.2,
+    build() { const P = Parts(), R = 0.09, cz = -0.08 - R;
+      P.add(MAT.potSteel, vesselGeo([[0.088, -0.1], [0.09, -0.095], [0.09, 0.0]], 0.003), [0, 0.0, cz]);
+      P.add(MAT.potSteel, new THREE.BoxGeometry(0.022, 0.01, 0.19), [0, -0.01, 0.0], [0.15, 0, 0]);
+      const s = [Shp.cyl(0.003, 0.088, 0, -0.098, cz), Shp.box(0.012, 0.008, 0.095, 0, -0.01, 0, 0.15, 0, 0)];
+      Shp.ring(s, 0.09, -0.05, 0.05, 0.006, 12, 0, cz);
+      return { parts: P.done(), shapes: s }; } },
+  stockPot: { name: 'Stock Pot (6 L)', cat: 'Cookware', mass: 1.9, sound: 'metal', twoHanded: true, size: 0.3,
+    build() { const P = Parts();
+      P.add(MAT.potSteel, vesselGeo([[0.108, 0.0], [0.11, 0.005], [0.11, 0.19]], 0.003));
+      for (const s of [1, -1]) P.add(MAT.potSteel, new THREE.TorusGeometry(0.03, 0.006, 6, 14, Math.PI), [s * 0.11, 0.155, 0], [Math.PI / 2, 0, s > 0 ? -Math.PI / 2 : Math.PI / 2]);
+      const s = [Shp.cyl(0.003, 0.108, 0, 0.003, 0), Shp.box(0.03, 0.006, 0.03, 0.135, 0.155, 0), Shp.box(0.03, 0.006, 0.03, -0.135, 0.155, 0)];
+      Shp.ring(s, 0.11, 0.095, 0.095, 0.006, 14);
+      return { parts: P.done(), shapes: s }; } },
+  potLid: { name: 'Pot Lid', cat: 'Cookware', mass: 0.45, sound: 'metal', size: 0.14,
+    build() { const P = Parts();
+      P.add(MAT.potSteel, lathe([[0, 0.02], [0.06, 0.017], [0.112, 0.004], [0.116, 0.0], [0.114, 0.0], [0.11, 0.003], [0.06, 0.014], [0, 0.017]], 40));
+      P.add(MAT.plastic, new THREE.CylinderGeometry(0.018, 0.012, 0.022, 14), [0, 0.03, 0]);
+      return { parts: P.done(), shapes: [Shp.cyl(0.009, 0.115, 0, 0.009, 0), Shp.cyl(0.011, 0.016, 0, 0.03, 0)] }; } },
+  sheetPan: { name: 'Sheet Pan', cat: 'Cookware', mass: 1.0, sound: 'metal', twoHanded: true, size: 0.3,
+    build() { const P = Parts(), w = 0.45, d = 0.33, h = 0.025;
+      P.add(MAT.potSteel, new THREE.BoxGeometry(w, 0.002, d), [0, 0.001, 0]);
+      for (const s of [1, -1]) { P.add(MAT.potSteel, new THREE.BoxGeometry(w, h, 0.004), [0, h / 2, s * d / 2]); P.add(MAT.potSteel, new THREE.BoxGeometry(0.004, h, d), [s * w / 2, h / 2, 0]); }
+      return { parts: P.done(), shapes: [Shp.box(w / 2, 0.003, d / 2, 0, 0.001), Shp.box(w / 2, h / 2, 0.004, 0, h / 2, d / 2), Shp.box(w / 2, h / 2, 0.004, 0, h / 2, -d / 2), Shp.box(0.004, h / 2, d / 2, w / 2, h / 2, 0), Shp.box(0.004, h / 2, d / 2, -w / 2, h / 2, 0)] }; } },
+  cuttingBoard: { name: 'Cutting Board', cat: 'Cookware', mass: 1.6, sound: 'wood', twoHanded: true, size: 0.3,
+    build() { const P = Parts();
+      const g = new THREE.BoxGeometry(0.45, 0.028, 0.3); P.add(MAT.board, g, [0, 0.014, 0]);
+      return { parts: P.done(), shapes: [Shp.box(0.225, 0.014, 0.15, 0, 0.014, 0)] }; } },
+  mixingBowl: { name: 'Mixing Bowl', cat: 'Cookware', mass: 0.45, sound: 'metal', twoHanded: true, size: 0.2,
+    build() { const P = Parts();
+      P.add(MAT.potSteel, vesselGeo([[0.06, 0.0], [0.09, 0.02], [0.12, 0.07], [0.13, 0.11]], 0.002));
+      const s = [Shp.cyl(0.003, 0.07, 0, 0.003, 0)];
+      Shp.ring(s, 0.085, 0.025, 0.022, 0.012, 12); Shp.ring(s, 0.122, 0.08, 0.032, 0.012, 14);
+      return { parts: P.done(), shapes: s }; } },
+  plate: { name: 'Plate', cat: 'Tableware', mass: 0.55, sound: 'ceramic', size: 0.14,
+    build() { const P = Parts();
+      P.add(MAT.ceramic, lathe([[0, 0.004], [0.07, 0.002], [0.075, 0.0], [0.09, 0.006], [0.13, 0.016], [0.135, 0.02], [0.133, 0.022], [0.09, 0.013], [0, 0.012]], 40));
+      return { parts: P.done(), shapes: [Shp.cyl(0.006, 0.13, 0, 0.008, 0)] }; } },
+  bowl: { name: 'Bowl', cat: 'Tableware', mass: 0.35, sound: 'ceramic', size: 0.09,
+    build() { const P = Parts();
+      P.add(MAT.ceramicBlue, vesselGeo([[0.04, 0.0], [0.06, 0.015], [0.075, 0.045], [0.08, 0.065]], 0.005));
+      const s = [Shp.cyl(0.004, 0.045, 0, 0.004, 0)];
+      Shp.ring(s, 0.068, 0.035, 0.03, 0.01, 12);
+      return { parts: P.done(), shapes: s }; } },
+
+  /* ---------- Produce (cookable in M2+) ---------- */
+  tomato: { name: 'Tomato', cat: 'Produce', mass: 0.12, angDamp: 1.0, sound: 'produce', size: 0.04,
+    build() { const P = Parts(); P.add(MAT.tomato, lumpySphere(0.035, 1, 0.84, 1, 0.12, 201));
+      const c = new THREE.ConeGeometry(0.016, 0.006, 5); P.add(MAT.leaf, c, [0, 0.03, 0]);
+      P.add(MAT.leaf, new THREE.CylinderGeometry(0.002, 0.0025, 0.012, 6), [0, 0.037, 0]);
+      return { parts: P.done(), shapes: [Shp.ball(0.032)] }; } },
+  onion: { name: 'Onion', cat: 'Produce', mass: 0.16, angDamp: 1.0, sound: 'produce', size: 0.045,
+    build() { const P = Parts(); P.add(MAT.onion, lathe([[0, -0.04], [0.02, -0.036], [0.038, -0.018], [0.041, 0.004], [0.032, 0.026], [0.012, 0.042], [0.003, 0.055], [0, 0.057]], 24));
+      return { parts: P.done(), shapes: [Shp.ball(0.039, 0, 0.0, 0)] }; } },
+  lemon: { name: 'Lemon', cat: 'Produce', mass: 0.1, angDamp: 1.0, sound: 'produce', size: 0.04,
+    build() { const P = Parts(); const g = lumpySphere(0.03, 1, 1, 1.35, 0.06, 203); P.add(MAT.lemon, g);
+      P.add(MAT.lemon, new THREE.ConeGeometry(0.008, 0.01, 8), [0, 0, 0.043], [Math.PI / 2, 0, 0]);
+      return { parts: P.done(), shapes: [Shp.cap(0.01, 0.03, 0, 0, 0, Math.PI / 2, 0, 0)] }; } },
+  apple: { name: 'Apple', cat: 'Produce', mass: 0.18, angDamp: 1.0, sound: 'produce', size: 0.042,
+    build() { const P = Parts(); P.add(MAT.apple, lathe([[0, -0.032], [0.018, -0.036], [0.034, -0.026], [0.041, -0.004], [0.038, 0.02], [0.024, 0.036], [0.008, 0.03], [0, 0.026]], 26));
+      P.add(MAT.handle, new THREE.CylinderGeometry(0.0018, 0.0022, 0.022, 6), [0.002, 0.036, 0], [0, 0, 0.2]);
+      return { parts: P.done(), shapes: [Shp.ball(0.037)] }; } },
+  potato: { name: 'Potato', cat: 'Produce', mass: 0.22, angDamp: 1.0, sound: 'produce', size: 0.06,
+    build() { const P = Parts(); P.add(MAT.potato, lumpySphere(0.04, 0.9, 0.72, 1.45, 0.28, 205));
+      return { parts: P.done(), shapes: [Shp.cap(0.025, 0.031, 0, 0, 0, Math.PI / 2, 0, 0)] }; } },
+  carrot: { name: 'Carrot', cat: 'Produce', mass: 0.075, sound: 'produce', size: 0.09,
+    build() { const P = Parts();
+      const g = lathe([[0, -0.09], [0.004, -0.085], [0.011, -0.04], [0.016, 0.03], [0.017, 0.08], [0.012, 0.09], [0, 0.092]], 16); P.add(MAT.carrot, g, [0, 0, 0], [Math.PI / 2, 0, 0]);
+      for (let i = 0; i < 4; i++) P.add(MAT.leaf, new THREE.ConeGeometry(0.004, 0.05, 5), [Math.cos(i * 1.6) * 0.004, Math.sin(i * 1.6) * 0.004, 0.115], [Math.PI / 2 - 0.1 * (i - 1.5), 0, 0]);
+      return { parts: P.done(), shapes: [Shp.cap(0.07, 0.015, 0, 0, 0, Math.PI / 2, 0, 0)] }; } },
+  egg: { name: 'Egg', cat: 'Produce', mass: 0.06, angDamp: 2.0, sound: 'ceramic', size: 0.03,
+    build() { const P = Parts(); const pts = []; for (let i = 0; i <= 14; i++) { const t = i / 14, a = Math.PI * t; const y = -Math.cos(a) * 0.029; const r = Math.sin(a) * 0.0215 * (1 - 0.12 * (y / 0.029)); pts.push([Math.max(r, 0), y]); }
+      P.add(MAT.egg, lathe(pts, 20));
+      return { parts: P.done(), shapes: [Shp.cap(0.008, 0.021)] }; } },
+
+  /* ---------- Misc ---------- */
+  timer: { name: 'Kitchen Timer', cat: 'Misc', mass: 0.12, sound: 'produce', size: 0.05,
+    build() { const P = Parts();
+      P.add(MAT.red, new THREE.CylinderGeometry(0.042, 0.045, 0.045, 24), [0, 0.0225, 0]);
+      P.add(MAT.ceramic, new THREE.CylinderGeometry(0.036, 0.04, 0.02, 24), [0, 0.055, 0]);
+      return { parts: P.done(), shapes: [Shp.cyl(0.032, 0.044, 0, 0.032, 0)] }; },
+    init(prop) {
+      const c = Tex.canvas(128, 64), tex = Tex.finish(c); tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+      const disp = new THREE.Mesh(new THREE.PlaneGeometry(0.05, 0.025), new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }));
+      disp.position.set(0, 0.025, 0.0455); prop.group.add(disp);
+      prop.state = { remaining: 0, running: false, ringing: 0, canvas: c, tex, lastShown: -1 };
+      PROP_DEFS.timer.draw(prop);
+    },
+    draw(prop) {
+      const s = prop.state, sec = Math.ceil(s.remaining);
+      if (sec === s.lastShown && !s.ringing) return; s.lastShown = sec;
+      const ctx = s.canvas.getContext('2d');
+      ctx.fillStyle = s.ringing && (Math.floor(Sim.time * 4) % 2) ? '#7a1d12' : '#1b2a1c'; ctx.fillRect(0, 0, 128, 64);
+      ctx.fillStyle = '#9dff8a'; ctx.font = 'bold 44px ui-monospace, monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(`${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`, 64, 34);
+      s.tex.needsUpdate = true;
+    },
+    // Trigger / right-click: +1 minute (starts counting); while ringing: silence.
+    use(prop) {
+      const s = prop.state;
+      if (s.ringing > 0) { s.ringing = 0; s.remaining = 0; s.running = false; }
+      else { s.remaining = Math.min(s.remaining + 60, 99 * 60); s.running = true; }
+      s.lastShown = -1; AudioSys.uiTick();
+    },
+    tick(prop, dt) {
+      const s = prop.state;
+      if (s.running) { s.remaining -= dt; if (s.remaining <= 0) { s.remaining = 0; s.running = false; s.ringing = 4; AudioSys.ring(prop.group.position, 4); for (const h of prop.holders) haptic(h.side, 0.8, 400); } }
+      if (s.ringing > 0) { s.ringing = Math.max(0, s.ringing - dt); s.lastShown = -1; }
+      PROP_DEFS.timer.draw(prop);
+    } },
+  extinguisher: { name: 'Fire Extinguisher', cat: 'Misc', mass: 4.5, sound: 'metal', size: 0.2,
+    build() { const P = Parts();
+      P.add(MAT.red, new THREE.CapsuleGeometry(0.06, 0.3, 6, 18), [0, 0.21, 0]);
+      P.add(MAT.darkSteel, new THREE.CylinderGeometry(0.02, 0.025, 0.05, 12), [0, 0.415, 0]);
+      P.add(MAT.darkSteel, new THREE.BoxGeometry(0.1, 0.012, 0.025), [0.03, 0.44, 0], [0, 0, 0.2]);
+      P.add(MAT.plastic, new THREE.CylinderGeometry(0.008, 0.008, 0.3, 8), [-0.065, 0.28, 0], [0, 0, 0.12]);
+      return { parts: P.done(), shapes: [Shp.cyl(0.21, 0.06, 0, 0.21, 0), Shp.box(0.05, 0.03, 0.02, 0.02, 0.43, 0)] }; } },
+  bakingSoda: { name: 'Baking Soda', cat: 'Misc', mass: 0.5, sound: 'wood', size: 0.07,
+    build() { const P = Parts(); P.add(MAT.cardboard, new THREE.BoxGeometry(0.09, 0.13, 0.05), [0, 0.065, 0]);
+      P.add(MAT.ceramic, new THREE.BoxGeometry(0.07, 0.04, 0.051), [0, 0.07, 0]);
+      return { parts: P.done(), shapes: [Shp.box(0.045, 0.065, 0.025, 0, 0.065, 0)] }; } },
+  serviceBell: { name: 'Service Bell', cat: 'Misc', mass: 0.3, sound: 'metal', size: 0.05,
+    build() { const P = Parts(); P.add(MAT.plastic, new THREE.CylinderGeometry(0.045, 0.048, 0.012, 24), [0, 0.006, 0]);
+      P.add(MAT.brass, new THREE.SphereGeometry(0.038, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2), [0, 0.014, 0]);
+      P.add(MAT.brass, new THREE.CylinderGeometry(0.004, 0.004, 0.014, 8), [0, 0.057, 0]);
+      return { parts: P.done(), shapes: [Shp.cyl(0.028, 0.047, 0, 0.028, 0)] }; },
+    use(prop) { const v = AudioSys.voice(prop.group.position, 1.6, 0.5); if (!v) return; const t = AudioSys.ctx.currentTime; AudioSys.osc(v, 'sine', 2093, t, 1.4, 0.5, 1.4); AudioSys.osc(v, 'sine', 5230, t, 0.6, 0.2, 0.5); } },
+  fryerBasket: { name: 'Fryer Basket', cat: 'Cookware', mass: 0.6, sound: 'metal', grip: { zone: 0.1 }, size: 0.2,
+    build() { const P = Parts(), w = 0.2, d = 0.26, h = 0.11, cz = -0.06 - d / 2, y0 = -0.09;
+      for (let i = 0; i <= 8; i++) { P.add(MAT.potSteel, new THREE.BoxGeometry(0.002, h, 0.002), [-w / 2 + i * w / 8, y0 + h / 2, cz - d / 2]); P.add(MAT.potSteel, new THREE.BoxGeometry(0.002, h, 0.002), [-w / 2 + i * w / 8, y0 + h / 2, cz + d / 2]); }
+      for (let i = 0; i <= 10; i++) { P.add(MAT.potSteel, new THREE.BoxGeometry(0.002, h, 0.002), [-w / 2, y0 + h / 2, cz - d / 2 + i * d / 10]); P.add(MAT.potSteel, new THREE.BoxGeometry(0.002, h, 0.002), [w / 2, y0 + h / 2, cz - d / 2 + i * d / 10]); }
+      for (let j = 0; j <= 4; j++) { const y = y0 + j * h / 4; P.add(MAT.potSteel, new THREE.BoxGeometry(w, 0.002, 0.002), [0, y, cz - d / 2]); P.add(MAT.potSteel, new THREE.BoxGeometry(w, 0.002, 0.002), [0, y, cz + d / 2]); P.add(MAT.potSteel, new THREE.BoxGeometry(0.002, 0.002, d), [-w / 2, y, cz]); P.add(MAT.potSteel, new THREE.BoxGeometry(0.002, 0.002, d), [w / 2, y, cz]); }
+      for (let i = 0; i <= 8; i++) P.add(MAT.potSteel, new THREE.BoxGeometry(0.002, 0.002, d), [-w / 2 + i * w / 8, y0, cz]);
+      P.add(MAT.potSteel, new THREE.BoxGeometry(0.008, 0.008, 0.1), [0, -0.03, -0.03], [0.5, 0, 0]);
+      P.add(MAT.plastic, new THREE.CapsuleGeometry(0.013, 0.09, 4, 10), [0, 0, 0.03], [Math.PI / 2, 0, 0]);
+      return { parts: P.done(), shapes: [Shp.box(w / 2, 0.003, d / 2, 0, y0, cz), Shp.box(w / 2, h / 2, 0.003, 0, y0 + h / 2, cz - d / 2), Shp.box(w / 2, h / 2, 0.003, 0, y0 + h / 2, cz + d / 2), Shp.box(0.003, h / 2, d / 2, -w / 2, y0 + h / 2, cz), Shp.box(0.003, h / 2, d / 2, w / 2, y0 + h / 2, cz), Shp.box(0.012, 0.012, 0.06, 0, 0, 0.03)] }; } },
+};
+
+// Desktop number keys 1–9 → tool swap
+const TOOL_HOTKEYS = ['chefKnife', 'paringKnife', 'breadKnife', 'cleaver', 'spatula', 'tongs', 'woodenSpoon', 'whisk', 'ladle'];
+
+// Initial kitchen layout: [def, x, y, z, yawDeg, rollDeg]
+const INITIAL_PROPS = (() => {
+  const CT = CONFIG.kitchen.counterTop, IB = CT + 0.02, BD = CT + 0.028; // island butcher surface, board top
+  return [
+    ['cuttingBoard', -0.45, CT, 0.02, 0, 0],
+    ['chefKnife', -0.35, BD + 0.015, 0.06, 90, 90],
+    ['paringKnife', -0.5, BD + 0.015, -0.08, 90, 90],
+    ['breadKnife', 0.45, IB + 0.015, -0.34, 90, 90],
+    ['cleaver', 0.8, IB + 0.015, -0.34, 90, 90],
+    ['tomato', 0.3, IB + 0.03, 0.05, 0, 0], ['tomato', 0.37, IB + 0.03, 0.12, 0, 0],
+    ['onion', 0.47, IB + 0.042, 0.02, 0, 0], ['lemon', 0.57, IB + 0.032, 0.14, 30, 0],
+    ['apple', 0.67, IB + 0.04, 0.0, 0, 0], ['potato', 0.8, IB + 0.035, 0.15, 20, 0], ['carrot', 0.88, IB + 0.018, -0.07, 70, 0],
+    ['egg', 0.24, IB + 0.023, 0.3, 0, 90], ['egg', 0.3, IB + 0.023, 0.33, 0, 90], ['egg', 0.36, IB + 0.023, 0.3, 0, 90],
+    ['rollingPin', -0.72, CT + 0.03, 0.3, 0, 0],
+    ['mixingBowl', -0.8, CT, -0.22, 0, 0],
+    ['whisk', -0.2, CT + 0.037, -0.3, 100, 0], ['ladle', -0.12, CT + 0.08, 0.12, 80, 0],
+    ['timer', -0.15, CT, 0.36, 0, 0],
+    ['castIron', -0.41, CT + 0.092, -1.83, 0, 0],
+    ['stockPot', -0.41, CT + 0.04, -2.33, 0, 0], ['potLid', -0.41, CT + 0.235, -2.33, 0, 0],
+    ['saucepan', -0.03, CT + 0.142, -2.16, 0, 0],
+    ['nonstick', 0.36, CT + 0.05, -1.9, 0, 0],
+    ['spatula', 0.66, CT + 0.04, -1.98, 100, 0], ['tongs', 0.66, CT + 0.03, -2.3, 95, 0],
+    ['woodenSpoon', 0.8, CT + 0.022, -2.14, 80, 0],
+    ['bakingSoda', -0.75, CT, -2.3, 10, 0],
+    ['sheetPan', -2.67, CT + 0.01, -1.5, 90, 0],
+    ['plate', -2.68, CT + 0.005, 0.35, 0, 0], ['plate', -2.68, CT + 0.03, 0.35, 0, 0], ['plate', -2.68, CT + 0.055, 0.35, 0, 0],
+    ['bowl', -2.66, CT + 0.005, 0.7, 0, 0], ['bowl', -2.62, CT + 0.005, 0.02, 0, 0],
+    ['serviceBell', -2.48, CT, 0.84, 0, 0],
+    ['fryerBasket', 2.6, CT + 0.095, 2.0, -90, 0],
+    ['extinguisher', 2.78, 0.002, 2.32, 0, 0],
+  ];
+})();
+
+class Prop {
+  constructor(key, pos, quat, spawned) {
+    const def = PROP_DEFS[key], built = Props.built(key);
+    this.key = key; this.def = def; this.spawned = spawned; this.alive = true;
+    this.group = new THREE.Group(); this.meshes = [];
+    for (const part of built.parts) { const m = new THREE.Mesh(part.geo, part.mat); m.castShadow = true; m.receiveShadow = true; m.userData.baseMat = part.mat; this.group.add(m); this.meshes.push(m); }
+    this.group.position.copy(pos); this.group.quaternion.copy(quat);
+    scene.add(this.group);
+    this.body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(pos.x, pos.y, pos.z).setRotation({ x: quat.x, y: quat.y, z: quat.z, w: quat.w })
+      .setCcdEnabled(true).setLinearDamping(def.linDamp ?? 0.05).setAngularDamping(def.angDamp ?? 0.2).setCanSleep(true));
+    this.colliders = [];
+    for (const s of built.shapes) {
+      let d;
+      if (s.t === 'box') d = RAPIER.ColliderDesc.cuboid(s.a[0], s.a[1], s.a[2]);
+      else if (s.t === 'ball') d = RAPIER.ColliderDesc.ball(s.a[0]);
+      else if (s.t === 'cyl') d = RAPIER.ColliderDesc.cylinder(s.a[0], s.a[1]);
+      else d = RAPIER.ColliderDesc.capsule(s.a[0], s.a[1]);
+      d.setTranslation(s.p[0], s.p[1], s.p[2]);
+      if (s.r[0] || s.r[1] || s.r[2]) { _q1.setFromEuler(_e1.set(s.r[0], s.r[1], s.r[2], 'ZYX')); d.setRotation({ x: _q1.x, y: _q1.y, z: _q1.z, w: _q1.w }); }
+      d.setMass(def.mass * s.vol / built.volume).setFriction(def.friction ?? 0.75).setRestitution(def.restitution ?? 0.08)
+        .setCollisionGroups(GROUPS.prop).setActiveEvents(RAPIER.ActiveEvents.CONTACT_FORCE_EVENTS)
+        .setContactForceEventThreshold(def.mass * 9.81 * 2.5);
+      const c = world.createCollider(d, this.body);
+      this.colliders.push(c); Phys.propByCollider.set(c.handle, this);
+    }
+    this.mass = def.mass;
+    this.prevPos = pos.clone(); this.currPos = pos.clone(); this.prevQuat = quat.clone(); this.currQuat = quat.clone();
+    this.renderPos = pos.clone(); this.renderQuat = quat.clone();
+    this.targetPos = new THREE.Vector3(); this.targetQuat = new THREE.Quaternion(); this.hasTarget = false;
+    this.holders = []; this.highlighted = false; this.lastContactStep = -100; this.lastSoundT = 0;
+    this.homePos = pos.clone(); this.homeQuat = quat.clone();
+    this.incoming = null; // force-grab flight
+    if (def.init) def.init(this);
+  }
+  setGroups(g) { for (const c of this.colliders) c.setCollisionGroups(g); }
+  setHighlight(on) {
+    if (on === this.highlighted) return; this.highlighted = on;
+    for (const m of this.meshes) m.material = on ? highlightOf(m.userData.baseMat) : m.userData.baseMat;
+  }
+  teleport(pos, quat) {
+    this.body.setTranslation(pos, true); this.body.setRotation(quat, true);
+    this.body.setLinvel({ x: 0, y: 0, z: 0 }, true); this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    this.prevPos.copy(pos); this.currPos.copy(pos); this.prevQuat.copy(quat); this.currQuat.copy(quat);
+  }
+  capture() {
+    this.prevPos.copy(this.currPos); this.prevQuat.copy(this.currQuat);
+    if (!this.body.isSleeping()) { this.body.translation(this.currPos); this.body.rotation(this.currQuat); }
+  }
+  render(alpha) {
+    _v1.lerpVectors(this.prevPos, this.currPos, alpha);
+    _q1.slerpQuaternions(this.prevQuat, this.currQuat, alpha);
+    if (this.hasTarget) {
+      const tol = CONFIG.hands.visualSnapTol, w = smoothstep(tol, tol * 4, _v1.distanceTo(this.targetPos));
+      this.renderPos.lerpVectors(this.targetPos, _v1, w);
+      this.renderQuat.slerpQuaternions(this.targetQuat, _q1, w);
+    } else { this.renderPos.copy(_v1); this.renderQuat.copy(_q1); }
+    this.group.position.copy(this.renderPos); this.group.quaternion.copy(this.renderQuat);
+  }
+  destroy() {
+    this.alive = false;
+    for (const h of this.holders.slice()) Grab.release(h, false);
+    for (const c of this.colliders) Phys.propByCollider.delete(c.handle);
+    world.removeRigidBody(this.body);
+    scene.remove(this.group);
+    if (this.state && this.state.tex) this.state.tex.dispose();
+  }
+}
+
+const Props = {
+  list: [], cache: new Map(),
+  built(key) {
+    let b = this.cache.get(key);
+    if (!b) { b = PROP_DEFS[key].build(); b.volume = b.shapes.reduce((a, s) => a + s.vol, 0); this.cache.set(key, b); }
+    return b;
+  },
+  spawn(key, pos, quat, spawned = true) {
+    if (!PROP_DEFS[key]) return null;
+    const p = new Prop(key, pos, quat || new THREE.Quaternion(), spawned);
+    this.list.push(p);
+    return p;
+  },
+  remove(p) { const i = this.list.indexOf(p); if (i >= 0) this.list.splice(i, 1); p.destroy(); },
+  spawnInitial() {
+    for (const [key, x, y, z, yaw, roll] of INITIAL_PROPS) {
+      const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, yaw * DEG, roll * DEG, 'YXZ'));
+      this.spawn(key, new THREE.Vector3(x, y + 0.005, z), q, false);
+    }
+  },
+  resetKitchen() {
+    for (const p of this.list.slice()) this.remove(p);
+    this.spawnInitial();
+  },
+  // Clean up: remove spawned extras, return the original items home.
+  cleanUp() {
+    for (const p of this.list.slice()) {
+      if (p.spawned) { this.remove(p); continue; }
+      for (const h of p.holders.slice()) Grab.release(h, false);
+      p.teleport(p.homePos, p.homeQuat);
+    }
+  },
+  capture() { for (let i = 0; i < this.list.length; i++) this.list[i].capture(); },
+  render(alpha) { for (let i = 0; i < this.list.length; i++) this.list[i].render(alpha); },
+  tick(dt) { for (let i = 0; i < this.list.length; i++) { const p = this.list[i]; if (p.def.tick) p.def.tick(p, dt); } },
+  // Keep things from falling out of the world.
+  rescue() {
+    for (const p of this.list) {
+      const y = p.currPos.y;
+      if (y < -1 || Math.abs(p.currPos.x) > 4 || Math.abs(p.currPos.z) > 4) p.teleport(p.homePos, p.homeQuat);
+    }
+  },
+};
+
+/* ====================================== [INPUT] ===================================== */
+function makeHandInput(side) {
+  return {
+    side, connected: false, tracked: false, source: null, gripObj: null, rayObj: null,
+    trigger: 0, squeeze: 0, sx: 0, sy: 0, a: false, b: false, stickClick: false,
+    thumbTouch: false, indexTouch: false,
+    gripDown: false, gripPressed: false, gripReleased: false,
+    trigDown: false, trigPressed: false, trigReleased: false,
+    aPressed: false, bPressed: false, _a: false, _b: false,
+  };
+}
+const Input = {
+  mode: 'desktop', // 'desktop' | 'xr'
+  hands: { left: makeHandInput('left'), right: makeHandInput('right') },
+  setupXR() {
+    for (let i = 0; i < 2; i++) {
+      const ray = renderer.xr.getController(i), grip = renderer.xr.getControllerGrip(i);
+      rig.add(ray); rig.add(grip);
+      ray.addEventListener('connected', (e) => {
+        const side = e.data && e.data.handedness; if (side !== 'left' && side !== 'right') return;
+        const h = this.hands[side]; h.connected = true; h.source = e.data; h.rayObj = ray; h.gripObj = grip;
+      });
+      ray.addEventListener('disconnected', (e) => {
+        const side = e.data && e.data.handedness; if (side !== 'left' && side !== 'right') return;
+        const h = this.hands[side]; if (h.rayObj === ray) { h.connected = false; h.source = null; h.tracked = false; }
+      });
+    }
+  },
+  // Thresholds with hysteresis produce clean press/release edges.
+  edges(h, grip, trig) {
+    const H = CONFIG.hands;
+    const gd = h.gripDown ? grip > H.gripRelease : grip > H.gripPress;
+    h.gripPressed = gd && !h.gripDown; h.gripReleased = !gd && h.gripDown; h.gripDown = gd;
+    const td = h.trigDown ? trig > H.triggerRelease : trig > H.triggerPress;
+    h.trigPressed = td && !h.trigDown; h.trigReleased = !td && h.trigDown; h.trigDown = td;
+    h.aPressed = h.a && !h._a; h.bPressed = h.b && !h._b; h._a = h.a; h._b = h.b;
+  },
+  update() {
+    if (this.mode !== 'xr') return;
+    for (const side of SIDES) {
+      const h = this.hands[side], gp = h.source && h.source.gamepad;
+      h.tracked = !!(h.connected && h.gripObj && h.gripObj.visible);
+      if (!gp) { h.trigger = h.squeeze = h.sx = h.sy = 0; h.a = h.b = h.thumbTouch = false; this.edges(h, 0, 0); continue; }
+      const B = gp.buttons, A = gp.axes;
+      h.trigger = B[0] ? B[0].value : 0; h.squeeze = B[1] ? B[1].value : 0;
+      const ax = A.length >= 4 ? A[2] : (A[0] || 0), ay = A.length >= 4 ? A[3] : (A[1] || 0);
+      // Radial deadzone, rescaled so movement starts smoothly from zero.
+      const mag = Math.hypot(ax, ay), dz = CONFIG.loco.deadzone;
+      if (mag < dz) { h.sx = 0; h.sy = 0; } else { const k = Math.min(1, (mag - dz) / (1 - dz)) / mag; h.sx = ax * k; h.sy = ay * k; }
+      h.stickClick = !!(B[3] && B[3].pressed);
+      h.a = !!(B[4] && B[4].pressed); h.b = !!(B[5] && B[5].pressed);
+      h.indexTouch = !!(B[0] && B[0].touched);
+      h.thumbTouch = !!((B[3] && B[3].touched) || (B[4] && B[4].touched) || (B[5] && B[5].touched) || (B[6] && B[6].touched));
+      this.edges(h, h.squeeze, h.trigger);
+    }
+  },
+};
+
+/* ====================================== [HANDS] ===================================== */
+// Procedural gloved hands (one skinned mesh each = one draw call), authored in WebXR grip space
+// for the right hand (+X = back of hand, −Z = toward thumb along a held rod, +Y = toward wrist).
+// The left hand is the same model mirrored on X.
+const FINGER_DEFS = [
+  { z: -0.027, y: -0.03, len: [0.042, 0.026, 0.021], r: 0.0092 }, // index
+  { z: -0.008, y: -0.034, len: [0.046, 0.029, 0.022], r: 0.0095 }, // middle
+  { z: 0.011, y: -0.032, len: [0.043, 0.027, 0.021], r: 0.009 },  // ring
+  { z: 0.028, y: -0.026, len: [0.034, 0.021, 0.018], r: 0.0082 }, // pinky
+];
+const THUMB_UP = new THREE.Vector3(-0.2, -0.3, -1).normalize();     // thumb up along the rod
+const THUMB_DOWN = new THREE.Vector3(-0.75, -0.55, -0.45).normalize(); // thumb resting on the face buttons
+const _thumbQUp = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, -1, 0), THUMB_UP);
+const _thumbQDown = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, -1, 0), THUMB_DOWN);
+
+function buildHandModel(color) {
+  const PX = 0.034; // knuckle row / palm plane X
+  const rootBone = new THREE.Bone(); rootBone.position.set(PX, 0.03, 0);
+  const bones = [rootBone], segs = [], fingers = [];
+  // Palm + back of hand as one tapered volume running up into the wrist (no "neck").
+  segs.push({ bone: 0, geo: (() => {
+    const g = new THREE.CapsuleGeometry(0.036, 0.036, 6, 16), p = g.attributes.position;
+    for (let i = 0; i < p.count; i++) { const y = p.getY(i), t = clamp((y + 0.01) / 0.06, 0, 1); p.setZ(i, p.getZ(i) * lerp(1.14, 0.8, t)); p.setX(i, p.getX(i) * lerp(0.42, 0.58, t)); }
+    g.translate(0.002, -0.02, 0); g.computeVertexNormals(); return g; })() });
+  for (const f of FINGER_DEFS) {
+    const chain = []; let parent = rootBone;
+    for (let j = 0; j < 3; j++) {
+      const b = new THREE.Bone();
+      if (j === 0) b.position.set(0, f.y - 0.03, f.z); else b.position.set(0, -f.len[j - 1], 0);
+      parent.add(b); bones.push(b); chain.push(b); parent = b;
+      const r = f.r * (1 - j * 0.08), L = f.len[j];
+      const g = new THREE.CapsuleGeometry(r, L, 4, 10); g.translate(0, -L / 2, 0);
+      segs.push({ bone: bones.length - 1, geo: g });
+    }
+    fingers.push(chain);
+  }
+  const thumb = []; {
+    let parent = rootBone; const lens = [0.03, 0.026, 0.021];
+    for (let j = 0; j < 3; j++) {
+      const b = new THREE.Bone();
+      if (j === 0) { b.position.set(-0.01, 0.004, -0.031); b.quaternion.copy(_thumbQUp); } else b.position.set(0, -lens[j - 1], 0);
+      parent.add(b); bones.push(b); thumb.push(b); parent = b;
+      const g = new THREE.CapsuleGeometry(0.0115 - j * 0.0008, lens[j], 4, 10); g.translate(0, -lens[j] / 2, 0);
+      segs.push({ bone: bones.length - 1, geo: g });
+    }
+  }
+  // Glove cuff ring
+  segs.push({ bone: 0, geo: (() => { const g = new THREE.TorusGeometry(0.03, 0.006, 8, 20); g.rotateX(Math.PI / 2); g.scale(0.7, 1, 0.95); g.translate(0.002, 0.03, 0); return g; })() });
+  rootBone.updateMatrixWorld(true);
+  const geos = segs.map(({ bone, geo }) => {
+    geo = geo.index ? geo.toNonIndexed() : geo;
+    geo.applyMatrix4(bones[bone].matrixWorld);
+    const n = geo.attributes.position.count, si = new Uint16Array(n * 4), sw = new Float32Array(n * 4);
+    for (let i = 0; i < n; i++) { si[i * 4] = bone; sw[i * 4] = 1; }
+    geo.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(si, 4));
+    geo.setAttribute('skinWeight', new THREE.Float32BufferAttribute(sw, 4));
+    return geo;
+  });
+  const merged = mergeGeometries(geos, false);
+  merged.computeVertexNormals();
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.0 });
+  const mesh = new THREE.SkinnedMesh(merged, mat);
+  mesh.add(rootBone);
+  mesh.bind(new THREE.Skeleton(bones));
+  mesh.frustumCulled = false; mesh.castShadow = true;
+  return { mesh, mat, fingers, thumb };
+}
+
+class Hand {
+  constructor(side) {
+    this.side = side; this.sign = side === 'right' ? 1 : -1;
+    this.input = Input.hands[side];
+    const model = buildHandModel(GLOVE_COLORS[settings.glove % GLOVE_COLORS.length]);
+    this.model = model;
+    this.root = new THREE.Group(); this.root.scale.x = this.sign; this.root.add(model.mesh); scene.add(this.root);
+    // Tracking target (controller grip pose in world space)
+    this.targetPos = new THREE.Vector3(); this.targetQuat = new THREE.Quaternion(); this.active = false;
+    this.rayOrigin = new THREE.Vector3(); this.rayDir = new THREE.Vector3(0, 0, -1);
+    // Physics proxy
+    const H = CONFIG.hands;
+    this.body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setGravityScale(0).setCcdEnabled(true).setDominanceGroup(1).setCanSleep(false).setTranslation(0, -5, 0));
+    this.collider = world.createCollider(RAPIER.ColliderDesc.cuboid(0.035, 0.062, 0.05).setTranslation(this.sign * 0.015, 0.0, 0)
+      .setMass(H.handMass).setCollisionGroups(GROUPS.hand).setFriction(1.0), this.body);
+    this.prevPos = new THREE.Vector3(0, -5, 0); this.currPos = new THREE.Vector3(0, -5, 0);
+    this.prevQuat = new THREE.Quaternion(); this.currQuat = new THREE.Quaternion();
+    this.visPos = new THREE.Vector3(); this.visQuat = new THREE.Quaternion();
+    this.colliderOffUntil = 0;
+    // Holding
+    this.held = null; this.offPos = new THREE.Vector3(); this.offQuat = new THREE.Quaternion(); this.localHand = new THREE.Vector3();
+    this.hover = null; this.forceTarget = null; this.forceArmed = null; this.forceIncoming = null; this.forceT = 0; this.forceAuto = false;
+    this.uiHover = false; this.gripTeleport = false;
+    // Velocity history (ring buffer) for throwing & flick detection
+    const N = H.historyFrames;
+    this.histP = Array.from({ length: N }, () => new THREE.Vector3()); this.histQ = Array.from({ length: N }, () => new THREE.Quaternion());
+    this.histT = new Float64Array(N); this.histI = 0; this.histN = 0;
+    this.vel = new THREE.Vector3(); this.angVel = new THREE.Vector3();
+    // Finger curl state
+    this.curlIndex = 0.1; this.curlGrip = 0.1; this.curlThumb = 0;
+    // Pointer laser + cursor
+    this.laser = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ color: 0xffd08a, transparent: true, opacity: 0.75, depthWrite: false }));
+    this.laser.renderOrder = 10; this.laser.visible = false; scene.add(this.laser);
+    this.cursor = new THREE.Mesh(new THREE.RingGeometry(0.006, 0.011, 20), new THREE.MeshBasicMaterial({ color: 0xffd08a, depthTest: false, transparent: true }));
+    this.cursor.renderOrder = 11; this.cursor.visible = false; scene.add(this.cursor);
+  }
+  setGlove(color) { this.model.mat.color.setHex(color); }
+  resetHistory() { this.histN = 0; }
+  pushHistory(t) {
+    const N = this.histP.length; this.histI = (this.histI + 1) % N; this.histN = Math.min(this.histN + 1, N);
+    this.histP[this.histI].copy(this.targetPos); this.histQ[this.histI].copy(this.targetQuat); this.histT[this.histI] = t;
+    // Short-window velocity (≈ last 3 frames) for flick detection
+    if (this.histN >= 3) {
+      const j = (this.histI - 2 + N) % N, dt = t - this.histT[j];
+      if (dt > 1e-4) { this.vel.subVectors(this.targetPos, this.histP[j]).divideScalar(dt); angularVelocity(this.histQ[j], this.targetQuat, dt, this.angVel); }
+    } else { this.vel.set(0, 0, 0); this.angVel.set(0, 0, 0); }
+  }
+  // Averaged velocity over the throw window → outLin, outAng.
+  throwVelocity(outLin, outAng) {
+    const N = this.histP.length, k = Math.min(CONFIG.hands.throwFrames, this.histN - 1);
+    if (k < 1) { outLin.set(0, 0, 0); outAng.set(0, 0, 0); return; }
+    const i0 = this.histI, i1 = (this.histI - k + N) % N, dt = this.histT[i0] - this.histT[i1];
+    if (dt < 1e-4) { outLin.set(0, 0, 0); outAng.set(0, 0, 0); return; }
+    outLin.subVectors(this.histP[i0], this.histP[i1]).divideScalar(dt);
+    angularVelocity(this.histQ[i1], this.histQ[i0], dt, outAng);
+  }
+  // World-space grab point (centre of the curled fingers).
+  grabPoint(out) { return out.set(this.sign * 0.004, -0.008, 0).applyQuaternion(this.targetQuat).add(this.targetPos); }
+  setActive(on) {
+    if (on === this.active) return;
+    this.active = on; this.root.visible = on;
+    if (!on) { if (this.held) Grab.release(this, false); this.collider.setEnabled(false); this.body.setTranslation({ x: 0, y: -5, z: 0 }, false); }
+    else { this.snapBody(); this.colliderOffUntil = Sim.clock + 0.2; }
+  }
+  snapBody() {
+    this.body.setTranslation(this.targetPos, true); this.body.setRotation(this.targetQuat, true);
+    this.body.setLinvel({ x: 0, y: 0, z: 0 }, true); this.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    this.prevPos.copy(this.targetPos); this.currPos.copy(this.targetPos); this.prevQuat.copy(this.targetQuat); this.currQuat.copy(this.targetQuat);
+  }
+  // Physics step: velocity-drive the proxy toward the tracked pose (counters stop it).
+  drive(dt) {
+    if (!this.active) return;
+    const H = CONFIG.hands, want = !this.held && Sim.clock >= this.colliderOffUntil;
+    if (this.collider.isEnabled() !== want) this.collider.setEnabled(want);
+    this.body.translation(_v5); this.body.rotation(_q2);
+    const d = _v5.distanceTo(this.targetPos);
+    if (d > H.snapDistance) { this.snapBody(); return; }
+    _v6.subVectors(this.targetPos, _v5).divideScalar(dt);
+    if (_v6.length() > H.maxLinSpeed) _v6.setLength(H.maxLinSpeed);
+    this.body.setLinvel(_v6, true);
+    angularVelocity(_q2, this.targetQuat, dt, _v7);
+    if (_v7.length() > H.maxAngSpeed) _v7.setLength(H.maxAngSpeed);
+    this.body.setAngvel(_v7, true);
+  }
+  capture() { this.prevPos.copy(this.currPos); this.prevQuat.copy(this.currQuat); this.body.translation(this.currPos); this.body.rotation(this.currQuat); }
+  render(alpha, dt) {
+    if (!this.active) return;
+    if (this.held) {
+      // Hand stays glued to what it holds (held items collide; the hand follows them).
+      const p = this.held;
+      _q1.copy(this.offQuat).invert();
+      this.visQuat.copy(p.renderQuat).multiply(_q1);
+      this.visPos.copy(this.offPos).applyQuaternion(this.visQuat).negate().add(p.renderPos);
+    } else {
+      _v1.lerpVectors(this.prevPos, this.currPos, alpha); _q1.slerpQuaternions(this.prevQuat, this.currQuat, alpha);
+      const tol = CONFIG.hands.visualSnapTol, w = smoothstep(tol, tol * 3, _v1.distanceTo(this.targetPos));
+      this.visPos.lerpVectors(this.targetPos, _v1, w); this.visQuat.slerpQuaternions(this.targetQuat, _q1, w);
+    }
+    this.root.position.copy(this.visPos); this.root.quaternion.copy(this.visQuat);
+    // Finger curls: grip → middle/ring/pinky, trigger → index, thumb touch → thumb.
+    const inp = this.input, held = !!this.held, pointing = this.uiHover && !inp.trigDown;
+    const gT = held ? Math.max(0.78, inp.squeeze) : inp.squeeze;
+    const iT = held ? Math.max(0.72, inp.trigger) : pointing ? 0.02 : inp.trigger > 0.02 ? 0.25 + 0.75 * inp.trigger : inp.indexTouch ? 0.22 : 0.1;
+    const tT = held || inp.thumbTouch ? 1 : 0;
+    const k = Math.min(1, dt * 22);
+    this.curlGrip += (Math.max(0.1, gT) - this.curlGrip) * k; this.curlIndex += (iT - this.curlIndex) * k; this.curlThumb += (tT - this.curlThumb) * k;
+    const F = this.model.fingers;
+    for (let f = 0; f < 4; f++) {
+      const c = f === 0 ? this.curlIndex : this.curlGrip;
+      F[f][0].rotation.set(0, 0, -c * 1.4); F[f][1].rotation.set(0, 0, -c * 1.65); F[f][2].rotation.set(0, 0, -c * 1.1);
+    }
+    const T = this.model.thumb;
+    T[0].quaternion.slerpQuaternions(_thumbQUp, _thumbQDown, this.curlThumb);
+    T[1].rotation.set(this.curlThumb * 0.35, 0, 0); T[2].rotation.set(this.curlThumb * 0.3, 0, 0);
+  }
+  showLaser(origin, dir, len, color, opacity = 0.75) {
+    const L = this.laser;
+    L.visible = true; L.material.color.setHex(color); L.material.opacity = opacity;
+    L.position.copy(origin).addScaledVector(dir, len / 2);
+    L.quaternion.setFromUnitVectors(FWD, dir);
+    L.scale.set(0.0022, 0.0022, len);
+  }
+  showCursor(point, normal) {
+    this.cursor.visible = true; this.cursor.position.copy(point).addScaledVector(normal, 0.002);
+    this.cursor.quaternion.setFromUnitVectors(_v8.set(0, 0, 1), normal);
+  }
+}
+let HANDS = [];
+const Hands = {
+  left: null, right: null,
+  init() { this.left = new Hand('left'); this.right = new Hand('right'); HANDS = [this.left, this.right]; },
+  get(side) { return side === 'left' ? this.left : this.right; },
+  dominant() { return this.get(settings.dominant); },
+  offhand() { return this.get(settings.dominant === 'right' ? 'left' : 'right'); },
+  // Read tracked poses into targets (called after locomotion so the rig is final for this frame).
+  updateTargets() {
+    const t = Sim.clock;
+    if (Input.mode !== 'xr') Desktop.computeHandTargets();
+    for (const h of HANDS) {
+      const inp = h.input;
+      if (Input.mode === 'xr') {
+        const ok = inp.tracked;
+        if (ok) {
+          inp.gripObj.matrixWorld.decompose(h.targetPos, h.targetQuat, _v1);
+          inp.rayObj.matrixWorld.decompose(h.rayOrigin, _q1, _v1);
+          h.rayDir.set(0, 0, -1).applyQuaternion(_q1);
+        }
+        h.setActive(ok);
+      } // desktop targets are written by Desktop.update()
+      if (h.active) h.pushHistory(t);
+      h.laser.visible = false; h.cursor.visible = false;
+    }
+  },
+  onRigMoved() { for (const h of HANDS) h.resetHistory(); },
+  drive(dt) { for (const h of HANDS) h.drive(dt); Grab.driveHeld(dt); },
+  capture() { for (const h of HANDS) if (h.active) h.capture(); },
+  render(alpha, dt) { for (const h of HANDS) h.render(alpha, dt); },
+};
+
+/* ====================================== [GRAB] ====================================== */
+const Grab = {
+  _pt: new THREE.Vector3(), _best: null, _bestScore: Infinity,
+  // Overlap callback (preallocated — no per-frame closures): keeps the best-scoring prop.
+  _visit(col) {
+    const prop = Phys.propByCollider.get(col.handle), p = Grab._pt;
+    if (prop && prop.alive) {
+      const proj = col.projectPoint(p, true);
+      const d = proj ? (proj.isInside ? 0 : Math.hypot(proj.point.x - p.x, proj.point.y - p.y, proj.point.z - p.z)) : 1;
+      const score = d + prop.def.size * 0.08 + (prop.holders.length && !prop.def.twoHanded ? 0.02 : 0);
+      if (score < Grab._bestScore) { Grab._bestScore = score; Grab._best = prop; }
+    }
+    return true;
+  },
+  // Nearest grabbable overlapping the hand's grab sphere (includes items held by the other hand).
+  findNear(h) {
+    h.grabPoint(this._pt);
+    this._best = null; this._bestScore = Infinity;
+    world.intersectionsWithShape(this._pt, _rq, Phys.grabBall, this._visit, undefined, GROUPS.qGrab);
+    return this._best;
+  },
+  // True if some hand (other than `except`) is hovering / targeting this prop.
+  isTargeted(p, except) {
+    for (let i = 0; i < HANDS.length; i++) { const h = HANDS[i]; if (h !== except && (h.hover === p || h.forceTarget === p || h.forceArmed === p)) return true; }
+    return p === Desktop.hoverProp;
+  },
+  attach(h, prop) {
+    if (h.held) this.release(h, false);
+    if (prop.holders.length) {
+      const other = prop.holders[0];
+      if (!(prop.def.twoHanded && prop.holders.length === 1 && other !== h)) this.release(other, false);
+    }
+    const H = CONFIG.hands;
+    h.held = prop; h.forceArmed = h.forceIncoming = null; prop.incoming = null;
+    // Grab point in the prop's local frame decides snap-to-grip vs contact grab.
+    h.grabPoint(_v1); _q1.copy(prop.renderQuat).invert();
+    _v2.subVectors(_v1, prop.renderPos).applyQuaternion(_q1);
+    const snap = prop.def.grip && prop.holders.length === 0 && _v2.length() < prop.def.grip.zone;
+    if (snap) {
+      h.offPos.set(0, 0, 0);
+      h.offQuat.setFromAxisAngle(_v3.set(1, 0, 0), H.toolPitchDeg * DEG);
+    } else {
+      // Contact grab: keep the prop exactly where it is relative to the hand.
+      _q2.copy(h.targetQuat).invert();
+      h.offQuat.copy(_q2).multiply(prop.renderQuat);
+      h.offPos.subVectors(prop.renderPos, h.targetPos).applyQuaternion(_q2);
+    }
+    // Hand position expressed in the prop frame (for two-handed solving).
+    _q1.copy(h.offQuat).invert(); h.localHand.copy(h.offPos).applyQuaternion(_q1).negate();
+    prop.holders.push(h);
+    if (prop.holders.length === 1) {
+      prop.setGroups(GROUPS.held); prop.body.setGravityScale(0, true); prop.body.wakeUp();
+      this.computeTarget(prop); if (snap) prop.renderPos.copy(prop.targetPos), prop.renderQuat.copy(prop.targetQuat);
+    }
+    prop.setHighlight(false);
+    h.collider.setEnabled(false);
+    haptic(h.side, 0.35, 22);
+    AudioSys.grab(prop.renderPos);
+  },
+  release(h, doThrow = true) {
+    const prop = h.held; if (!prop) return;
+    h.held = null; h.colliderOffUntil = Sim.clock + CONFIG.hands.proxyReenableDelay;
+    const i = prop.holders.indexOf(h); if (i >= 0) prop.holders.splice(i, 1);
+    if (prop.holders.length) {
+      // Remaining hand re-anchors to the prop's current pose (no jump).
+      const r = prop.holders[0]; _q2.copy(r.targetQuat).invert();
+      r.offQuat.copy(_q2).multiply(prop.renderQuat); r.offPos.subVectors(prop.renderPos, r.targetPos).applyQuaternion(_q2);
+      _q1.copy(r.offQuat).invert(); r.localHand.copy(r.offPos).applyQuaternion(_q1).negate();
+      return;
+    }
+    prop.hasTarget = false;
+    prop.setGroups(GROUPS.prop); prop.body.setGravityScale(1, true); prop.body.wakeUp();
+    if (doThrow) {
+      h.throwVelocity(_v1, _v2);
+      prop.body.worldCom(_v3); _v4.subVectors(_v3, h.targetPos);
+      _v1.add(_v6.crossVectors(_v2, _v4)).multiplyScalar(CONFIG.hands.throwScale);
+      prop.body.setLinvel(_v1, true); prop.body.setAngvel(_v2, true);
+    }
+    haptic(h.side, 0.15, 12);
+  },
+  // Desired pose of a held prop from one or two hands.
+  computeTarget(prop) {
+    const A = prop.holders[0];
+    prop.targetQuat.copy(A.targetQuat).multiply(A.offQuat);
+    prop.targetPos.copy(A.offPos).applyQuaternion(A.targetQuat).add(A.targetPos);
+    if (prop.holders.length > 1) {
+      const B = prop.holders[1];
+      _v1.subVectors(B.localHand, A.localHand);
+      if (_v1.length() > 0.08) {
+        _v1.normalize().applyQuaternion(prop.targetQuat);          // where A alone thinks B's grip lies
+        _v2.subVectors(B.targetPos, A.targetPos).normalize();      // where it actually is
+        _q1.setFromUnitVectors(_v1, _v2);
+        prop.targetQuat.premultiply(_q1);
+        _v3.addVectors(A.localHand, B.localHand).multiplyScalar(0.5).applyQuaternion(prop.targetQuat);
+        prop.targetPos.addVectors(A.targetPos, B.targetPos).multiplyScalar(0.5).sub(_v3);
+      }
+    }
+    prop.hasTarget = true;
+  },
+  // Physics step: velocity-drive held props toward their targets.
+  driveHeld(dt) {
+    const H = CONFIG.hands;
+    for (const prop of Props.list) {
+      if (!prop.holders.length) continue;
+      prop.body.translation(_v5); prop.body.rotation(_q2);
+      if (_v5.distanceTo(prop.targetPos) > H.heldSnapDistance) { prop.teleport(prop.targetPos, prop.targetQuat); continue; }
+      _v6.subVectors(prop.targetPos, _v5).divideScalar(dt);
+      if (_v6.length() > H.heldMaxLinSpeed) _v6.setLength(H.heldMaxLinSpeed);
+      prop.body.setLinvel(_v6, true);
+      angularVelocity(_q2, prop.targetQuat, dt, _v7);
+      if (_v7.length() > H.heldMaxAngSpeed) _v7.setLength(H.heldMaxAngSpeed);
+      prop.body.setAngvel(_v7, true);
+    }
+  },
+  // Per-frame grab logic for each hand (after targets and UI).
+  update(dt) {
+    const H = CONFIG.hands;
+    for (const h of HANDS) {
+      const inp = h.input;
+      if (!h.active) { if (h.hover) { h.hover.setHighlight(false); h.hover = null; } continue; }
+      // Held props follow the hand(s)
+      if (h.held) {
+        if (h.held.holders[0] === h) this.computeTarget(h.held);
+        if (inp.gripReleased) this.release(h, true);
+        else if (inp.trigPressed && !h.uiHover && h.held.def.use) h.held.def.use(h.held, h);
+        continue;
+      }
+      // Hover highlight for near grab
+      const near = h.uiHover || Input.mode !== 'xr' ? null : this.findNear(h);
+      if (near !== h.hover) { if (h.hover && !this.isTargeted(h.hover, h)) h.hover.setHighlight(false); h.hover = near; }
+      if (near) near.setHighlight(true);
+      if (inp.gripPressed && !h.uiHover) {
+        if (near) { this.attach(h, near); continue; }
+        if (h.forceTarget) { h.forceArmed = h.forceTarget; haptic(h.side, 0.2, 15); }
+        else if (settings.gripTriggerTeleport) h.gripTeleport = true;
+      }
+      if (inp.gripReleased) { h.forceArmed = null; if (!h.forceAuto) h.forceIncoming = null; h.gripTeleport = false; }
+      this.updateForce(h, dt);
+    }
+    // Clear stale highlights
+    for (let i = 0; i < Props.list.length; i++) { const p = Props.list[i]; if (p.highlighted && !this.isTargeted(p, null)) p.setHighlight(false); }
+  },
+  // Force grab: point, hold grip, flick → the item arcs into your hand.
+  updateForce(h, dt) {
+    const H = CONFIG.hands, inp = h.input;
+    h.forceTarget = null;
+    if (h.forceIncoming) {
+      const p = h.forceIncoming; h.forceT += dt;
+      h.grabPoint(_v1);
+      if (!p.alive || p.holders.length || h.forceT > 1.6) { h.forceIncoming = null; h.forceAuto = false; }
+      else if (p.renderPos.distanceTo(_v1) < H.forceCatchDist && (inp.gripDown || h.forceAuto)) { h.forceAuto = false; this.attach(h, p); }
+      return;
+    }
+    if (!settings.forceGrab || h.uiHover || h.hover || h.gripTeleport) return;
+    if (h.forceArmed) {
+      const p = h.forceArmed; p.setHighlight(true);
+      _v1.subVectors(Loco.headPos, h.targetPos).normalize();
+      const towardHead = h.vel.dot(_v1), up = h.vel.y;
+      if (towardHead > H.forceFlickSpeed || up > H.forceFlickSpeed * 1.2 || h.angVel.length() > H.forceFlickAngular) this.launch(h, p);
+      return;
+    }
+    if (inp.gripDown || Input.mode !== 'xr') return;
+    const hit = Phys.castRay(h.rayOrigin, h.rayDir, H.forceRange, GROUPS.qPoint, _v2, null);
+    if (hit) {
+      const p = Phys.propByCollider.get(hit.collider.handle);
+      if (p && !p.holders.length) { h.forceTarget = p; p.setHighlight(true); h.showLaser(h.rayOrigin, h.rayDir, h.rayOrigin.distanceTo(_v2), 0xffb35c, 0.3); }
+    }
+  },
+  launch(h, p, auto = false) {
+    const T = CONFIG.hands.forceFlightTime;
+    h.grabPoint(_v1); _v1.y += 0.05;
+    _v2.subVectors(_v1, p.renderPos).divideScalar(T); _v2.y += 0.5 * -CONFIG.physics.gravity * T;
+    p.body.wakeUp(); p.body.setLinvel(_v2, true); p.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    h.forceArmed = null; h.forceIncoming = p; h.forceT = 0; h.forceAuto = auto;
+    haptic(h.side, 0.5, 30); AudioSys.whoosh();
+  },
+};
+
+/* =================================== [LOCOMOTION] =================================== */
+const STICK_FUNCS = [
+  { v: 'move', l: 'Move' }, { v: 'teleport', l: 'Teleport' }, { v: 'turn', l: 'Turn' }, { v: 'teleturn', l: 'Tele+Turn' }, { v: 'none', l: 'None' },
+];
+// Resolve per-hand stick functions into non-conflicting axis roles.
+// Each stick axis is owned by at most one function; if both hands are movement and nobody turns,
+// turning is auto-assigned to the X axis of a hand where it is free.
+function resolveLayout(s) {
+  const role = (f) => ({ move: f === 'move' ? 'xy' : null, teleport: f === 'teleport' || f === 'teleturn', turn: f === 'turn' || f === 'teleturn', auto: false });
+  const L = role(s.stickL), R = role(s.stickR), notes = [];
+  const isMove = (r) => !!(r.move || r.teleport);
+  if (isMove(L) && isMove(R) && !L.turn && !R.turn) {
+    const dom = s.dominant === 'left' ? L : R, off = dom === L ? R : L;
+    // Prefer a teleport hand (its X axis is free while not aiming), dominant hand first.
+    const pick = [dom, off].find((r) => r.teleport && !r.move);
+    if (pick) { pick.turn = true; pick.auto = true; }
+    else { dom.move = 'y'; dom.turn = true; dom.auto = true; } // both smooth move: dominant hand keeps fwd/back, X becomes turn
+    notes.push('Turning auto-assigned to a free X axis');
+  }
+  const describe = (r) => {
+    const parts = [];
+    if (r.move === 'xy') parts.push('Move (Y fwd/back, X strafe)');
+    if (r.move === 'y') parts.push('Move (Y fwd/back)');
+    if (r.teleport) parts.push('Teleport (push fwd, rotate to face)');
+    if (r.turn) parts.push((r.teleport ? 'Turn (flick X)' : 'Turn (X)') + (r.auto ? ' [auto]' : ''));
+    return parts.length ? parts.join(' + ') : 'None';
+  };
+  return { left: L, right: R, notes, text: { left: describe(L), right: describe(R) } };
+}
+
+const Loco = {
+  layout: null,
+  headPos: new THREE.Vector3(), headQuat: new THREE.Quaternion(), headYaw: 0,
+  vel: new THREE.Vector3(),
+  aim: { left: null, right: null },
+  turnReady: { left: true, right: true },
+  fade: { active: false, t: 0, done: false, target: new THREE.Vector3(), yaw: 0 },
+  vignette: 0, snapFlash: 0,
+  capsule: null, kcc: null,
+  arcPts: [], arcN: 0,
+  init() {
+    const P = CONFIG.player, total = P.capsuleTop - P.capsuleBottom, halfH = total / 2 - P.radius;
+    this.capsuleY = P.capsuleBottom + total / 2;
+    this.capsule = world.createCollider(RAPIER.ColliderDesc.capsule(halfH, P.radius).setTranslation(P.spawn.x, this.capsuleY, P.spawn.z).setCollisionGroups(GROUPS.player));
+    this.kcc = world.createCharacterController(0.01);
+    this.kcc.setUp({ x: 0, y: 1, z: 0 }); this.kcc.setSlideEnabled(true); this.kcc.setApplyImpulsesToDynamicBodies(false);
+    const mkAim = () => ({ active: false, via: 'stick', valid: false, point: new THREE.Vector3(), yaw: 0 });
+    this.aim.left = mkAim(); this.aim.right = mkAim();
+    for (let i = 0; i <= CONFIG.loco.arcMaxSegments; i++) this.arcPts.push(new THREE.Vector3());
+    // Arc dots (instanced) + reticle (ring + facing arrow)
+    this.arcMat = new THREE.MeshBasicMaterial({ color: 0x7fe3ff, transparent: true, opacity: 0.9, depthWrite: false });
+    this.arcMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(0.011, 8, 6), this.arcMat, CONFIG.loco.arcMaxSegments * 2);
+    this.arcMesh.count = 0; this.arcMesh.frustumCulled = false; this.arcMesh.renderOrder = 5; scene.add(this.arcMesh);
+    this.reticle = new THREE.Group();
+    const ring = new THREE.Mesh(new THREE.RingGeometry(0.2, 0.24, 40), this.arcMat); ring.rotation.x = -Math.PI / 2;
+    const inner = new THREE.Mesh(new THREE.RingGeometry(0.02, 0.035, 20), this.arcMat); inner.rotation.x = -Math.PI / 2;
+    const arrowShape = new THREE.Shape(); arrowShape.moveTo(0, 0.36); arrowShape.lineTo(0.08, 0.24); arrowShape.lineTo(-0.08, 0.24); arrowShape.closePath();
+    const arrow = new THREE.Mesh(new THREE.ShapeGeometry(arrowShape), this.arcMat); arrow.rotation.x = -Math.PI / 2;
+    this.reticle.add(ring, inner, arrow); this.reticle.position.y = 0.01; this.reticle.visible = false; scene.add(this.reticle);
+    // Comfort vignette + blink: one inverted sphere around the head, alpha by angle from forward.
+    this.vigMat = new THREE.ShaderMaterial({
+      uniforms: { uVig: { value: 0 }, uFade: { value: 0 } },
+      vertexShader: 'varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+      fragmentShader: `uniform float uVig; uniform float uFade; varying vec3 vP;
+        void main(){ float ang = acos(clamp(dot(normalize(vP), vec3(0.0,0.0,-1.0)), -1.0, 1.0));
+          float clearA = mix(1.35, 0.42, uVig); float a = smoothstep(clearA, clearA + 0.3, ang) * step(0.001, uVig);
+          gl_FragColor = vec4(0.0, 0.0, 0.0, max(a, uFade)); }`,
+      transparent: true, depthTest: false, depthWrite: false, side: THREE.BackSide,
+    });
+    this.vigMesh = new THREE.Mesh(new THREE.SphereGeometry(0.25, 24, 16), this.vigMat);
+    this.vigMesh.renderOrder = 1000; this.vigMesh.frustumCulled = false; this.vigMesh.visible = false;
+    camera.add(this.vigMesh);
+    this.relayout();
+  },
+  relayout() { this.layout = resolveLayout(settings); UI.dirty = true; },
+  updateHead() {
+    camera.matrixWorld.decompose(this.headPos, this.headQuat, _v1);
+    this.headYaw = yawOf(this.headQuat);
+  },
+  rotateAroundHead(angle) {
+    this.updateHead();
+    const hx = this.headPos.x, hz = this.headPos.z, c = Math.cos(angle), s = Math.sin(angle);
+    const dx = rig.position.x - hx, dz = rig.position.z - hz;
+    rig.position.x = hx + dx * c + dz * s; rig.position.z = hz - dx * s + dz * c;
+    rig.rotation.y += angle;
+    rig.updateMatrixWorld(true); this.updateHead(); Hands.onRigMoved();
+  },
+  teleportTo(point, yaw) {
+    this.updateHead();
+    this.rotateAroundHead(yaw - this.headYaw);
+    rig.position.x += point.x - this.headPos.x; rig.position.z += point.z - this.headPos.z;
+    rig.updateMatrixWorld(true); this.updateHead(); this.syncCapsule(); Hands.onRigMoved();
+    AudioSys.whoosh();
+  },
+  syncCapsule() { _r1.x = this.headPos.x; _r1.y = this.capsuleY; _r1.z = this.headPos.z; this.capsule.setTranslation(_r1); },
+  requestTeleport(point, yaw) {
+    if (!settings.blink) { this.teleportTo(point, yaw); return; }
+    const f = this.fade; f.active = true; f.t = 0; f.done = false; f.target.copy(point); f.yaw = yaw;
+  },
+  snapTurn(dir) {
+    this.rotateAroundHead(-dir * settings.snapAngle * DEG);
+    if (settings.vignetteTurn) this.snapFlash = CONFIG.loco.snapVignetteMs / 1000;
+    AudioSys.snap();
+  },
+  // Integrate a ballistic arc; returns true if it lands on walkable floor. Fills arcPts/arcN, point.
+  computeArc(origin, dir, speed, outPoint) {
+    const L = CONFIG.loco, dt = L.arcStep;
+    _v1.copy(dir).multiplyScalar(speed); _v2.copy(origin);
+    this.arcPts[0].copy(origin); let n = 0, valid = false, hitSomething = false;
+    for (let i = 0; i < L.arcMaxSegments; i++) {
+      _v3.copy(_v2).addScaledVector(_v1, dt); _v3.y -= 0.5 * L.arcGravity * dt * dt; _v1.y -= L.arcGravity * dt;
+      _v4.subVectors(_v3, _v2); const len = _v4.length(); _v4.divideScalar(len);
+      const hit = Phys.castRay(_v2, _v4, len, GROUPS.qStatic, _v5, _v6);
+      if (hit) {
+        this.arcPts[++n].copy(_v5); hitSomething = true;
+        valid = hit.collider.handle === Phys.floorHandle && _v6.y > 0.7 && Nav.walkable(_v5.x, _v5.z);
+        outPoint.copy(_v5);
+        break;
+      }
+      this.arcPts[++n].copy(_v3); _v2.copy(_v3);
+      if (_v3.y < -0.5) break;
+    }
+    this.arcN = n;
+    return valid && hitSomething;
+  },
+  _dotCount: 0,
+  drawArc(valid) {
+    // Dots evenly spaced along the polyline, animated so the arc "flows" toward the target.
+    const spacing = 0.09, phase = (Sim.clock * 0.35) % spacing;
+    let dist = spacing - phase, k = this._dotCount;
+    const max = this.arcMesh.instanceMatrix.count;
+    for (let i = 0; i < this.arcN && k < max; i++) {
+      const a = this.arcPts[i], b = this.arcPts[i + 1], seg = a.distanceTo(b);
+      while (dist <= seg && k < max) { _v7.lerpVectors(a, b, dist / seg); _m1.makeTranslation(_v7.x, _v7.y, _v7.z); this.arcMesh.setMatrixAt(k++, _m1); dist += spacing; }
+      dist -= seg;
+    }
+    this._dotCount = k;
+    this.arcMat.color.setHex(valid ? 0x7fe3ff : 0xff5a4a);
+  },
+  // Main per-frame locomotion update.
+  update(dt) {
+    const L = CONFIG.loco;
+    this.updateHead();
+    this._dotCount = 0; this.reticle.visible = false;
+    // Blink fade state machine (fade out → move → fade in)
+    const f = this.fade;
+    let fadeA = 0;
+    if (f.active) {
+      const half = L.blinkMs / 2000; f.t += dt;
+      if (!f.done && f.t >= half) { this.teleportTo(f.target, f.yaw); f.done = true; }
+      fadeA = f.t < half ? f.t / half : Math.max(0, 1 - (f.t - half) / half);
+      if (f.t >= half * 2) f.active = false;
+    }
+    let moveX = 0, moveY = 0, moveYawBasis = this.headYaw, turnRate = 0;
+    const xr = Input.mode === 'xr';
+    if (xr) {
+      for (const side of SIDES) {
+        const inp = Input.hands[side], role = this.layout[side], h = Hands.get(side), aim = this.aim[side];
+        if (!inp.tracked) { aim.active = false; continue; }
+        const sx = inp.sx, sy = inp.sy, mag = Math.hypot(sx, sy);
+        // --- Teleport (stick) ---
+        if (role.teleport) {
+          if (!aim.active && -sy > L.teleportEngage && Math.abs(sx) < -sy) { aim.active = true; aim.via = 'stick'; }
+          if (aim.active && aim.via === 'stick') {
+            const ctrlYaw = Math.atan2(-h.rayDir.x, -h.rayDir.z);
+            aim.valid = this.computeArc(h.rayOrigin, h.rayDir, settings.arcVelocity, aim.point);
+            if (mag > L.teleportFacingMin) aim.yaw = ctrlYaw - Math.atan2(sx, -sy);
+            this.drawAim(aim);
+            if (mag < L.teleportRelease) { aim.active = false; if (aim.valid) this.requestTeleport(aim.point, aim.yaw); }
+          }
+        }
+        // --- Grip + trigger pointing teleport (either hand, empty hand) ---
+        if (h.gripTeleport && !h.held) {
+          if (inp.trigDown) {
+            aim.active = true; aim.via = 'grip';
+            aim.valid = this.computeArc(h.rayOrigin, h.rayDir, settings.arcVelocity, aim.point);
+            aim.yaw = this.headYaw; this.drawAim(aim);
+          } else if (aim.active && aim.via === 'grip') { aim.active = false; if (aim.valid) this.requestTeleport(aim.point, aim.yaw); }
+        } else if (aim.active && aim.via === 'grip') { aim.active = false; if (aim.valid) this.requestTeleport(aim.point, aim.yaw); } // releasing either button jumps
+        const aiming = aim.active;
+        // --- Turning ---
+        if (role.turn && !aiming) {
+          if (settings.turnType === 'snap') {
+            if (this.turnReady[side] && Math.abs(sx) > L.turnEngage && Math.abs(sx) > Math.abs(sy)) { this.snapTurn(Math.sign(sx)); this.turnReady[side] = false; }
+            if (Math.abs(sx) < L.turnReset) this.turnReady[side] = true;
+          } else if (Math.abs(sx) > 0.1 && (role.move !== 'xy')) turnRate += -sx * settings.smoothTurnSpeed * DEG;
+        }
+        // --- Smooth move ---
+        if (role.move && !aiming) {
+          const fwd = -sy, str = role.move === 'xy' ? sx : 0;
+          if (Math.abs(fwd) + Math.abs(str) > 0) {
+            moveX += str; moveY += fwd;
+            if (settings.moveRelative === 'controller') moveYawBasis = Math.atan2(-h.rayDir.x, -h.rayDir.z);
+          }
+        }
+      }
+    } else {
+      const d = Desktop;
+      moveY = (d.keys.has('KeyW') ? 1 : 0) - (d.keys.has('KeyS') ? 1 : 0);
+      moveX = (d.keys.has('KeyD') ? 1 : 0) - (d.keys.has('KeyA') ? 1 : 0);
+      const aim = this.aim[settings.dominant];
+      if (d.tHeld) {
+        aim.active = true; aim.via = 'desktop';
+        _v8.set(0, -0.15, 0).add(this.headPos);
+        _q3.copy(this.headQuat); const dir = _v7.set(0, 0, -1).applyQuaternion(_q3);
+        aim.valid = this.computeArc(_v8, dir, settings.arcVelocity, aim.point); aim.yaw = this.headYaw;
+        this.drawAim(aim);
+      } else if (aim.active && aim.via === 'desktop') { aim.active = false; if (aim.valid) this.requestTeleport(aim.point, aim.yaw); }
+    }
+    // Apply smooth turn
+    if (turnRate !== 0) this.rotateAroundHead(turnRate * dt);
+    // Apply smooth move (capsule vs counters/walls, sliding)
+    const mlen = Math.hypot(moveX, moveY);
+    if (mlen > 1) { moveX /= mlen; moveY /= mlen; }
+    const speed = xr ? settings.moveSpeed : CONFIG.desktop.walkSpeed;
+    const fx = -Math.sin(moveYawBasis), fz = -Math.cos(moveYawBasis), rx = Math.cos(moveYawBasis), rz = -Math.sin(moveYawBasis);
+    const tvx = (fx * moveY + rx * moveX) * speed, tvz = (fz * moveY + rz * moveX) * speed;
+    const k = Math.min(1, dt * L.smoothMoveAccel);
+    this.vel.x += (tvx - this.vel.x) * k; this.vel.z += (tvz - this.vel.z) * k;
+    this.syncCapsule();
+    if (this.vel.x * this.vel.x + this.vel.z * this.vel.z > 1e-6) {
+      _r2.x = this.vel.x * dt; _r2.y = 0; _r2.z = this.vel.z * dt;
+      this.kcc.computeColliderMovement(this.capsule, _r2, undefined, GROUPS.qStatic);
+      const m = this.kcc.computedMovement();
+      rig.position.x += m.x; rig.position.z += m.z;
+      rig.updateMatrixWorld(true); this.updateHead(); this.syncCapsule();
+    }
+    // Vignette intensity
+    const vs = settings.vignetteStrength;
+    let vig = 0;
+    if (settings.vignetteMove) vig = Math.max(vig, vs * clamp(Math.hypot(this.vel.x, this.vel.z) / 2.0, 0, 1));
+    if (settings.vignetteTurn) vig = Math.max(vig, vs * clamp(Math.abs(turnRate) / (120 * DEG), 0, 1));
+    if (this.snapFlash > 0) { this.snapFlash -= dt; vig = Math.max(vig, vs); }
+    this.vignette += (vig - this.vignette) * Math.min(1, dt * 12);
+    const vOut = xr ? this.vignette * CONFIG.loco.vignetteMax : 0;
+    this.vigMat.uniforms.uVig.value = vOut; this.vigMat.uniforms.uFade.value = fadeA;
+    this.vigMesh.visible = vOut > 0.01 || fadeA > 0.001;
+    this.arcMesh.count = this._dotCount; this.arcMesh.instanceMatrix.needsUpdate = true;
+    // Height / seated offset (XR); desktop eye height handled by Desktop.
+    if (xr) rig.position.y = settings.heightOffset;
+  },
+  drawAim(aim) {
+    this.drawArc(aim.valid);
+    if (this.arcN > 0) {
+      this.reticle.visible = true;
+      this.reticle.position.set(aim.point.x, aim.point.y + 0.01, aim.point.z);
+      this.reticle.rotation.y = aim.yaw;
+      this.reticle.scale.setScalar(aim.valid ? 1 : 0.6);
+    }
+  },
+  recalibrateHeight() {
+    if (Input.mode !== 'xr') { toast('Height recalibration applies in VR'); return; }
+    settings.heightOffset = clamp(settings.targetEyeHeight - camera.position.y, -0.6, 1.0);
+    settingsChanged(); toast(`Height offset ${settings.heightOffset >= 0 ? '+' : ''}${settings.heightOffset.toFixed(2)} m`);
+  },
+  setSeated(on) {
+    settings.seated = on;
+    if (on) this.recalibrateHeight(); else { settings.heightOffset = 0; settingsChanged(); }
+  },
+  recenter() {
+    this.updateHead();
+    const sp = CONFIG.player.spawn;
+    this.rotateAroundHead(sp.yaw - this.headYaw);
+    rig.position.x += sp.x - this.headPos.x; rig.position.z += sp.z - this.headPos.z;
+    rig.updateMatrixWorld(true); this.updateHead(); this.syncCapsule(); Hands.onRigMoved();
+  },
+};
+
+/* ======================================== [UI] ====================================== */
+// World-space wrist menu drawn with Canvas2D (immediate-mode widgets, redrawn only when dirty).
+const UI = {
+  open: false, mode: 'wrist', tab: 'Comfort', dirty: true,
+  widgets: [], hoverId: null, drag: null, confirmReset: 0,
+  spawnCat: 'Tools', spawnQty: 1, peekT: 0, pointerHand: null, _cands: [null, null],
+  _inv: new THREE.Matrix4(), _n: new THREE.Vector3(), _c: new THREE.Vector3(), _hit: new THREE.Vector3(),
+  init() {
+    const S = CONFIG.ui.canvas;
+    this.canvas = Tex.canvas(S, S); this.ctx = this.canvas.getContext('2d');
+    this.tex = Tex.finish(this.canvas, { aniso: 4 }); this.tex.wrapS = this.tex.wrapT = THREE.ClampToEdgeWrapping;
+    this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: this.tex, transparent: true, toneMapped: false }));
+    this.mesh.renderOrder = 20; this.mesh.visible = false; scene.add(this.mesh);
+  },
+  toggleFloat() {
+    if (this.open && this.mode === 'float') { this.open = false; }
+    else { this.open = true; this.mode = 'float'; this.placeFloat(); }
+    this.dirty = true; AudioSys.uiClick();
+    if (Input.mode === 'desktop') Desktop.onMenu(this.open);
+  },
+  placeFloat() {
+    Loco.updateHead();
+    const d = CONFIG.ui.floatDistance, yaw = Loco.headYaw;
+    this.mesh.position.set(Loco.headPos.x - Math.sin(yaw) * d, Loco.headPos.y - 0.12, Loco.headPos.z - Math.cos(yaw) * d);
+    this.mesh.rotation.set(-0.12, yaw, 0, 'YXZ');
+    this.mesh.scale.setScalar(CONFIG.ui.floatSize);
+  },
+  // Wrist placement: above the palm of the menu hand, facing out of the palm.
+  placeWrist(h) {
+    // Palm normal in grip space is −X for the right hand, +X for the left.
+    _v1.set(-h.sign, 0, 0).applyQuaternion(h.targetQuat); // palm normal (panel +Z)
+    // Keep text upright: panel +Y is world-up projected onto the panel plane (fingertip direction as fallback).
+    _v2.set(0, 1, 0).addScaledVector(_v1, -_v1.y);
+    if (_v2.lengthSq() < 0.05) { _v2.set(0, -1, 0).applyQuaternion(h.targetQuat); _v2.addScaledVector(_v1, -_v2.dot(_v1)); }
+    _v2.normalize();
+    _v3.crossVectors(_v2, _v1);                            // panel +X
+    _m1.makeBasis(_v3, _v2, _v1);
+    this.mesh.quaternion.setFromRotationMatrix(_m1);
+    this.mesh.position.copy(h.targetPos).addScaledVector(_v1, 0.07).addScaledVector(_v2, 0.09);
+    this.mesh.scale.setScalar(CONFIG.ui.wristSize);
+  },
+  // Ray → canvas pixel coordinates (or null).
+  hitTest(origin, dir, outPx) {
+    if (!this.mesh.visible) return -1;
+    this.mesh.updateMatrixWorld(true);
+    this._n.set(0, 0, 1).applyQuaternion(this.mesh.quaternion);
+    const denom = dir.dot(this._n); if (denom > -1e-4) return -1;
+    const t = this._c.copy(this.mesh.position).sub(origin).dot(this._n) / denom;
+    if (t < 0 || t > CONFIG.ui.laserMax) return -1;
+    this._hit.copy(origin).addScaledVector(dir, t);
+    this._inv.copy(this.mesh.matrixWorld).invert();
+    _v8.copy(this._hit).applyMatrix4(this._inv);
+    if (Math.abs(_v8.x) > 0.5 || Math.abs(_v8.y) > 0.5) return -1;
+    const S = CONFIG.ui.canvas; outPx.x = (_v8.x + 0.5) * S; outPx.y = (0.5 - _v8.y) * S;
+    return t;
+  },
+  widgetAt(x, y) { for (let i = this.widgets.length - 1; i >= 0; i--) { const w = this.widgets[i]; if (x >= w.x && x <= w.x + w.w && y >= w.y && y <= w.y + w.h) return w; } return null; },
+  _px: { x: 0, y: 0 },
+  // Pointer from a hand (XR) or the mouse (desktop): handles hover, click, slider drags.
+  pointer(origin, dir, down, pressed, released, hand) {
+    const t = this.hitTest(origin, dir, this._px);
+    if (t < 0) { if (this.drag && released) this.drag = null; return false; }
+    const w = this.widgetAt(this._px.x, this._px.y), id = w ? w.id : null;
+    if (id !== this.hoverId) { this.hoverId = id; this.dirty = true; if (id && hand) haptic(hand.side, 0.08, 8); }
+    if (pressed && w) {
+      if (w.slider) this.drag = w; else if (w.onClick) { w.onClick(); AudioSys.uiClick(); if (hand) haptic(hand.side, 0.25, 15); }
+      this.dirty = true;
+    }
+    if (this.drag && down) {
+      const s = this.drag.slider, u = clamp((this._px.x - this.drag.x) / this.drag.w, 0, 1);
+      let v = s.min + u * (s.max - s.min); v = Math.round(v / s.step) * s.step; v = Number(v.toFixed(4));
+      if (v !== s.value) { s.onChange(v); this.dirty = true; if (hand) haptic(hand.side, 0.05, 6); }
+    }
+    if (released) this.drag = null;
+    if (hand) { hand.showLaser(origin, dir, t, 0xffd08a); _v7.set(0, 0, 1).applyQuaternion(this.mesh.quaternion); hand.showCursor(this._hit, _v7); }
+    return true;
+  },
+  update(dt) {
+    for (const h of HANDS) h.uiHover = false;
+    if (Input.mode === 'xr') {
+      const menuHand = Hands.offhand(), ptrHand = Hands.dominant();
+      const mi = menuHand.input;
+      if (mi.bPressed && menuHand.active) this.toggleFloat();
+      // Wrist peek: palm toward face + looking at it.
+      if (!(this.open && this.mode === 'float') && menuHand.active) {
+        _v1.set(-menuHand.sign, 0, 0).applyQuaternion(menuHand.targetQuat);
+        _v2.subVectors(Loco.headPos, menuHand.targetPos).normalize();
+        _v3.set(0, 0, -1).applyQuaternion(Loco.headQuat);
+        const facing = _v1.dot(_v2), gaze = -_v3.dot(_v2);
+        const want = this.open ? (facing > CONFIG.ui.peekFacing - 0.25 && gaze > CONFIG.ui.peekGaze - 0.2) : (facing > CONFIG.ui.peekFacing && gaze > CONFIG.ui.peekGaze);
+        if (want !== this.open) { this.peekT += dt; if (this.peekT > (this.open ? CONFIG.ui.peekCloseDelay : CONFIG.ui.peekOpenDelay)) { this.open = want; this.mode = 'wrist'; this.peekT = 0; this.dirty = true; if (want) haptic(menuHand.side, 0.15, 12); } }
+        else this.peekT = 0;
+      } else if (!menuHand.active && this.mode === 'wrist') this.open = false;
+      this.mesh.visible = this.open;
+      if (this.open) {
+        if (this.mode === 'wrist') this.placeWrist(menuHand);
+        const cands = this._cands; cands[0] = ptrHand; cands[1] = this.mode === 'float' ? menuHand : null;
+        for (let ci = 0; ci < 2; ci++) {
+          const h = cands[ci]; if (!h || !h.active || h.held) continue;
+          const i = h.input;
+          if (this.pointer(h.rayOrigin, h.rayDir, i.trigDown, i.trigPressed, i.trigReleased, h)) { h.uiHover = true; break; }
+        }
+      }
+    } else {
+      this.mesh.visible = this.open;
+      if (this.open) Desktop.menuPointer();
+    }
+    if (this.confirmReset > 0) { this.confirmReset -= dt; if (this.confirmReset <= 0) this.dirty = true; }
+    if (this.dirty && this.open) { this.draw(); this.dirty = false; }
+  },
+
+  /* ---------- drawing helpers ---------- */
+  C: { bg: 'rgba(28,21,16,0.96)', card: '#2c2119', line: 'rgba(224,164,88,0.35)', text: '#f4e9d8', muted: '#b7a58f', accent: '#e0a458', hover: '#3d2f24', danger: '#c8553d', on: '#6fbf73' },
+  label(t, x, y, size = 30, color = this.C.text, align = 'left', weight = 600) { const c = this.ctx; c.font = `${weight} ${size}px system-ui, sans-serif`; c.fillStyle = color; c.textAlign = align; c.textBaseline = 'middle'; c.fillText(t, x, y); },
+  rrect(x, y, w, h, r, fill, stroke) { const c = this.ctx; c.beginPath(); c.roundRect(x, y, w, h, r); if (fill) { c.fillStyle = fill; c.fill(); } if (stroke) { c.strokeStyle = stroke; c.lineWidth = 2; c.stroke(); } },
+  button(id, x, y, w, h, text, onClick, { active = false, danger = false, size = 28 } = {}) {
+    const hov = this.hoverId === id;
+    this.rrect(x, y, w, h, 12, active ? this.C.accent : danger ? (hov ? '#e0664c' : this.C.danger) : hov ? this.C.hover : this.C.card, active ? null : this.C.line);
+    this.label(text, x + w / 2, y + h / 2 + 1, size, active ? '#2a1a0c' : this.C.text, 'center', 700);
+    this.widgets.push({ id, x, y, w, h, onClick });
+  },
+  segment(id, x, y, w, h, opts, value, onChange, size = 24) {
+    const n = opts.length, sw = w / n;
+    opts.forEach((o, i) => this.button(`${id}:${o.v}`, x + i * sw + 2, y, sw - 4, h, o.l, () => onChange(o.v), { active: o.v === value, size }));
+  },
+  toggle(id, x, y, w, text, value, onChange) {
+    const hov = this.hoverId === id, h = 56;
+    this.rrect(x, y, w, h, 12, hov ? this.C.hover : this.C.card, this.C.line);
+    this.label(text, x + 18, y + h / 2, 26);
+    this.rrect(x + w - 92, y + 12, 74, 32, 16, value ? this.C.on : '#5a4a3e');
+    this.ctx.beginPath(); this.ctx.arc(value ? x + w - 34 : x + w - 76, y + 28, 12, 0, 7); this.ctx.fillStyle = '#fff'; this.ctx.fill();
+    this.widgets.push({ id, x, y, w, h, onClick: () => onChange(!value) });
+  },
+  slider(id, x, y, w, text, value, min, max, step, fmt, onChange) {
+    this.label(text, x, y + 16, 26, this.C.text);
+    this.label(fmt(value), x + w, y + 16, 26, this.C.accent, 'right', 700);
+    const ty = y + 50, u = (value - min) / (max - min);
+    this.rrect(x, ty - 6, w, 12, 6, '#4a3a2e');
+    this.rrect(x, ty - 6, Math.max(12, w * u), 12, 6, this.C.accent);
+    this.ctx.beginPath(); this.ctx.arc(x + w * u, ty, this.hoverId === id ? 20 : 16, 0, 7); this.ctx.fillStyle = '#fff'; this.ctx.fill();
+    this.widgets.push({ id, x: x - 10, y: ty - 26, w: w + 20, h: 52, slider: { value, min, max, step, onChange } });
+  },
+  set(key, v) { settings[key] = v; if (['stickL', 'stickR', 'dominant'].includes(key)) Loco.relayout(); settingsChanged(); },
+
+  draw() {
+    const c = this.ctx, S = CONFIG.ui.canvas, C = this.C;
+    this.widgets.length = 0;
+    c.clearRect(0, 0, S, S);
+    this.rrect(4, 4, S - 8, S - 8, 36, C.bg, C.line);
+    this.label('MISE EN PLACE', 44, 58, 38, C.text, 'left', 800);
+    this.label('VR', 44 + c.measureText('MISE EN PLACE').width + 14, 58, 38, C.accent, 'left', 800);
+    this.label(Input.mode === 'xr' ? (this.mode === 'wrist' ? 'Wrist menu · Y/B pins it' : 'Pinned · Y/B closes') : 'M / Tab closes', S - 44, 58, 22, C.muted, 'right', 500);
+    const tabs = ['Settings', 'Comfort', 'Spawn', 'Recipes', 'Level'];
+    tabs.forEach((t, i) => this.button('tab:' + t, 36 + i * 191, 96, 183, 64, t, () => { this.tab = t; }, { active: this.tab === t, size: 28 }));
+    const y0 = 190;
+    if (this.tab === 'Comfort') this.drawComfort(y0);
+    else if (this.tab === 'Settings') this.drawSettings(y0);
+    else if (this.tab === 'Spawn') this.drawSpawn(y0);
+    else if (this.tab === 'Recipes') this.drawRecipes(y0);
+    else this.drawLevel(y0);
+    this.tex.needsUpdate = true;
+  },
+  drawComfort(y) {
+    const s = settings, X = 44, W = S_UI_W;
+    this.label('Left stick', X, y + 22, 26, this.C.muted); this.segment('stickL', X + 170, y, W - 170, 48, STICK_FUNCS, s.stickL, (v) => this.set('stickL', v), 22);
+    y += 60;
+    this.label('Right stick', X, y + 22, 26, this.C.muted); this.segment('stickR', X + 170, y, W - 170, 48, STICK_FUNCS, s.stickR, (v) => this.set('stickR', v), 22);
+    y += 62;
+    const lay = Loco.layout;
+    this.rrect(X, y, W, 92, 12, 'rgba(224,164,88,0.1)', this.C.line);
+    this.label('L: ' + lay.text.left, X + 16, y + 26, 22, this.C.text, 'left', 500);
+    this.label('R: ' + lay.text.right, X + 16, y + 64, 22, this.C.text, 'left', 500);
+    y += 108;
+    const half = (W - 20) / 2, X2 = X + half + 20;
+    this.label('Turn', X, y + 22, 26, this.C.muted); this.segment('turnType', X + 90, y, half - 90, 48, [{ v: 'snap', l: 'Snap' }, { v: 'smooth', l: 'Smooth' }], s.turnType, (v) => this.set('turnType', v));
+    this.label('Snap', X2, y + 22, 26, this.C.muted); this.segment('snap', X2 + 80, y, half - 80, 48, [15, 30, 45, 90].map((a) => ({ v: a, l: a + '°' })), s.snapAngle, (v) => this.set('snapAngle', v), 22);
+    y += 64;
+    this.slider('smoothTurn', X, y, half, 'Smooth turn', s.smoothTurnSpeed, 45, 180, 5, (v) => v + '°/s', (v) => this.set('smoothTurnSpeed', v));
+    this.slider('moveSpeed', X2, y, half, 'Move speed', s.moveSpeed, 1, 3, 0.1, (v) => v.toFixed(1) + ' m/s', (v) => this.set('moveSpeed', v));
+    y += 84;
+    this.label('Move dir', X, y + 22, 24, this.C.muted); this.segment('moveRel', X + 130, y, half - 130, 48, [{ v: 'head', l: 'Head' }, { v: 'controller', l: 'Hand' }], s.moveRelative, (v) => this.set('moveRelative', v));
+    this.label('Main hand', X2, y + 22, 24, this.C.muted); this.segment('dom', X2 + 140, y, half - 140, 48, [{ v: 'left', l: 'Left' }, { v: 'right', l: 'Right' }], s.dominant, (v) => {
+      if (v !== s.dominant) { const t = s.stickL; s.stickL = s.stickR; s.stickR = t; } this.set('dominant', v); });
+    y += 62;
+    this.toggle('vigMove', X, y, half, 'Move vignette', s.vignetteMove, (v) => this.set('vignetteMove', v));
+    this.toggle('vigTurn', X2, y, half, 'Turn vignette', s.vignetteTurn, (v) => this.set('vignetteTurn', v));
+    y += 64;
+    this.toggle('blink', X, y, half, 'Teleport blink', s.blink, (v) => this.set('blink', v));
+    this.toggle('gtt', X2, y, half, 'Grip+Trigger TP', s.gripTriggerTeleport, (v) => this.set('gripTriggerTeleport', v));
+    y += 70;
+    this.slider('vigStr', X, y, half, 'Vignette', s.vignetteStrength, 0.1, 1, 0.05, (v) => Math.round(v * 100) + '%', (v) => this.set('vignetteStrength', v));
+    this.slider('arcVel', X2, y, half, 'Arc reach', s.arcVelocity, 4, 12, 0.5, (v) => v.toFixed(1) + ' m/s', (v) => this.set('arcVelocity', v));
+    y += 84;
+    this.toggle('seated', X, y, half, 'Seated mode', s.seated, (v) => { Loco.setSeated(v); this.dirty = true; });
+    this.slider('eye', X2, y - 8, half, 'Eye height', s.targetEyeHeight, 1.3, 2.0, 0.01, (v) => v.toFixed(2) + ' m', (v) => this.set('targetEyeHeight', v));
+    y += 74;
+    this.button('recal', X, y, (W - 40) / 3, 58, 'Recalibrate height', () => Loco.recalibrateHeight(), { size: 22 });
+    this.button('recenter', X + (W - 40) / 3 + 20, y, (W - 40) / 3, 58, 'Recenter', () => Loco.recenter(), { size: 22 });
+    this.label(`Offset ${s.heightOffset >= 0 ? '+' : ''}${s.heightOffset.toFixed(2)} m`, X + W, y + 29, 22, this.C.muted, 'right', 500);
+  },
+  drawSettings(y) {
+    const s = settings, X = 44, W = S_UI_W, half = (W - 20) / 2, X2 = X + half + 20;
+    this.slider('vol', X, y, half, 'Master volume', s.masterVolume, 0, 1, 0.05, (v) => Math.round(v * 100) + '%', (v) => this.set('masterVolume', v));
+    this.slider('amb', X2, y, half, 'Room ambience', s.ambience, 0, 1, 0.05, (v) => Math.round(v * 100) + '%', (v) => this.set('ambience', v));
+    y += 90;
+    this.toggle('haptics', X, y, half, 'Haptics', s.haptics, (v) => this.set('haptics', v));
+    this.slider('hapStr', X2, y - 8, half, 'Haptic strength', s.hapticStrength, 0.2, 1, 0.05, (v) => Math.round(v * 100) + '%', (v) => this.set('hapticStrength', v));
+    y += 78;
+    this.toggle('force', X, y, half, 'Force grab', s.forceGrab, (v) => this.set('forceGrab', v));
+    this.toggle('shadows', X2, y, half, 'Shadows', s.shadows, (v) => this.set('shadows', v));
+    y += 70;
+    this.toggle('perf', X, y, half, 'Perf HUD', s.perfHud, (v) => this.set('perfHud', v));
+    this.label('Refresh', X2, y + 28, 26, this.C.muted);
+    this.segment('hz', X2 + 120, y + 4, half - 120, 48, [{ v: 72, l: '72 Hz' }, { v: 90, l: '90 Hz' }], s.refresh, (v) => { this.set('refresh', v); XRSession.applyRefresh(); });
+    y += 80;
+    this.label('Glove colour', X, y + 24, 26, this.C.muted);
+    GLOVE_COLORS.forEach((col, i) => {
+      const bx = X + 200 + i * 86, id = 'glove' + i;
+      this.rrect(bx, y, 70, 50, 12, '#' + col.toString(16).padStart(6, '0'), s.glove === i ? this.C.accent : this.C.line);
+      if (s.glove === i) { this.ctx.lineWidth = 5; this.ctx.strokeStyle = this.C.accent; this.ctx.stroke(); }
+      this.widgets.push({ id, x: bx, y, w: 70, h: 50, onClick: () => this.set('glove', i) });
+    });
+    y += 84;
+    this.button('resetSettings', X, y, 300, 58, 'Reset settings', () => { Object.assign(settings, DEFAULT_SETTINGS); Loco.relayout(); settingsChanged(); }, { size: 24 });
+    y += 90;
+    this.label('Controls', X, y, 26, this.C.accent, 'left', 700);
+    const lines = ['Grip: grab (big items take two hands). Trigger: use held item / click UI.',
+      'Point at a far item, hold grip and flick your wrist to pull it in.',
+      'Hold grip + trigger on an empty hand to point-teleport (if enabled).',
+      'Palm toward your face opens this menu. Y/B pins it in front of you.'];
+    lines.forEach((t, i) => this.label(t, X, y + 40 + i * 36, 21, this.C.muted, 'left', 500));
+  },
+  drawSpawn(y) {
+    const X = 44, W = S_UI_W, cats = ['Tools', 'Cookware', 'Produce', 'Tableware', 'Misc'];
+    this.segment('cat', X, y, W, 52, cats.map((c) => ({ v: c, l: c })), this.spawnCat, (v) => { this.spawnCat = v; }, 24);
+    y += 70;
+    this.label('Quantity', X, y + 24, 26, this.C.muted);
+    this.segment('qty', X + 140, y, 300, 48, [1, 3, 5].map((q) => ({ v: q, l: '×' + q })), this.spawnQty, (v) => { this.spawnQty = v; });
+    y += 70;
+    const keys = Object.keys(PROP_DEFS).filter((k) => PROP_DEFS[k].cat === this.spawnCat);
+    const cols = 3, bw = (W - (cols - 1) * 14) / cols, bh = 70;
+    keys.forEach((k, i) => {
+      const cx = X + (i % cols) * (bw + 14), cy = y + Math.floor(i / cols) * (bh + 14);
+      this.button('spawn:' + k, cx, cy, bw, bh, PROP_DEFS[k].name, () => Spawner.spawnInFront(k, this.spawnQty), { size: 22 });
+    });
+    this.label('Items appear in front of you. Food starts cooking in Milestone 2.', X, 950, 21, this.C.muted, 'left', 500);
+  },
+  drawRecipes(y) {
+    const X = 44;
+    this.label('Recipe book', X, y + 10, 30, this.C.accent, 'left', 700);
+    this.label('Step-by-step guidance and ghost hints unlock once the cooking', X, y + 52, 22, this.C.muted, 'left', 500);
+    this.label('simulation lands (M2–M5). Target dishes:', X, y + 84, 22, this.C.muted, 'left', 500);
+    const dishes = ['Pan-seared steak, butter baste', 'Smash burger', 'Double-fried fries', 'Crispy-skin salmon', 'Fried chicken', 'Roast chicken',
+      'Classic omelette', 'Scrambled eggs', 'Fried eggs', 'Spaghetti al pomodoro', 'Carbonara', 'Fried rice', 'Stir-fry', 'Grilled cheese',
+      'Neapolitan pizza', 'Pancakes', 'Choc-chip cookies', 'Bread loaf', 'Mashed potatoes', 'French onion soup', 'Guacamole', 'Caesar salad', 'Tacos', 'Caramel sauce'];
+    dishes.forEach((d, i) => this.label(`${i + 1}. ${d}`, X + (i % 2) * 470, y + 132 + Math.floor(i / 2) * 50, 22, this.C.text, 'left', 500));
+  },
+  drawLevel(y) {
+    const X = 44, W = S_UI_W, half = (W - 20) / 2;
+    this.label('Mode', X, y + 24, 26, this.C.muted);
+    this.button('modeSandbox', X + 100, y, 260, 52, 'Sandbox', () => {}, { active: true, size: 24 });
+    this.button('modeChallenge', X + 380, y, 360, 52, 'Challenge (M5)', () => toast('Challenge mode arrives in Milestone 5'), { size: 24 });
+    y += 84;
+    this.button('cleanup', X, y, half, 64, 'Clean up kitchen', () => { Props.cleanUp(); toast('Spawned items removed, tools returned'); }, { size: 26 });
+    const confirming = this.confirmReset > 0;
+    this.button('reset', X + half + 20, y, half, 64, confirming ? 'Tap again to confirm' : 'Reset kitchen', () => {
+      if (this.confirmReset > 0) { this.confirmReset = 0; Props.resetKitchen(); Loco.recenter(); toast('Kitchen reset'); }
+      else this.confirmReset = 3;
+    }, { danger: true, size: 26 });
+    y += 100;
+    this.button('recenter2', X, y, half, 64, 'Return to start', () => Loco.recenter(), { size: 26 });
+    y += 110;
+    this.label('Milestone 1 build', X, y, 28, this.C.accent, 'left', 700);
+    const lines = ['Kitchen, physics hands, grabbing & throwing, two-handed items,', 'force grab, full per-hand locomotion, wrist menu, desktop mode.',
+      'Next (M2): tools & cutting, stovetop, thermal simulation for steak,', 'egg and onion, sizzle audio, cut-face doneness gradient.'];
+    lines.forEach((t, i) => this.label(t, X, y + 44 + i * 36, 22, this.C.muted, 'left', 500));
+    this.label(`Props: ${Props.list.length}`, X + W, y, 22, this.C.muted, 'right', 500);
+  },
+};
+const S_UI_W = CONFIG.ui.canvas - 88;
+
+const Spawner = {
+  spawnInFront(key, qty) {
+    Loco.updateHead();
+    const yaw = Loco.headYaw, fx = -Math.sin(yaw), fz = -Math.cos(yaw), rx = Math.cos(yaw), rz = -Math.sin(yaw);
+    for (let i = 0; i < qty; i++) {
+      const off = (i - (qty - 1) / 2) * 0.16;
+      const pos = new THREE.Vector3(Loco.headPos.x + fx * 0.5 + rx * off, Math.max(Loco.headPos.y - 0.3, 1.05) + i * 0.02, Loco.headPos.z + fz * 0.5 + rz * off);
+      Props.spawn(key, pos, new THREE.Quaternion().setFromAxisAngle(UP, yaw), true);
+    }
+    UI.dirty = true;
+  },
+};
+
+/* ======================================= [SIM] ====================================== */
+// Fixed-step simulation clock. The thermal/cooking model (M2+) plugs in here; M1 runs timers.
+const Sim = {
+  clock: 0,     // s — real time since boot (unscaled)
+  time: 0,      // s — simulated kitchen time
+  acc: 0, timeScale: 1,
+  update(dt) {
+    const step = 1 / CONFIG.sim.hz;
+    this.acc += dt * this.timeScale;
+    let n = 0;
+    while (this.acc >= step && n < 50) { this.time += step; Props.tick(step); this.acc -= step; n++; }
+  },
+};
+
+/* ===================================== [DESKTOP] ==================================== */
+const Desktop = {
+  keys: new Set(), locked: false, lmb: false, lmbMenu: false, rDown: false, crouch: false, tHeld: false,
+  pitch: 0, holdDist: CONFIG.desktop.holdRest, hoverProp: null,
+  mouseNDC: new THREE.Vector2(), raycaster: new THREE.Raycaster(),
+  _menuPress: false, _menuRelease: false, _fwd: new THREE.Vector3(), _right: new THREE.Vector3(), _up: new THREE.Vector3(),
+  _pitchQ: new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), 40 * DEG), // controller-like wrist pitch
+  init() {
+    const el = renderer.domElement, D = CONFIG.desktop;
+    el.addEventListener('click', () => { if (Input.mode === 'desktop' && Main.started && !UI.open && !this.locked) el.requestPointerLock(); });
+    document.addEventListener('pointerlockchange', () => {
+      this.locked = document.pointerLockElement === el;
+      $('crosshair').style.display = this.locked ? 'block' : 'none';
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (Input.mode !== 'desktop') return;
+      if (this.locked) {
+        if (this.rDown && Hands.dominant().held) { this.rotateHeld(e.movementX, e.movementY); return; }
+        rig.rotation.y -= e.movementX * D.mouseSens;
+        this.pitch = clamp(this.pitch - e.movementY * D.mouseSens, -1.45, 1.45);
+      } else this.mouseNDC.set((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
+    });
+    el.addEventListener('mousedown', (e) => {
+      if (Input.mode !== 'desktop' || !Main.started) return;
+      if (UI.open && !this.locked) { if (e.button === 0) { this._menuPress = true; this.lmbMenu = true; } return; }
+      if (!this.locked) return;
+      if (e.button === 0) this.lmbDown();
+      if (e.button === 2) this.rmbDown();
+    });
+    window.addEventListener('mouseup', (e) => {
+      if (e.button === 0) { if (this.lmbMenu) { this.lmbMenu = false; this._menuRelease = true; } if (this.lmb) this.lmbUp(); }
+    });
+    el.addEventListener('contextmenu', (e) => e.preventDefault());
+    el.addEventListener('wheel', (e) => { if (Input.mode === 'desktop') this.holdDist = clamp(this.holdDist - Math.sign(e.deltaY) * 0.08, D.holdMin, D.holdMax); }, { passive: true });
+    window.addEventListener('keydown', (e) => {
+      if (Input.mode !== 'desktop' || !Main.started) return;
+      if (e.code === 'Tab') e.preventDefault();
+      if (e.repeat) return;
+      this.keys.add(e.code);
+      const n = e.code.startsWith('Digit') ? Number(e.code.slice(5)) : -1;
+      if (n >= 1 && n <= 9) this.swapTool(n - 1);
+      else if (n === 0) { const h = Hands.dominant(); if (h.held) Grab.release(h, false); }
+      switch (e.code) {
+        case 'KeyM': case 'Tab': UI.toggleFloat(); break;
+        case 'KeyP': settings.perfHud = !settings.perfHud; settingsChanged(); break;
+        case 'KeyQ': Loco.snapTurn(-1); break;
+        case 'KeyE': Loco.snapTurn(1); break;
+        case 'KeyC': this.crouch = !this.crouch; toast(this.crouch ? 'Crouching' : 'Standing', 900); break;
+        case 'KeyT': this.tHeld = true; break;
+        case 'KeyR': this.rDown = true; break;
+        case 'KeyF': this.forceGrab(); break;
+      }
+    });
+    window.addEventListener('keyup', (e) => {
+      this.keys.delete(e.code);
+      if (e.code === 'KeyT') this.tHeld = false;
+      if (e.code === 'KeyR') this.rDown = false;
+    });
+    window.addEventListener('blur', () => { this.keys.clear(); this.tHeld = false; this.rDown = false; });
+  },
+  onMenu(open) { if (open && this.locked) document.exitPointerLock(); },
+  update() {
+    if (Input.mode !== 'desktop') return;
+    const eye = this.crouch ? 1.0 : settings.targetEyeHeight;
+    camera.position.set(0, lerp(camera.position.y || eye, eye, 0.2), 0);
+    camera.rotation.set(this.pitch, 0, 0, 'YXZ');
+    rig.position.y = 0;
+  },
+  // Desktop "hands": dominant hand floats in front of the view (grabs at the crosshair), off-hand rests low-left.
+  computeHandTargets() {
+    Loco.updateHead();
+    const hp = Loco.headPos, hq = Loco.headQuat;
+    this._fwd.set(0, 0, -1).applyQuaternion(hq); this._right.set(1, 0, 0).applyQuaternion(hq); this._up.set(0, 1, 0).applyQuaternion(hq);
+    const dom = Hands.dominant(), off = Hands.offhand(), s = dom.sign;
+    const held = !!dom.held, dist = held ? this.holdDist : CONFIG.desktop.holdRest, tuck = UI.open ? 0.22 : 0; // tuck hands away while the menu is open
+    dom.targetPos.copy(hp).addScaledVector(this._fwd, dist).addScaledVector(this._right, s * (held ? 0.04 : 0.16)).addScaledVector(this._up, (held ? -0.06 : -0.17) - tuck);
+    dom.targetQuat.copy(hq).multiply(this._pitchQ);
+    dom.rayOrigin.copy(hp); dom.rayDir.copy(this._fwd);
+    off.targetPos.copy(hp).addScaledVector(this._fwd, 0.36).addScaledVector(this._right, -s * 0.2).addScaledVector(this._up, -0.26 - tuck);
+    off.targetQuat.copy(hq).multiply(this._pitchQ);
+    off.rayOrigin.copy(hp); off.rayDir.copy(this._fwd);
+    dom.setActive(true); off.setActive(true);
+    // Crosshair hover highlight
+    let hover = null;
+    if (!held && !UI.open) {
+      const hit = Phys.castRay(hp, this._fwd, CONFIG.desktop.reach, GROUPS.qPoint, _v1, null);
+      if (hit) { const p = Phys.propByCollider.get(hit.collider.handle); if (p && !p.holders.length) hover = p; }
+    }
+    if (hover !== this.hoverProp) { if (this.hoverProp) this.hoverProp.setHighlight(false); this.hoverProp = hover; }
+    if (hover) hover.setHighlight(true);
+    if (!!hover !== this._hot) { this._hot = !!hover; $('crosshair').classList.toggle('hot', this._hot); }
+  },
+  lmbDown() {
+    this.lmb = true;
+    const h = Hands.dominant(); if (h.held) return;
+    Loco.updateHead();
+    const fwd = _v2.set(0, 0, -1).applyQuaternion(Loco.headQuat);
+    const hit = Phys.castRay(Loco.headPos, fwd, CONFIG.desktop.reach, GROUPS.qPoint, _v1, null);
+    if (!hit) return;
+    const p = Phys.propByCollider.get(hit.collider.handle); if (!p) return;
+    // Put the hand where the crosshair touches the item, then grab at that contact point.
+    this.holdDist = clamp(hit.timeOfImpact, CONFIG.desktop.holdMin, CONFIG.desktop.holdMax);
+    h.targetQuat.copy(Loco.headQuat).multiply(this._pitchQ);
+    _v3.set(h.sign * 0.004, -0.008, 0).applyQuaternion(h.targetQuat);
+    h.targetPos.copy(_v1).sub(_v3);
+    h.snapBody(); h.resetHistory();
+    Grab.attach(h, p);
+  },
+  lmbUp() { this.lmb = false; const h = Hands.dominant(); if (h.held) Grab.release(h, true); },
+  rmbDown() { const h = Hands.dominant(); if (h.held && h.held.def.use) h.held.def.use(h.held, h); },
+  rotateHeld(dx, dy) {
+    const h = Hands.dominant(); if (!h.held) return;
+    _q2.copy(h.targetQuat).invert();
+    _v1.set(0, 1, 0).applyQuaternion(Loco.headQuat).applyQuaternion(_q2);
+    _q1.setFromAxisAngle(_v1, dx * 0.008); h.offQuat.premultiply(_q1); h.offPos.applyQuaternion(_q1);
+    _v1.set(1, 0, 0).applyQuaternion(Loco.headQuat).applyQuaternion(_q2);
+    _q1.setFromAxisAngle(_v1, dy * 0.008); h.offQuat.premultiply(_q1); h.offPos.applyQuaternion(_q1);
+    _q1.copy(h.offQuat).invert(); h.localHand.copy(h.offPos).applyQuaternion(_q1).negate();
+  },
+  swapTool(i) {
+    const key = TOOL_HOTKEYS[i], h = Hands.dominant(); if (!key) return;
+    if (h.held) { if (h.held.key === key) return; Grab.release(h, false); }
+    let best = null, bd = Infinity;
+    for (const p of Props.list) if (p.key === key && !p.holders.length) { const d = p.renderPos.distanceTo(h.targetPos); if (d < bd) { bd = d; best = p; } }
+    _q1.copy(h.targetQuat).multiply(_q2.setFromAxisAngle(_v1.set(1, 0, 0), CONFIG.hands.toolPitchDeg * DEG));
+    if (!best) best = Props.spawn(key, h.targetPos.clone(), _q1.clone(), true);
+    else best.teleport(h.targetPos, _q1);
+    best.renderPos.copy(h.targetPos); best.renderQuat.copy(_q1);
+    Grab.attach(h, best);
+    toast(PROP_DEFS[key].name, 900);
+  },
+  forceGrab() {
+    const h = Hands.dominant(); if (h.held || !settings.forceGrab) return;
+    Loco.updateHead();
+    const fwd = _v2.set(0, 0, -1).applyQuaternion(Loco.headQuat);
+    const hit = Phys.castRay(Loco.headPos, fwd, CONFIG.hands.forceRange, GROUPS.qPoint, _v1, null);
+    const p = hit && Phys.propByCollider.get(hit.collider.handle);
+    if (p && !p.holders.length) { this.holdDist = CONFIG.desktop.holdRest; Grab.launch(h, p, true); }
+  },
+  menuPointer() {
+    this.raycaster.setFromCamera(this.mouseNDC, camera);
+    UI.pointer(this.raycaster.ray.origin, this.raycaster.ray.direction, this.lmbMenu, this._menuPress, this._menuRelease, null);
+    this._menuPress = false; this._menuRelease = false;
+  },
+};
+
+/* ===================================== [PERFHUD] ==================================== */
+const PerfHUD = {
+  init() {
+    this.canvas = Tex.canvas(256, 128); this.ctx = this.canvas.getContext('2d');
+    this.tex = Tex.finish(this.canvas); this.tex.wrapS = this.tex.wrapT = THREE.ClampToEdgeWrapping;
+    this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.16, 0.08), new THREE.MeshBasicMaterial({ map: this.tex, transparent: true, depthTest: false, toneMapped: false }));
+    this.mesh.position.set(-0.13, -0.1, -0.5); this.mesh.renderOrder = 1001; this.mesh.visible = settings.perfHud;
+    camera.add(this.mesh);
+    this.t = 0; this.frames = 0; this.worst = 0;
+  },
+  setVisible(v) { if (this.mesh) this.mesh.visible = v; },
+  update(dt) {
+    this.frames++; this.t += dt; this.worst = Math.max(this.worst, dt);
+    if (this.t < 0.5 || !this.mesh.visible) { if (this.t >= 0.5) { this.t = 0; this.frames = 0; this.worst = 0; } return; }
+    const fps = this.frames / this.t, c = this.ctx;
+    c.clearRect(0, 0, 256, 128); c.fillStyle = 'rgba(15,10,8,0.78)'; c.beginPath(); c.roundRect(0, 0, 256, 128, 14); c.fill();
+    c.font = 'bold 30px ui-monospace, monospace'; c.fillStyle = fps >= 71 ? '#8f8' : fps >= 60 ? '#fd6' : '#f77'; c.fillText(`${fps.toFixed(0)} fps`, 12, 36);
+    c.font = '18px ui-monospace, monospace'; c.fillStyle = '#eee';
+    c.fillText(`worst ${(this.worst * 1000).toFixed(1)} ms`, 140, 34);
+    c.fillText(`draws ${Main.calls}  tris ${(Main.tris / 1000).toFixed(0)}k`, 12, 68);
+    c.fillText(`props ${Props.list.length}  bodies ${world.bodies.len()}`, 12, 96);
+    c.fillText(`phys ${CONFIG.physics.hz}Hz  sim ${CONFIG.sim.hz}Hz`, 12, 120);
+    this.tex.needsUpdate = true;
+    this.t = 0; this.frames = 0; this.worst = 0;
+  },
+};
+
+/* ===================================== [XR SESSION] ================================= */
+const XRSession = {
+  session: null,
+  async enter() {
+    AudioSys.init();
+    try {
+      const session = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking', 'layers'] });
+      this.session = session;
+      await renderer.xr.setSession(session);
+      renderer.xr.setFoveation(CONFIG.render.foveation);
+      this.applyRefresh();
+    } catch (e) { console.error(e); setStatus('Could not start VR: ' + (e.message || e), true); }
+  },
+  applyRefresh() {
+    const s = this.session;
+    try {
+      if (s && s.supportedFrameRates && s.updateTargetFrameRate) {
+        const want = settings.refresh, rates = Array.from(s.supportedFrameRates);
+        if (rates.includes(want)) s.updateTargetFrameRate(want).catch(() => {});
+      }
+    } catch (e) { /* optional API */ }
+  },
+  onStart() {
+    Input.mode = 'xr'; Main.started = true;
+    if (document.pointerLockElement) document.exitPointerLock();
+    camera.position.set(0, 0, 0); camera.rotation.set(0, 0, 0);
+    $('overlay').classList.add('hidden'); $('hint').style.display = 'none'; $('crosshair').style.display = 'none';
+    for (const h of HANDS) { if (h.held) Grab.release(h, false); h.setActive(false); }
+    UI.open = false;
+  },
+  onEnd() {
+    this.session = null; Input.mode = 'desktop';
+    for (const side of SIDES) Input.hands[side].tracked = false;
+    for (const h of HANDS) if (h.held) Grab.release(h, false);
+    rig.position.y = 0; Desktop.pitch = 0;
+    $('overlay').classList.remove('hidden');
+  },
+};
+
+/* ====================================== [MAIN] ====================================== */
+const Main = { last: performance.now(), physAcc: 0, started: false, calls: 0, tris: 0, stepIndex: 0, rescueT: 0 };
+const PHYS_DT = 1 / CONFIG.physics.hz;
+
+function onContactForce(e) {
+  const c1 = e.collider1(), c2 = e.collider2(), f = e.totalForceMagnitude();
+  const p1 = Phys.propByCollider.get(c1), p2 = Phys.propByCollider.get(c2);
+  const prop = p1 || p2; if (!prop) return;
+  const otherHandle = p1 ? c2 : c1, otherProp = p1 ? p2 : null;
+  const fresh = Main.stepIndex - prop.lastContactStep > 3;
+  prop.lastContactStep = Main.stepIndex;
+  if (otherProp) otherProp.lastContactStep = Main.stepIndex;
+  if (!fresh) return;
+  const dv = (f * PHYS_DT) / prop.mass;           // m/s — velocity change this step
+  if (dv < 0.35 || Sim.clock - prop.lastSoundT < CONFIG.audio.impactCooldown) return;
+  prop.lastSoundT = Sim.clock;
+  const s = clamp((dv - 0.3) / 3, 0, 1);
+  let mat = prop.def.sound;
+  const other = otherProp ? otherProp.def.sound : Phys.surfaceByCollider.get(otherHandle);
+  if (mat === 'produce' && (other === 'metal' || other === 'ceramic')) mat = other;
+  AudioSys.impact(prop.renderPos, mat, s);
+  for (const h of prop.holders) haptic(h.side, 0.2 + s * 0.8, 18 + s * 30);
+  if (otherProp) for (const h of otherProp.holders) haptic(h.side, 0.2 + s * 0.6, 18 + s * 20);
+  for (const h of HANDS) if (h.collider.handle === otherHandle) haptic(h.side, 0.1 + s * 0.5, 12);
+}
+function physicsStep(dt) {
+  Hands.drive(dt);
+  world.step(eventQueue);
+  Main.stepIndex++;
+  eventQueue.drainContactForceEvents(onContactForce);
+  Props.capture(); Hands.capture();
+}
+
+// Bound subsystem updates (no per-frame closure allocation; each is guarded by safe()).
+const U = {};
+function frame() {
+  const now = performance.now();
+  let dt = (now - Main.last) / 1000; Main.last = now;
+  if (!(dt > 0)) dt = 1 / 72; if (dt > 0.1) dt = 0.1;
+  Sim.clock += dt;
+  renderer.info.reset();
+  if (renderer.xr.isPresenting) renderer.xr.updateCamera(camera);
+  safe('desktop', U.desktop, dt);
+  rig.updateMatrixWorld(true);
+  safe('input', U.input, dt);
+  safe('loco', U.loco, dt);
+  rig.updateMatrixWorld(true);
+  safe('handTargets', U.handTargets, dt);
+  safe('ui', U.ui, dt);
+  safe('grab', U.grab, dt);
+  const step = PHYS_DT; Main.physAcc += dt; let n = 0;
+  while (Main.physAcc >= step && n < CONFIG.physics.maxSubSteps) { safe('physics', physicsStep, step); Main.physAcc -= step; n++; }
+  if (Main.physAcc > step) Main.physAcc = step * 0.5;
+  const alpha = Main.physAcc / step;
+  safe('propsRender', U.propsRender, alpha);
+  safe('handsRender', U.handsRender, alpha, dt);
+  safe('sim', U.sim, dt);
+  safe('clock', U.clock);
+  safe('audio', U.audio, camera);
+  safe('hud', U.hud, dt);
+  Main.rescueT += dt; if (Main.rescueT > 1) { Main.rescueT = 0; safe('rescue', U.rescue); }
+  renderer.render(scene, camera);
+  Main.calls = renderer.info.render.calls; Main.tris = renderer.info.render.triangles;
+}
+
+function setStatus(msg, err = false) { const el = $('status'); el.textContent = msg; el.classList.toggle('err', err); }
+const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
+
+async function boot() {
+  try {
+    setStatus('Loading physics…');
+    await Phys.init();
+    setStatus('Building the kitchen…'); await nextFrame();
+    buildMaterials();
+    Kitchen.build();
+    Props.spawnInitial();
+    Hands.init();
+    UI.init();
+    Loco.init();
+    PerfHUD.init();
+    Input.setupXR();
+    Desktop.init();
+    Object.assign(U, {
+      desktop: Desktop.update.bind(Desktop), input: Input.update.bind(Input), loco: Loco.update.bind(Loco),
+      handTargets: Hands.updateTargets.bind(Hands),
+      ui: UI.update.bind(UI), grab: Grab.update.bind(Grab),
+      propsRender: Props.render.bind(Props), handsRender: Hands.render.bind(Hands), sim: Sim.update.bind(Sim),
+      clock: Kitchen.updateClock.bind(Kitchen), audio: AudioSys.updateListener.bind(AudioSys), hud: PerfHUD.update.bind(PerfHUD),
+      rescue: Props.rescue.bind(Props),
+    });
+    renderer.xr.addEventListener('sessionstart', () => XRSession.onStart());
+    renderer.xr.addEventListener('sessionend', () => XRSession.onEnd());
+    applyRenderSettings();
+    const sp = CONFIG.player.spawn;
+    rig.position.set(sp.x, 0, sp.z); rig.rotation.y = sp.yaw; camera.position.set(0, settings.targetEyeHeight, 0);
+    rig.updateMatrixWorld(true); Loco.updateHead(); Loco.syncCapsule();
+    renderer.setAnimationLoop(frame);
+    // Debug handle for the browser console (inspect state, tweak CONFIG live).
+    window.MEP = { THREE, RAPIER, CONFIG, resolveLayout, Nav, Phys, Main, PerfHUD, settings, scene, camera, rig, renderer, world, Hands, Props, Loco, UI, Grab, Input, Desktop, Sim, Kitchen, U };
+
+    const btnVR = $('btnVR'), btnD = $('btnDesktop');
+    btnD.disabled = false;
+    btnD.onclick = () => {
+      Main.started = true; Input.mode = 'desktop'; AudioSys.init();
+      $('overlay').classList.add('hidden'); $('hint').style.display = 'block';
+      renderer.domElement.requestPointerLock();
+    };
+    let vrOK = false;
+    try { vrOK = !!(navigator.xr && await navigator.xr.isSessionSupported('immersive-vr')); } catch (e) { vrOK = false; }
+    if (vrOK) { btnVR.disabled = false; btnVR.onclick = () => XRSession.enter(); setStatus('Ready. Put on your headset and press Enter VR.'); }
+    else { btnVR.textContent = 'VR not available'; setStatus(window.isSecureContext ? 'Ready. WebXR VR not detected, so desktop mode is available.' : 'Ready. WebXR needs HTTPS (or localhost), so desktop mode is available.'); }
+  } catch (e) {
+    console.error(e);
+    setStatus('Failed to start: ' + (e && e.message ? e.message : e), true);
+  }
+}
+boot();
+</script>
+</body>
+</html>
