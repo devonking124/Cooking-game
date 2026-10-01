@@ -131,6 +131,10 @@ This pass came out of real-input playtests that drive the game the way a player 
   - Hinged doors (fridge, microwave) follow the mouse. Dragging away from the hinge, or downward, pulls the door open.
   - Buttons (blender, smoke-alarm hush) respond to a click.
   - The menu (M) opens in your line of sight, even when you're looking down at the counter.
+- **More desktop fixes:**
+  - Hold RMB with the thermometer on a food or pot to probe it.
+  - Tongs (RMB) and shakers (salt, pepper, spices: RMB) reach to whatever the crosshair is on.
+  - Tongs slide around food instead of shoving it.
 - **Visuals:**
   - Smooth-shaded food and gloves (meshes were flat-shaded per triangle).
   - Produce detail: tomato calyx and stem, apple stem and blush, strawberry leaves, potato eyes, onion root and tip, carrot shoulders.
@@ -140,6 +144,10 @@ This pass came out of real-input playtests that drive the game the way a player 
   - A painted garden and village view through the window.
   - Khronos Neutral tone mapping for true-to-life food colours.
   - Nitrile-glove material with a proper sleeve cuff.
+  - Rim-glow hover highlight (no more solid orange objects).
+  - Raw beef with streaky marbling and fibre grain; meat sears to a mottled mahogany crust.
+  - Translucent golden butter and oils.
+  - Real box grater (satin steel with grating teeth).
   - Real-sized bites with smooth bite marks.
 - **Audio:**
   - Procedural room reverb on every sound.
@@ -147,6 +155,7 @@ This pass came out of real-input playtests that drive the game the way a player 
   - Richer chop: blade swish, snap and board knock.
   - Sizzle with crackle grain and a bubbling layer.
   - Ambience: ticking wall clock, birds and a distant street through the window.
+  - Footsteps on the plank floor.
 
 ## Code map (inside `index.html`)
 

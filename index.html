@@ -80,7 +80,7 @@
   </div>
 </div>
 <div id="crosshair"></div>
-<div id="hint">WASD move &middot; LMB grab/throw &middot; RMB use &middot; Wheel distance &middot; R rotate &middot; 1&ndash;9 tools &middot; F force-grab &middot; T teleport &middot; Q/E turn &middot; M menu &middot; X Chef&rsquo;s Eye &middot; B bite &middot; G pinch &middot; V flick &middot; P perf &middot; Esc release mouse</div>
+<div id="hint">WASD move &middot; LMB grab/throw &middot; RMB use/chop/probe &middot; Wheel reach &middot; R rotate &middot; 1&ndash;9 tools &middot; F force-grab &middot; T teleport &middot; Q/E turn &middot; M menu &middot; X Chef&rsquo;s Eye &middot; B bite &middot; P perf</div>
 <div id="toast"></div>
 
 <script type="module">
@@ -807,8 +807,11 @@ function buildMaterials() {
 function highlightOf(mat) {
   let h = MAT._highlight.get(mat);
   if (!h) {
-    h = mat.clone(); h.emissive = new THREE.Color(0xffa040); h.emissiveIntensity = 0.3;
-    if (mat.onBeforeCompile === uberPatch) { h.onBeforeCompile = uberPatch; h.customProgramCacheKey = mat.customProgramCacheKey; }
+    // Grab-hover highlight: a warm Fresnel rim (outline-like glow) rather than tinting the whole object orange.
+    h = mat.clone(); const base = mat.onBeforeCompile === uberPatch ? uberPatch : null, key = (mat.customProgramCacheKey ? mat.customProgramCacheKey() : 'std') + '-hi';
+    h.onBeforeCompile = (sh) => { if (base) base(sh); sh.fragmentShader = sh.fragmentShader.replace('#include <lights_fragment_begin>',
+      'float hiRim = 1.0 - abs(dot(normal, normalize(vViewPosition)));\ntotalEmissiveRadiance += vec3(1.0, 0.62, 0.25) * (pow(hiRim, 2.5) * 0.9 + 0.04);\n#include <lights_fragment_begin>'); };
+    h.customProgramCacheKey = () => key;
     MAT._highlight.set(mat, h);
   }
   return h;
@@ -3051,7 +3054,7 @@ const PROP_DEFS = {
         P.add(MAT.knife, new THREE.CylinderGeometry(0.012, 0.012, 0.003, 12), [0, s * 0.022, -0.185], [0, 0, 0]);
       }
       P.add(MAT.knife, new THREE.TorusGeometry(0.012, 0.003, 6, 12, Math.PI), [0, 0, 0.085], [0, Math.PI / 2, Math.PI / 2]);
-      return { parts: P.done(), shapes: [Shp.box(0.012, 0.022, 0.14, 0, 0, -0.05)] }; } },
+      return { parts: P.done(), shapes: [Object.assign(Shp.box(0.012, 0.022, 0.14, 0, 0, -0.05), { blade: true })] }; } }, // slides around food like a blade (never shoves it)
   woodenSpoon: { name: 'Wooden Spoon', cat: 'Tools', mass: 0.05, sound: 'wood', grip: TOOL_GRIP, size: 0.15, vessel: { c: [0, -0.014, -0.15], r: 0.02, h: 0.01, dip: true },
     build() { const P = Parts();
       P.add(MAT.beech, new THREE.CapsuleGeometry(0.0075, 0.24, 4, 10), [0, 0, 0.0], [Math.PI / 2, 0, 0]);
@@ -3279,7 +3282,7 @@ const PROP_DEFS = {
     shakeTick(prop, kind, g) {
       const h = prop.holders[0]; if (!h || Input.mode !== 'xr') return;
       _v1.set(0, 1, 0).applyQuaternion(prop.renderQuat);
-      if (_v1.y < -0.2 && h.vel.length() > 0.8 && Sim.clock - (prop.lastShake || 0) > 0.15) { prop.lastShake = Sim.clock; Liquids.shake(prop, g, kind); haptic(h.side, 0.2, 15); }
+      if (_v1.y < -0.2 && h.vel.length() > 0.55 && Sim.clock - (prop.lastShake || 0) > 0.15) { prop.lastShake = Sim.clock; Liquids.shake(prop, g, kind); haptic(h.side, 0.2, 15); }
     } },
   riceBag: { name: 'Rice (1 kg)', cat: 'Pantry', mass: 1.05, sound: 'produce', size: 0.1, vessel: { c: [0, 0.01, 0], r: 0.045, h: 0.19, neck: 0.03, opaque: true }, fill: { riceDry: 1.0 },
     build() { const P = Parts();
@@ -3378,8 +3381,15 @@ const PROP_DEFS = {
       for (const sg of [1, -1]) { P.add(MAT.darkSteel, new THREE.BoxGeometry(w, h, t), [0, h / 2, sg * d / 2]); P.add(MAT.darkSteel, new THREE.BoxGeometry(t, h, d), [sg * w / 2, h / 2, 0]); }
       return { parts: P.done(), shapes: [Shp.box(w / 2, t / 2, d / 2, 0, t / 2, 0), Shp.box(w / 2, h / 2, t, 0, h / 2, d / 2), Shp.box(w / 2, h / 2, t, 0, h / 2, -d / 2), Shp.box(t, h / 2, d / 2, w / 2, h / 2, 0), Shp.box(t, h / 2, d / 2, -w / 2, h / 2, 0)] }; } },
   grater: { name: 'Box Grater', cat: 'Tools', mass: 0.3, sound: 'metal', size: 0.12,
-    build() { const P = Parts(); for (const sg of [1, -1]) { P.add(MAT.potSteel, new THREE.BoxGeometry(0.1, 0.22, 0.002), [0, 0.11, sg * 0.04], [sg * 0.08, 0, 0]); P.add(MAT.potSteel, new THREE.BoxGeometry(0.002, 0.22, 0.08), [sg * 0.05, 0.11, 0]); }
-      P.add(MAT.plastic, new THREE.BoxGeometry(0.06, 0.02, 0.03), [0, 0.235, 0]);
+    build() { const P = Parts();
+      // Tapered four-sided box in satin steel, each face carrying rows of raised grating teeth.
+      for (const sg of [1, -1]) { P.add(MAT.steel, new THREE.BoxGeometry(0.1, 0.22, 0.002), [0, 0.11, sg * 0.04], [sg * 0.08, 0, 0]); P.add(MAT.steel, new THREE.BoxGeometry(0.002, 0.22, 0.08), [sg * 0.05, 0.11, 0]); }
+      const tooth = () => new THREE.CylinderGeometry(0.0035, 0.0035, 0.002, 6, 1, false, 0, Math.PI);
+      for (let r = 0; r < 9; r++) for (let c = 0; c < 5; c++) { const y = 0.03 + r * 0.021, x = -0.032 + c * 0.016 + (r % 2) * 0.008; if (x > 0.04) continue;
+        for (const sg of [1, -1]) { const z = sg * (0.041 - y * 0.0175 * 0.5); P.add(MAT.darkSteel, tooth(), [x, y, z + sg * 0.0012], [Math.PI / 2 * sg, 0, 0]); } }
+      for (let r = 0; r < 12; r++) for (let c = 0; c < 4; c++) for (const sg of [1, -1]) P.add(MAT.darkSteel, new THREE.BoxGeometry(0.002, 0.003, 0.012), [sg * 0.0515, 0.025 + r * 0.016, -0.027 + c * 0.018]); // slicing slots
+      P.add(MAT.plastic, new THREE.TorusGeometry(0.028, 0.007, 8, 18, Math.PI), [0, 0.225, 0]);
+      P.add(MAT.plastic, new THREE.BoxGeometry(0.06, 0.012, 0.03), [0, 0.228, 0]);
       return { parts: P.done(), shapes: [Shp.box(0.05, 0.11, 0.002, 0, 0.11, 0.045), Shp.box(0.05, 0.11, 0.002, 0, 0.11, -0.045), Shp.box(0.002, 0.11, 0.045, 0.05, 0.11, 0), Shp.box(0.002, 0.11, 0.045, -0.05, 0.11, 0), Shp.box(0.03, 0.01, 0.015, 0, 0.235, 0)] }; } },
   thermometer: { name: 'Instant-Read Thermometer', cat: 'Tools', mass: 0.06, sound: 'metal', grip: TOOL_GRIP, size: 0.1,
     build() { const P = Parts();
@@ -3638,8 +3648,8 @@ float ffbm(vec3 p){ return 0.5 * fvn(p) + 0.25 * fvn(p * 2.03) + 0.125 * fvn(p *
 float tmArr(float a[8], float n, float s){ float x = clamp(s, 0.0, 1.0) * (n - 1.0); float r = a[0];
   for (int i = 0; i < 7; i++) { float fi = float(i); if (x >= fi && x <= fi + 1.0) r = mix(a[i], a[i + 1], x - fi); } return r; }
 vec3 beefCol(float t){
-  vec3 c = vec3(0.50, 0.06, 0.08);
-  c = mix(c, vec3(0.68, 0.10, 0.11), smoothstep(40.0, 50.0, t));
+  vec3 c = vec3(0.50, 0.09, 0.10);                                  // raw: deep, slightly dull red (not neon)
+  c = mix(c, vec3(0.66, 0.13, 0.13), smoothstep(40.0, 50.0, t));
   c = mix(c, vec3(0.82, 0.27, 0.28), smoothstep(51.0, 56.0, t));
   c = mix(c, vec3(0.80, 0.45, 0.41), smoothstep(57.0, 62.0, t));
   c = mix(c, vec3(0.62, 0.45, 0.38), smoothstep(63.0, 67.0, t));
@@ -3665,11 +3675,13 @@ vec3 brownCol(float b){ vec3 c = mix(vec3(0.80, 0.58, 0.30), vec3(0.52, 0.28, 0.
   bool cutFace = vFd.x > 0.5 && vFd.x < 1.5;
   vec3 col = vec3(0.8); float frough = 0.55; vec3 femis = vec3(0.0); float falpha = 1.0;
   if (uLook == 0) {
-    float marb = ffbm(op * 55.0 + uSeed);
-    float vein = smoothstep(0.6, 0.68, marb);
+    // Streaky intramuscular marbling (stretched along the grain, two scales) + fine muscle-fibre striation.
+    float marb = 0.6 * ffbm(op * vec3(45.0, 120.0, 22.0) + uSeed) + 0.4 * ffbm(op * vec3(120.0, 260.0, 60.0) - uSeed);
+    float vein = smoothstep(0.56, 0.63, marb);
     float cap = smoothstep(0.044, 0.052, op.x) * (1.0 - smoothstep(0.02, 0.03, abs(op.z - 0.005)) * 0.0);
     vec3 fat = mix(vec3(0.94, 0.88, 0.80), vec3(0.95, 0.80, 0.52), smoothstep(55.0, 90.0, tm));
     col = mix(beefCol(tm), fat, max(vein * 0.85, cap));
+    col *= 0.92 + 0.08 * sin(op.z * 700.0 + ffbm(op * 90.0) * 6.0); // fibre grain
     if (!cutFace) col *= 0.93;
     femis = col * vec3(0.10, 0.015, 0.015) * (1.0 - smoothstep(45.0, 60.0, tm));
     frough = mix(0.62, 0.28, clamp(wt * 25.0, 0.0, 1.0));
@@ -3835,7 +3847,9 @@ vec3 brownCol(float b){ vec3 c = mix(vec3(0.80, 0.58, 0.30), vec3(0.52, 0.28, 0.
     col = mix(col, mix(vec3(0.92, 0.80, 0.52), vec3(0.78, 0.63, 0.38), cn), uCoat.z); frough = mix(frough, 0.9, uCoat.z);
   }
   float bw = smoothstep(0.02, 0.45, br);
-  col = mix(col, brownCol(br), bw);
+  vec3 bcol = brownCol(br) * (0.82 + 0.3 * ffbm(op * 85.0 + uSeed));                       // mottled, not flat
+  if (uLook == 0 || uLook == 26 || uLook == 10 || uLook == 12) bcol *= vec3(0.78, 0.66, 0.62);  // meat sears to mahogany
+  col = mix(col, bcol, bw);
   frough = mix(frough, 0.78, bw * 0.6);
   col = mix(col, vec3(0.05, 0.04, 0.035), smoothstep(0.05, 0.9, chr));
   // M6 polish — crust relief that builds with browning (bumped in the normal stage below), glossy fat/oil
@@ -3848,7 +3862,7 @@ vec3 brownCol(float b){ vec3 c = mix(vec3(0.80, 0.58, 0.30), vec3(0.52, 0.28, 0.
   if (!cutFace) { float mk = ad < -0.5 ? max(markStripe(uMk[0], uMkP.x, uAx), markStripe(uMk[1], uMkP.y, uAx)) : ad > 0.5 ? max(markStripe(uMk[2], uMkP.z, uAx), markStripe(uMk[3], uMkP.w, uAx)) : 0.0;
     col = mix(col, vec3(0.12, 0.055, 0.02), mk); frough = mix(frough, 0.8, mk); }
   col = pow(col, vec3(2.2)); femis = pow(femis, vec3(2.2)); // palette above is authored in sRGB
-  femis += vec3(1.0, 0.55, 0.2) * uHi * 0.1;
+
   diffuseColor = vec4(col, falpha);`)
       .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = frough;')
       .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
@@ -3860,6 +3874,7 @@ vec3 brownCol(float b){ vec3 c = mix(vec3(0.80, 0.58, 0.30), vec3(0.52, 0.28, 0.
     vec3 r1 = cross(dpy, normal), r2 = cross(normal, dpx); float det = dot(dpx, r1);
     vec3 grad = sign(det) * (dhx * r1 + dhy * r2);
     if (abs(det) > 1e-12) normal = normalize(abs(det) * normal - grad);
+    femis += vec3(1.0, 0.62, 0.25) * (pow(1.0 - abs(dot(normal, normalize(vViewPosition))), 2.5) * 0.8 + 0.03) * uHi; // grab-hover rim
   }`)
       .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += femis;');
   },
@@ -5689,8 +5704,8 @@ const Thermometer = {
 // bubbles, foam, rice grains and oil shimmer in the shader. Tilting past the lowest rim point pours a weir-law
 // stream (viscosity-scaled) traced ballistically; where it lands decides a transfer, basting, washing or a puddle.
 const LIQ_VIS = {
-  water: [0.62, 0.74, 0.80, 0.30], olive: [0.70, 0.60, 0.10, 0.78], vegetable: [0.93, 0.78, 0.30, 0.72], peanut: [0.90, 0.72, 0.36, 0.74],
-  butter: [0.99, 0.85, 0.40, 0.95], noisette: [0.60, 0.38, 0.14, 0.95], burnt: [0.16, 0.09, 0.05, 0.97],
+  water: [0.62, 0.74, 0.80, 0.30], olive: [0.72, 0.62, 0.14, 0.6], vegetable: [0.95, 0.80, 0.34, 0.55], peanut: [0.90, 0.72, 0.36, 0.74],
+  butter: [0.96, 0.74, 0.26, 0.72], noisette: [0.62, 0.36, 0.12, 0.85], burnt: [0.16, 0.09, 0.05, 0.97],
   rice: [0.93, 0.91, 0.84, 1.0], riceCooked: [0.98, 0.97, 0.94, 1.0], scorch: [0.42, 0.28, 0.14, 1.0],
   flour: [0.97, 0.96, 0.93, 1.0], crumbs: [0.86, 0.72, 0.45, 1.0], egg: [0.98, 0.80, 0.32, 0.9],
 };
@@ -9145,8 +9160,20 @@ const Ambience = {
     const s = c.createBufferSource(); s.buffer = A.noise; s.loop = true; const bp = c.createBiquadFilter(); bp.type = 'lowpass'; bp.frequency.value = 500;
     this.street = c.createGain(); this.street.gain.value = 0.015; s.connect(bp); bp.connect(this.street); this.street.connect(this.win); s.start();
   },
+  _last: null, stride: 0,
+  // Footsteps on the plank floor while walking (teleports and snap turns are silent).
+  steps() {
+    const A = AudioSys, h = Loco.headPos; if (!this._last) { this._last = h.clone(); return; }
+    const d = Math.hypot(h.x - this._last.x, h.z - this._last.z); this._last.copy(h);
+    if (d > 0.25 || d < 1e-4) { this.stride = 0; return; }
+    this.stride += d; if (this.stride < 0.62) return; this.stride = 0;
+    const v = A.voice(_v1.set(h.x, 0.05, h.z), 0.3, 0.35); if (!v) return; const t = A.ctx.currentTime, j = 0.9 + Math.random() * 0.2;
+    A.burst(v, t, 0.05, 0.5, 'lowpass', 260 * j, 0.9); A.osc(v, 'sine', 95 * j, t, 0.06, 0.3, 0.06); A.burst(v, t + 0.05, 0.03, 0.25, 'bandpass', 1200 * j, 1.2); // heel, toe
+    if (Math.random() < 0.12) A.osc(v, 'triangle', 180 + Math.random() * 60, t + 0.04, 0.18, 0.04, 0.16, 140);                                        // a board creaks
+  },
   update() {
     const A = AudioSys; if (!this.started || !A.ready) return; const c = A.ctx, t = c.currentTime;
+    this.steps();
     // clock tick every second (scheduled ahead)
     if (!this.nextTick || this.nextTick < t) this.nextTick = Math.ceil(t) + 0.02;
     if (this.nextTick < t + 0.2 && this.nextTick !== this.lastTick) { this.lastTick = this.nextTick; A.burst(this.clk, this.nextTick, 0.012, 0.25, 'bandpass', 3800, 4); A.osc(this.clk, 'sine', 2900, this.nextTick, 0.01, 0.05, 0.01); this.nextTick += 1; }
@@ -9186,6 +9213,7 @@ const Sim = {
 };
 
 /* ===================================== [DESKTOP] ==================================== */
+const SHAKERS = new Set(['saltBox', 'pepperGrinder', 'paprika', 'chiliFlakes', 'bakingSoda', 'yeast']);
 const Desktop = {
   keys: new Set(), locked: false, lmb: false, lmbMenu: false, rDown: false, crouch: false, tHeld: false,
   pitch: 0, holdDist: CONFIG.desktop.holdRest, hoverProp: null,
@@ -9280,6 +9308,28 @@ const Desktop = {
       _v8.set(0, this.crushMode ? k.edgeY * 0.5 : k.edgeY, (k.heel + k.tip) / 2).applyQuaternion(_q4);
       dom.targetPos.copy(this.chopAim).addScaledVector(UP, lift).sub(_v8).sub(_v7.copy(dom.offPos).applyQuaternion(dom.targetQuat));
     }
+    // Desktop probing: thermometer tip-down into the food's centre (or the liquid) while RMB is held.
+    if (this.probe && dom.held && dom.held.key === 'thermometer') {
+      const f = this.probe; if (!f.alive) this.probe = null; else {
+        _v8.copy(f.th ? f.renderPos : f.lq.B); if (!f.th) _v8.y += 0.02;
+        dom.targetQuat.setFromAxisAngle(UP, Loco.headYaw).multiply(_q2.setFromAxisAngle(_v7.set(1, 0, 0), -Math.PI / 2 + 0.25)); // tip (−Z) pointing down
+        _q4.copy(dom.targetQuat).multiply(dom.offQuat);
+        _v7.copy(Thermometer.tip).applyQuaternion(_q4);
+        dom.targetPos.copy(_v8).sub(_v7).sub(_v6.copy(dom.offPos).applyQuaternion(dom.targetQuat));
+      }
+    }
+    if (this.reach && dom.held) {
+      const R = this.reach, it = dom.held; R.t += frameDt;
+      _q4.copy(dom.targetQuat).multiply(dom.offQuat);
+      if (R.kind === 'tongs' && it.def.tongs) {
+        if (!it.carry && R.t < 1.5 && R.target.alive) { /* travel until the tips close on it */ _v7.set(...it.def.tongs.tip).applyQuaternion(_q4); dom.targetPos.copy(R.target.renderPos).sub(_v7).sub(_v6.copy(dom.offPos).applyQuaternion(dom.targetQuat)); }
+        else this.reach = null; // food (if gripped) now rides back with the tongs
+      } else if (R.kind === 'shake') {
+        const sp = it.def.spout || [0.022, 0.14, 0]; _v7.set(sp[0], sp[1], sp[2]).applyQuaternion(_q4);
+        if (R.t < 0.7 || !R.used) { dom.targetPos.copy(R.point).add(_v8.set(0, 0.17, 0)).sub(_v7).sub(_v6.copy(dom.offPos).applyQuaternion(dom.targetQuat)); if (R.t > 0.3 && !R.used && it.renderPos.distanceTo(_v5.copy(R.point).add(_v8).sub(_v7)) < 0.06) { R.used = true; if (it.def.use) it.def.use(it, dom); } }
+        else this.reach = null;
+      } else this.reach = null;
+    }
     dom.rayOrigin.copy(hp); dom.rayDir.copy(this._fwd);
     off.targetPos.copy(hp).addScaledVector(this._fwd, 0.36).addScaledVector(this._right, -s * 0.2).addScaledVector(this._up, -0.26 - tuck);
     off.targetQuat.copy(hq).multiply(this._pitchQ);
@@ -9353,10 +9403,21 @@ const Desktop = {
       this.chopT = this.chopDur; this.crushMode = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
       return;
     }
-    if (p.def.tongs) { p.forceClosed = true; return; }
+    // Desktop reach: tongs and shakers act where the crosshair points (the held item travels there and back).
+    if (p.def.tongs || SHAKERS.has(p.key)) {
+      Loco.updateHead(); _v2.set(0, 0, -1).applyQuaternion(Loco.headQuat);
+      const hit = Phys.castRay(Loco.headPos, _v2, CONFIG.desktop.reach, GROUPS.qPoint, _v1, null), f = hit && Phys.propByCollider.get(hit.collider.handle);
+      if (p.def.tongs) { p.forceClosed = true; if (f && f.isFood) this.reach = { kind: 'tongs', target: f, point: f.renderPos.clone(), t: 0 }; return; }
+      if (hit) { this.reach = { kind: 'shake', target: f, point: _v1.clone(), t: 0, used: false }; return; }
+    }
+    if (p.key === 'thermometer') { // hold RMB on a food (or a pot) under the crosshair: the probe pierces its centre
+      Loco.updateHead(); _v2.set(0, 0, -1).applyQuaternion(Loco.headQuat);
+      const hit = Phys.castRay(Loco.headPos, _v2, CONFIG.desktop.reach, GROUPS.qPoint, _v1, null), f = hit && Phys.propByCollider.get(hit.collider.handle);
+      if (f && (f.th || (f.contents && f.lq))) { this.probe = f; return; }
+    }
     if (p.def.use) p.def.use(p, h);
   },
-  rmbUp() { const p = Hands.dominant().held; if (p && p.def.tongs) p.forceClosed = false; },
+  rmbUp() { const p = Hands.dominant().held; if (p && p.def.tongs) p.forceClosed = false; this.probe = null; },
   rotateHeld(dx, dy) {
     const h = Hands.dominant(); if (!h.held) return;
     _q2.copy(h.targetQuat).invert();
