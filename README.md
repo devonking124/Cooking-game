@@ -122,13 +122,39 @@ a pass/fail table.
   - Comfort audit: every locomotion mode on the left hand, right hand and both hands, plus all 50 L×R×dominant-hand combinations, with no stick conflicts.
   - `?test` adds live checks for §13.4 (Challenge scorecard), §13.8 and §13.10.
 
+## Upgrade pass (post-M6)
+
+This pass came out of real-input playtests that drive the game the way a player does: actual mouse and keyboard on desktop, and simulated Quest controller poses for VR.
+
+- **VR grabbing fixed.** Empty hands no longer collide with props. Before, reaching for a knife lying on the board shoved it away or grabbed the board instead. Grab priority now favours tools by their handle and food over boards, plates and towels.
+- **Desktop fixes:**
+  - Hinged doors (fridge, microwave) follow the mouse. Dragging away from the hinge, or downward, pulls the door open.
+  - Buttons (blender, smoke-alarm hush) respond to a click.
+  - The menu (M) opens in your line of sight, even when you're looking down at the counter.
+- **Visuals:**
+  - Smooth-shaded food and gloves (meshes were flat-shaded per triangle).
+  - Produce detail: tomato calyx and stem, apple stem and blush, strawberry leaves, potato eyes, onion root and tip, carrot shoulders.
+  - Printed packaging labels and pantry decor (glass jars, bread).
+  - Cream retro-enamel fridge with chrome handle.
+  - Fine satin brushed steel (no more zebra streaks).
+  - A painted garden and village view through the window.
+  - Khronos Neutral tone mapping for true-to-life food colours.
+  - Nitrile-glove material with a proper sleeve cuff.
+  - Real-sized bites with smooth bite marks.
+- **Audio:**
+  - Procedural room reverb on every sound.
+  - Modal impact synthesis per material (metal, ceramic, glass, wood, stone, plastic, produce).
+  - Richer chop: blade swish, snap and board knock.
+  - Sizzle with crackle grain and a bubbling layer.
+  - Ambience: ticking wall clock, birds and a distant street through the window.
+
 ## Code map (inside `index.html`)
 
 Search for the banner comments: `[CONFIG] [UTIL] [SAVE] [RENDERER] [TEXTURES] [AUDIO] [HAPTICS] [PHYSICS]
 [THERMAL] [KITCHEN] [PROPS] [FOOD] [STOVE] [SIZZLE] [PARTICLES] [CHEF'S EYE] [TEST MODE] [CONTROLS] [OVEN]
 [THERMOMETER] [LIQUIDS] [SINK] [BOIL AUDIO] [FRYER] [GRILL] [FIRE] [SEASONING] [DREDGE] [EATING] [UTENSILS]
 [APPLIANCES] [BAKERY] [DAIRY, FRUIT & EGGS] [SCORING] [INPUT] [HANDS] [GRAB]
-[LOCOMOTION] [UI] [SIM] [DESKTOP] [PERFHUD] [PROGRESS] [COSMETICS] [MENTOR] [SAFETY] [GAME] [PASS] [CHALLENGE] [RECIPES] [POLISH] [MIX] [JAZZ] [XR SESSION] [MAIN]`.
+[LOCOMOTION] [UI] [SIM] [DESKTOP] [PERFHUD] [PROGRESS] [COSMETICS] [MENTOR] [SAFETY] [GAME] [PASS] [CHALLENGE] [RECIPES] [POLISH] [MIX] [AMBIENCE] [JAZZ] [XR SESSION] [MAIN]`.
 
 - `[THERMAL]` is pure JS (no rendering or physics): `THERMO` constants, data-driven `FOOD_DEFS` and `PAN_DEFS`,
   the `Thermo` finite-volume food model, the two-node `PanThermo`, vessel `Contents` (water, oil, butter, salt,
