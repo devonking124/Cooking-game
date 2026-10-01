@@ -286,8 +286,10 @@ function safe(key, fn, a, b) {
   try { fn(a, b); } catch (e) { logError(key, e); }
 }
 
-let _toastTimer = 0;
-function toast(msg, ms = 1800) {
+let _toastTimer = 0, toastSink = null;
+// Status toasts: DOM line on desktop; the in-world bubble ([MENTOR]) in a headset.
+function toast(msg, ms = 1800) { domToast(msg, ms); if (toastSink) toastSink(msg, ms); }
+function domToast(msg, ms = 1800) {
   const el = $('toast'); el.textContent = msg; el.style.opacity = '1';
   clearTimeout(_toastTimer); _toastTimer = setTimeout(() => { el.style.opacity = '0'; }, ms);
 }
@@ -2225,6 +2227,161 @@ function runThermalTests() {
   return TEST_SCENARIOS.map((s) => { let r; const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now()); try { r = s.run(); } catch (e) { r = { pass: false, detail: 'EXCEPTION ' + e.message }; } r.ms = ((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0); return { id: s.id, name: s.name, ...r }; });
 }
 
+
+/* ===================================== [SCORING] ==================================== */
+// Pure (no rendering / physics): dish specs and the 0–100 scorecard. Every number is read from the same thermal and
+// chemical state the taste card and Chef's Eye show; doneness uses the real peak core-node temperature.
+const SCORE_W = { doneness: 30, crust: 15, seasoning: 15, texture: 15, plating: 10, serveTemp: 5, speed: 10 }; // % — food safety is a gate
+const SCORE_CFG = {
+  contamPenalty: 15,      // points per cross-contaminated component on the plate
+  falloff: 6,             // °C outside a doneness window where the doneness score reaches 0
+  stars: [60, 75, 90],    // dish/level score thresholds for 1 / 2 / 3 stars
+  hotServe: [40, 55],     // °C — hot food: 0 at 40, full at 55 (mean of surface and core)
+  coldServe: [18, 30],    // °C — cold food: full ≤ 18, 0 at 30
+  salt: [4, 14],          // g/kg — "well seasoned" band for savoury food
+};
+// Requested core-temperature windows (°C, peak core node) — the same bands the thermometer / Chef's Eye name.
+const DONENESS_WIN = {
+  rare: [46, 53], 'medium-rare': [53, 58], medium: [58, 64], 'medium-well': [64, 69], 'well-done': [69, 78],
+  poultry: [74, 82], thigh: [74, 88], pork: [63, 69], sausage: [71, 80], salmon: [48, 56], whiteFish: [52, 60], shrimp: [58, 70],
+  burgerMedium: [58, 64], burger: [71, 77],
+};
+// Ground meat / fish / pork below these get a safety *flag* (note, plus the thermometer warning); poultry is the hard gate.
+const SAFETY_FLAG = { burger: 71, sausage: 71, porkChop: 63, salmon: 63, whiteFish: 63, shrimp: 63 };
+const win01 = (x, lo, hi, fall) => x < lo ? Math.max(0, 1 - (lo - x) / fall) : x > hi ? Math.max(0, 1 - (x - hi) / fall) : 1;
+const band01 = (x, lo, hi, fall) => win01(x, lo, hi, fall);
+const avgBrown = (th, faces) => { let s = 0, n = 0; for (const i of faces) { const f = th.faces[i]; if (f && f.area > 0) { s += f.brown; n++; } } return n ? s / n : 0; };
+const topTwo = (th) => { const b = th.faces.filter((f) => f.area > 0).map((f) => f.brown).sort((a, b) => b - a); return ((b[0] || 0) + (b[1] ?? b[0] ?? 0)) / 2; };
+const maxChar = (th) => Math.max(...th.faces.map((f) => (f.area > 0 ? f.char : 0)));
+
+// Component judges: each returns { s: 0..1, note } per category. `req` is the ticket's special request (if any).
+const J = {
+  meatWindow: (win) => (th, req) => { const w = DONENESS_WIN[req] || DONENESS_WIN[win] || win; const t = th.coreMax;
+    return { s: win01(t, w[0], w[1], SCORE_CFG.falloff), note: `core peaked ${t.toFixed(1)}°C (wanted ${w[0]}–${w[1]})` }; },
+  searCrust: (lo = 0.55, hi = 0.92) => (th) => { const b = topTwo(th), ch = maxChar(th);
+    return { s: Math.max(0, band01(b, lo, hi, 0.35) - Math.max(0, ch - 0.12) * 2), note: `browning ${Math.round(b * 100)}%${ch > 0.12 ? `, char ${Math.round(ch * 100)}%` : ''}` }; },
+  goldBand: (lo, hi, faces = null) => (th) => { const b = faces ? avgBrown(th, faces) : topTwo(th), ch = maxChar(th);
+    return { s: Math.max(0, band01(b, lo, hi, 0.3) - Math.max(0, ch - 0.15) * 2), note: `${Math.round(b * 100)}% golden${ch > 0.15 ? `, char ${Math.round(ch * 100)}%` : ''}` }; },
+  pale: (th) => { const b = topTwo(th); return { s: 1 - Math.max(0, b - 0.15) / 0.4, note: b < 0.15 ? 'pale, no colour (classic)' : `browned ${Math.round(b * 100)}%` }; },
+  juicy: (th) => { const j = th.juiciness(); return { s: sstep(0.45, 0.78, j), note: `juiciness ${Math.round(j * 100)}%` }; },
+  crispFace: (lo = 0.4) => (th) => { const r = tasteReport(th); return { s: sstep(lo * 0.4, lo, r.crisp), note: r.texture }; },
+  egg: { white: (th) => { const s = th.cook.set || 0; return { s: sstep(0.6, 0.95, s), note: s > 0.9 ? 'white fully set' : 'white still runny' }; },
+    yolk: (th, req) => { const s = th.cook.set || 0; const hard = req === 'over hard'; return { s: hard ? sstep(0.5, 0.9, s) : 1 - sstep(0.45, 0.85, s), note: s < 0.45 ? 'runny yolk' : s < 0.85 ? 'jammy yolk' : 'hard yolk' }; } },
+  setBand: (lo, hi) => (th) => { const s = th.cook.set || 0; return { s: band01(s, lo, hi, 0.3), note: s < lo ? 'underdone' : s > hi ? 'overcooked & rubbery' : 'perfectly set' }; },
+  pasta: (th) => { const h = th.cook.hyd || 0; return { s: band01(h, 0.62, 0.8, 0.12), note: donenessOf(th) }; },
+  gel: (th) => { const g = th.cook.gel || 0; return { s: sstep(0.6, 0.95, g), note: g > 0.9 ? 'cooked through' : 'raw in the middle' }; },
+  fries: (th) => { const f = friesScore(th); return { s: Math.min(1, Math.max(0, f / 0.85)), note: `fry score ${Math.round(f * 100)}` }; },
+  melt: (th) => { const m = th.cook.melt || 0; return { s: sstep(0.3, 0.75, m), note: m > 0.6 ? 'melted & gooey' : 'not melted' }; },
+  bacon: (th) => { const r = tasteReport(th), c = r.crisp, ch = r.char; return { s: Math.max(0, sstep(0.25, 0.65, c) - Math.max(0, ch - 0.25) * 2), note: r.texture }; },
+  raw: (th) => ({ s: th.coreMax < 45 ? 1 : 0.5, note: th.coreMax < 45 ? 'fresh' : 'warmed up' }),
+  sliced: (th, req, p) => ({ s: p && !p.whole ? 1 : 0.2, note: p && !p.whole ? 'sliced' : 'not cut' }),
+  ok: () => ({ s: 1, note: '' }),
+  texture: (good) => (th) => { const r = tasteReport(th), t = r.texture, ok = good.some((g) => t.includes(g)); return { s: ok ? 1 : (t.includes('dry') || t.includes('raw') || t.includes('burnt') || t.includes('tough') || t.includes('mushy') || t.includes('soggy')) ? 0.25 : 0.6, note: t }; },
+};
+// Dish specs. comps: { name, keys, n, main, done, crust, texture, salt ([lo,hi] g/kg | 'none'), hot, opt }.
+// contents: a vessel on the pass must hold this stage. forbid: food keys that must not be on the plate.
+const DISH_SPECS = {
+  tomatoSlices: { name: 'Sliced Tomato', cold: true, comps: [{ name: 'tomato slices', keys: ['tomato'], n: 3, main: true, done: J.sliced, crust: J.ok, texture: J.ok, salt: 'none', cut: true }] },
+  toast: { name: 'Golden Toast', comps: [{ name: 'toast', keys: ['breadSlice'], n: 2, main: true, done: J.goldBand(0.35, 0.78, [0, 1]), crust: J.goldBand(0.35, 0.78, [0, 1]), texture: J.texture(['crisp toast']), salt: 'none', hot: true }] },
+  friedEgg: { name: 'Fried Egg, Sunny Side Up', comps: [
+    { name: 'egg white', keys: ['eggWhite'], main: true, done: J.egg.white, crust: J.goldBand(0, 0.35, [0]), texture: J.setBand(0.85, 1.0), salt: [1, 10], hot: true },
+    { name: 'yolk', keys: ['eggYolk'], done: J.egg.yolk, crust: J.ok, texture: J.ok, salt: 'none', hot: true }] },
+  scrambled: { name: 'Soft Scrambled Eggs', comps: [{ name: 'scrambled eggs', keys: ['beatenEgg'], pile: true, main: true, done: J.setBand(0.55, 0.92), crust: J.pale, texture: J.setBand(0.55, 0.92), salt: [1, 10], hot: true }] },
+  omelette: { name: 'French Omelette', comps: [{ name: 'omelette', keys: ['beatenEgg'], main: true, done: J.setBand(0.6, 0.95), crust: J.pale, texture: J.setBand(0.6, 0.95), salt: [1, 10], hot: true, folded: true }] },
+  pasta: { name: 'Spaghetti al Dente', comps: [{ name: 'spaghetti', keys: ['spaghetti', 'penne'], n: 2, main: true, done: J.pasta, crust: J.ok, texture: J.pasta, salt: [3, 14], hot: true }] },
+  chicken: { name: 'Pan-Roasted Chicken Breast', comps: [{ name: 'chicken breast', keys: ['chickenBreast', 'chickenThigh'], main: true, done: J.meatWindow('poultry'), crust: J.searCrust(0.45, 0.9), texture: J.juicy, salt: SCORE_CFG.salt, hot: true }] },
+  pancakes: { name: 'Pancake Stack', comps: [{ name: 'pancakes', keys: ['pancake'], n: 2, main: true, done: J.setBand(0.85, 1.0), crust: J.goldBand(0.3, 0.75, [0, 1]), texture: J.texture(['fluffy']), salt: 'none', hot: true }] },
+  bacon: { name: 'Crispy Bacon', comps: [{ name: 'bacon', keys: ['bacon'], n: 2, main: true, done: J.bacon, crust: J.goldBand(0.4, 0.85), texture: J.bacon, salt: 'none', hot: true }] },
+  grilledCheese: { name: 'Grilled Cheese', comps: [
+    { name: 'bread', keys: ['breadSlice'], n: 2, main: true, done: J.goldBand(0.4, 0.8, [0, 1]), crust: J.goldBand(0.4, 0.8, [0, 1]), texture: J.texture(['crisp']), salt: 'none', hot: true },
+    { name: 'cheese', keys: ['cheddar', 'mozzarella'], done: J.melt, crust: J.ok, texture: J.melt, salt: 'none', hot: true }] },
+  fries: { name: 'Double-Fried Fries', comps: [{ name: 'fries', keys: ['potato'], n: 4, main: true, done: J.gel, crust: J.goldBand(0.35, 0.75), texture: J.fries, salt: [4, 16], hot: true }] },
+  burger: { name: 'Smash Burger', comps: [
+    { name: 'patty', keys: ['burger'], main: true, done: J.meatWindow('burger'), crust: J.searCrust(0.55, 0.95), texture: J.juicy, salt: SCORE_CFG.salt, hot: true },
+    { name: 'bun', keys: ['bunBottom', 'bunTop', 'bun'], n: 2, done: J.ok, crust: J.goldBand(0, 0.7), texture: J.ok, salt: 'none' },
+    { name: 'cheese', keys: ['cheddar'], opt: true, done: J.melt, crust: J.ok, texture: J.melt, salt: 'none' }] },
+  steak: { name: 'Seared Steak', comps: [{ name: 'steak', keys: ['ribeye', 'filet'], main: true, done: J.meatWindow('medium-rare'), crust: J.searCrust(0.6, 0.95), texture: J.juicy, salt: SCORE_CFG.salt, hot: true }] },
+  salmon: { name: 'Crispy-Skin Salmon', comps: [{ name: 'salmon', keys: ['salmon'], main: true, done: J.meatWindow('salmon'), crust: J.searCrust(0.4, 0.9), texture: J.crispFace(0.35), salt: SCORE_CFG.salt, hot: true }] },
+  porkChop: { name: 'Pork Chop', comps: [{ name: 'pork chop', keys: ['porkChop'], main: true, done: J.meatWindow('pork'), crust: J.searCrust(0.5, 0.92), texture: J.juicy, salt: SCORE_CFG.salt, hot: true }] },
+  shrimp: { name: 'Garlic Shrimp', comps: [{ name: 'shrimp', keys: ['shrimp'], n: 3, main: true, done: J.meatWindow('shrimp'), crust: J.goldBand(0.1, 0.6), texture: J.juicy, salt: SCORE_CFG.salt, hot: true }] },
+  carbonara: { name: 'Spaghetti Carbonara', contents: 'silky carbonara sauce', comps: [{ name: 'spaghetti', keys: ['spaghetti'], n: 2, main: true, done: J.pasta, crust: J.ok, texture: J.pasta, salt: [3, 14], hot: true }] },
+  steakSauce: { name: 'Steak with Butter Sauce', contents: 'glossy butter sauce', comps: [{ name: 'steak', keys: ['ribeye', 'filet'], main: true, done: J.meatWindow('medium-rare'), crust: J.searCrust(0.6, 0.95), texture: J.juicy, salt: SCORE_CFG.salt, hot: true }] },
+  caesar: { name: 'Caesar Salad', cold: true, contents: 'creamy emulsified dressing', comps: [{ name: 'lettuce', keys: ['lettuce'], n: 2, main: true, done: J.raw, crust: J.ok, texture: J.ok, salt: 'none', cut: true }] },
+};
+// Score a plated dish. comps: [{ key, th, contam, whole, folded, pile }] found on the plate; ctx: { req, remaining, limit,
+// stages: [contents stages on the plate/bowl], spill: n stray pieces, forbid: [keys], forbidFound: [keys] }.
+function scoreDish(dishKey, comps, ctx = {}) {
+  const D = DISH_SPECS[dishKey], rows = [], notes = []; let failed = false;
+  const used = new Set(), found = [];
+  for (const spec of D.comps) {
+    const want = spec.n || 1, got = comps.filter((c) => !used.has(c) && spec.keys.includes(c.key) && (!spec.pile || c.pile)).sort((a, b) => (b.th.mass || 0) - (a.th.mass || 0)).slice(0, want);
+    got.forEach((c) => used.add(c)); found.push({ spec, got, frac: Math.min(1, got.length / want) });
+  }
+  const required = found.filter((f) => !f.spec.opt);
+  // Plating: required components present on the plate, nothing forbidden, no strays on the pass.
+  let plating = required.reduce((s, f) => s + f.frac, 0) / Math.max(1, required.length);
+  if (D.contents) { const ok = (ctx.stages || []).includes(D.contents); if (!ok) { plating *= 0.5; notes.push(`missing ${D.contents}`); } }
+  for (const f of required) if (f.frac < 1) notes.push(f.got.length ? `only ${f.got.length}/${f.spec.n || 1} ${f.spec.name}` : `no ${f.spec.name} on the plate`);
+  if (ctx.forbidFound && ctx.forbidFound.length) { plating = 0; notes.push(`asked for no ${ctx.forbidFound.join(', ')}!`); }
+  if (ctx.spill) plating = Math.max(0, plating - 0.25 * ctx.spill), notes.push(`${ctx.spill} piece(s) spilled on the pass`);
+  // Per-category averages over the components found (main components count double).
+  const cat = { doneness: [0, 0], crust: [0, 0], seasoning: [0, 0], texture: [0, 0], serveTemp: [0, 0] }, detail = { doneness: [], crust: [], seasoning: [], texture: [], serveTemp: [] };
+  let contam = 0;
+  for (const { spec, got } of found) for (const c of got) {
+    const w = spec.main ? 2 : 1, th = c.th, put = (k, r) => { cat[k][0] += r.s * w; cat[k][1] += w; if (r.note) detail[k].push(`${spec.name}: ${r.note}`); };
+    put('doneness', spec.done(th, ctx.req, c));
+    put('crust', spec.crust(th, ctx.req, c));
+    put('texture', spec.texture(th, ctx.req, c));
+    if (spec.salt === 'none') { const g = th.salt / Math.max(1e-4, th.mass) * 1000; put('seasoning', { s: g > 16 ? 0.3 : 1, note: g > 16 ? 'over-salted' : '' }); }
+    else { const g = th.salt / Math.max(1e-4, th.mass) * 1000; put('seasoning', { s: band01(g, spec.salt[0], spec.salt[1], spec.salt[0] + 2), note: `${g.toFixed(1)} g/kg salt` }); }
+    const Tm = (Math.max(th.faces[0].Ts ?? th.T[0], th.T[th.N - 1]) + th.core) / 2;
+    put('serveTemp', D.cold ? { s: 1 - sstep(SCORE_CFG.coldServe[0], SCORE_CFG.coldServe[1], Tm), note: `${Tm.toFixed(0)}°C` } : spec.hot ? { s: sstep(SCORE_CFG.hotServe[0], SCORE_CFG.hotServe[1], Tm), note: `${Tm.toFixed(0)}°C` } : { s: 1, note: '' });
+    if (spec.folded && !c.folded) { cat.texture[0] -= 0.3 * w; detail.texture.push('not folded'); }
+    // Food-safety gate: any undercooked poultry fails the dish outright.
+    if (th.def.doneness === 'poultry' && th.coreMax < th.def.safeT) { failed = true; notes.unshift(`FAIL: undercooked chicken (core peaked ${th.coreMax.toFixed(1)}°C, needs ${th.def.safeT}°C)`); }
+    else if (SAFETY_FLAG[c.key] && th.coreMax < SAFETY_FLAG[c.key] && !(c.key === 'burger' && ctx.req === 'medium')) notes.push(`${spec.name} below ${SAFETY_FLAG[c.key]}°C (safety flag)`);
+    if (c.contam) contam++;
+  }
+  const speed = ctx.limit ? (ctx.remaining <= 0 ? 0 : Math.min(1, ctx.remaining / (0.5 * ctx.limit))) : 1;
+  const parts = {
+    doneness: cat.doneness[1] ? cat.doneness[0] / cat.doneness[1] : 0, crust: cat.crust[1] ? cat.crust[0] / cat.crust[1] : 0,
+    seasoning: cat.seasoning[1] ? cat.seasoning[0] / cat.seasoning[1] : 0, texture: cat.texture[1] ? Math.max(0, cat.texture[0] / cat.texture[1]) : 0,
+    plating, serveTemp: cat.serveTemp[1] ? cat.serveTemp[0] / cat.serveTemp[1] : 0, speed };
+  let total = 0;
+  for (const k in SCORE_W) { const pts = SCORE_W[k] * Math.max(0, Math.min(1, parts[k])); total += pts; rows.push({ k, w: SCORE_W[k], pts, note: (detail[k] || []).join('; ') }); }
+  rows.find((r) => r.k === 'speed').note = ctx.limit ? (ctx.remaining > 0 ? `${Math.round(ctx.remaining)} s to spare` : 'late') : '';
+  if (contam) { total -= SCORE_CFG.contamPenalty * contam; notes.push(`cross-contaminated (${contam}): wash boards & knives after raw chicken`); }
+  if (!required.some((f) => f.got.length)) { total = 0; failed = true; notes.unshift('nothing from this ticket on the plate'); }
+  if (failed) total = 0;
+  total = Math.max(0, Math.round(total));
+  return { dish: dishKey, name: D.name, req: ctx.req || '', total, failed, rows, notes, stars: starsFor(total) };
+}
+function starsFor(score) { return score >= SCORE_CFG.stars[2] ? 3 : score >= SCORE_CFG.stars[1] ? 2 : score >= SCORE_CFG.stars[0] ? 1 : 0; }
+
+// Scoring self-tests (headless): §13.4 through the real scorecard, request windows, contamination and the gate.
+TEST_SCENARIOS.push(
+  { id: 'score:13.4', name: 'Challenge scorecard: chicken pulled at 65°C fails, 74°C passes', run() {
+    const res = [65, 74].map((pull) => { const pan = new PanThermo(PAN_DEFS.sautePan); preheat(pan, 2000, 200);
+      const c = new Thermo(FOOD_DEFS.chickenBreast, { shape: 'slab', L: 0.022, A: 0.012, As: 0.0045 }, 4); c.salt = 0.0015;
+      simPanCook(c, pan, { burnerW: 1600, seconds: 2400, flipEvery: 120, stopWhen: (f) => f.core >= pull }); simRestAir(c, 120);
+      return scoreDish('chicken', [{ key: 'chickenBreast', th: c }], { remaining: 300, limit: 600 }); });
+    return { pass: res[0].failed && res[0].total === 0 && !res[1].failed && res[1].total >= 60, detail: `65°C → ${res[0].total} (${res[0].notes[0]}); 74°C → ${res[1].total}/100, ${res[1].stars}★` }; } },
+  { id: 'score:request', name: 'Steak doneness requests judged from the core node', run() {
+    const cook = (pull) => { const pan = new PanThermo(PAN_DEFS.castIron); preheat(pan, 4000, 240); const s = new Thermo(FOOD_DEFS.ribeye, STEAK_GEO(), 4); s.salt = s.mass * 0.009;
+      simPanCook(s, pan, { burnerW: 4000, seconds: 1200, flipEvery: 60, stopWhen: (f) => f.core >= pull }); simRest(s, 300); return s; };
+    const rare = cook(47), mr = cook(52);
+    const a = scoreDish('steak', [{ key: 'ribeye', th: rare }], { req: 'rare', remaining: 400, limit: 600 }), b = scoreDish('steak', [{ key: 'ribeye', th: mr }], { req: 'rare', remaining: 400, limit: 600 }), c = scoreDish('steak', [{ key: 'ribeye', th: mr }], { req: 'medium-rare', remaining: 400, limit: 600 });
+    const dn = (r) => r.rows[0].pts.toFixed(0);
+    return { pass: +dn(a) > +dn(b) && +dn(c) >= 25 && c.total >= 75, detail: `rare ask: ${rare.coreMax.toFixed(0)}°C steak doneness ${dn(a)}/30 vs ${mr.coreMax.toFixed(0)}°C ${dn(b)}/30; medium-rare ask: ${dn(c)}/30, total ${c.total}` }; } },
+  { id: 'score:gates', name: 'Contamination costs points; "no onion" and missing parts hit plating', run() {
+    const pan = new PanThermo(PAN_DEFS.castIron); preheat(pan, 4000, 230); const p = new Thermo(FOOD_DEFS.burger, slab(0.012, 0.009), 4); p.salt = p.mass * 0.009;
+    simPanCook(p, pan, { burnerW: 2600, seconds: 900, flipEvery: 60, stopWhen: (f) => f.core >= 72 });
+    const bun = () => new Thermo(FOOD_DEFS.bun, slab(0.03, 0.009), 21);
+    const base = [{ key: 'burger', th: p }, { key: 'bunBottom', th: bun() }, { key: 'bunTop', th: bun() }];
+    const ok = scoreDish('burger', base, { remaining: 300, limit: 600 }), dirty = scoreDish('burger', base.map((c, i) => i === 0 ? { ...c, contam: 1 } : c), { remaining: 300, limit: 600 });
+    const onion = scoreDish('burger', base, { remaining: 300, limit: 600, forbidFound: ['onion'] }), nobun = scoreDish('burger', base.slice(0, 1), { remaining: 300, limit: 600 });
+    return { pass: dirty.total === ok.total - SCORE_CFG.contamPenalty && onion.total < ok.total - 9 && nobun.total < ok.total, detail: `clean ${ok.total}, contaminated ${dirty.total}, onion on a no-onion burger ${onion.total}, no bun ${nobun.total}` }; } },
+);
 /* ===================================== [KITCHEN] ==================================== */
 // Static geometry is authored as primitives, baked with world-space UVs + vertex-colour AO,
 // then merged into one mesh per material. Every solid piece also gets a fixed Rapier collider.
@@ -4095,6 +4252,9 @@ const Foods = {
   init() { PileBits.init(); },
   count() { return this.pieces.length + this.piles.length; },
   spawn(key, pos, quat = new THREE.Quaternion(), spawned = true, T0) {
+    const p = this.spawnRaw(key, pos, quat, spawned, T0); if (p) p.spawnKey = key === 'bun' ? 'bunBottom' : key; return p;
+  },
+  spawnRaw(key, pos, quat, spawned, T0) {
     switch (key) {
       case 'ribeye': return new FoodPiece('ribeye', FoodShapes.ribeye(), pos, quat, { spawned, T0: T0 ?? 4, whole: true });
       case 'egg': return new FoodPiece('eggShell', FoodShapes.egg(), pos, quat, { spawned, T0: T0 ?? 4, sphere: true, whole: true });
@@ -4613,9 +4773,11 @@ const Cutting = {
       if (f.fdef.squash && !f.squashed && !k.serrated && k.sharp < 1.05 && vSaw < 0.2 && vDown > 0.2) { Foods.squash(f); st.cool = CONFIG.cut.cooldown * 2; if (hand) haptic(hand.side, 0.3, 30); return; }
       if (eff < need) { if (hand && vDown > 0.05) haptic(hand.side, 0.12 + hardness * 0.2, 12); continue; }
       const pitIt = f.fdef.look === 'avocado' && f.whole;
-      const small = f.volume < CONFIG.cut.minceVolume;
+      const small = f.volume < CONFIG.cut.minceVolume, n0 = Foods.pieces.length;
+      Safety.onCut(knife, f);
       if (small) Foods.mince(f);
       else if (!Foods.cut(f, pts[2], bladeN)) continue;
+      Safety.afterCut(f, n0);
       if (pitIt) { const pit = Props.spawn('avocadoPit', f.renderPos.clone(), new THREE.Quaternion(), true); if (pit) pit.body.setLinvel({ x: 0, y: 0.5, z: 0 }, true); }
       st.cool = CONFIG.cut.cooldown;
       AudioSys.chop(pts[2], hardness);
@@ -4729,10 +4891,11 @@ const Stove = {
   update(dt) {
     this.flameMat.uniforms.uTime.value = Sim.clock;
     for (const k of this.knobs) {
+      if (k.failed > 0) { k.failed -= dt; if (k.failed <= 0) { k.failed = 0; toast(`Burner ${k.burner + 1} is working again`, 1500); } }
       if (k.ign > 0) {
         k.ign -= dt; k.clickT -= dt;
         if (k.clickT <= 0) { k.clickT = 0.11; AudioSys.igniterClick(Kitchen.burners[k.burner]); }
-        if (k.ign <= 0) { k.lit = true; AudioSys.ignite(Kitchen.burners[k.burner]); }
+        if (k.ign <= 0) { if (k.failed > 0 && !(Game.infinite && Game.mode === 'sandbox')) k.ign = 0.6; else { k.lit = true; AudioSys.ignite(Kitchen.burners[k.burner]); } }
       }
       // The mode dial clicks into its nearest detent when let go.
       if (k.oven === 'mode' && !k.grab) { const d = Math.round(k.angle / 1.2) * 1.2 - k.angle; if (Math.abs(d) > 0.005) { k.angle += d * Math.min(1, dt * 12); k.dirty = true; } }
@@ -4864,6 +5027,7 @@ const Particles = {
     fire: { col: [1.0, 0.45, 0.1], a: 0.9, life: 0.7, s0: 0.08, s1: 0.02, vy: 0.9, spread: 0.12 },
     fireball: { col: [1.0, 0.5, 0.12], a: 1.0, life: 1.1, s0: 0.25, s1: 0.05, vy: 1.8, spread: 0.9 },
     ember: { col: [1.0, 0.55, 0.15], a: 1.0, life: 1.4, s0: 0.006, s1: 0.002, vy: 0.5, spread: 0.2 },
+    germ: { col: [0.45, 0.95, 0.4], a: 0.75, life: 1.4, s0: 0.004, s1: 0.007, vy: 0.04, spread: 0.05 },
     sparkle: { col: [1.0, 0.9, 0.55], a: 0.9, life: 0.8, s0: 0.012, s1: 0.0, vy: 0.3, spread: 0.3 },
   },
   emitV(type, x, y, z, vx, vy, vz) { const i = this.n; this.emit(type, x, y, z); if (this.n > i) { this.vel[i * 3] = vx; this.vel[i * 3 + 1] = vy; this.vel[i * 3 + 2] = vz; } },
@@ -4911,7 +5075,7 @@ const ChefEye = {
     this.mesh.renderOrder = 40; this.mesh.visible = false; scene.add(this.mesh);
   },
   pick() {
-    const isT = (p) => p && p.alive && (p.th || p.thermo || p.contents);
+    const isT = (p) => p && p.alive && (p.th || p.thermo || p.contents || p.contam);
     const oven = (hit) => hit && hit.collider.handle === Oven.doorHandle ? Oven : null;
     if (Input.mode === 'xr') {
       for (const h of [Hands.dominant(), Hands.offhand()]) {
@@ -4967,6 +5131,7 @@ const ChefEye = {
       if (C.m.water > 1e-4) line(`Water ${(C.m.water * 1000).toFixed(0)} g · salt ${(C.saltConc() * 1000).toFixed(1)} g/kg · steam ${(C.evapRate * 1000).toFixed(2)} g/s`);
       if (C.m.oil > 1e-4) line(`${OILS[C.oilType].name} ${(C.m.oil * 1000).toFixed(0)} g · smoke point ${fmtT(OILS[C.oilType].smoke)}`);
       if (C.m.butterfat + C.m.butterSolid > 1e-4) line(`Butter: browning ${Math.round(C.brown * 100)}% · burnt ${Math.round(C.burnt * 100)}%`);
+      if (C.mass > 1e-4 && (C.mix < 0.99 || C.whip > 0.02 || C.emul > 0.02 || C.set > 0.02 || C.mixWork > 0.1)) line(`Mixed ${Math.round(C.mix * 100)}%${C.whip > 0.02 ? ` · whipped ${Math.round(C.whip * 100)}%` : ''}${C.emul > 0.02 ? ` · emulsion ${Math.round(C.emul * 100)}%` : ''}${C.set > 0.02 ? ` · set ${Math.round(C.set * 100)}%` : ''}${C.mixWork > 1.6 ? ' · overworked' : ''}`);
       if (C.m.riceDry > 1e-4) line(`Rice ${(C.m.riceDry * 1000).toFixed(0)} g · hydrated ${Math.round(C.riceHyd * 100)}% · scorch ${Math.round(C.scorch * 100)}%`);
       if (t && t.covered > 0.05) line(`Crowding ${Math.round(clamp(t.covered, 0, 1) * 100)}%`);
       c.fillStyle = '#b7a58f'; c.font = '500 20px system-ui';
@@ -4985,8 +5150,17 @@ const ChefEye = {
       c.fillStyle = '#b7a58f'; c.font = '500 20px system-ui'; c.fillText(t.T < 150 ? 'Not hot enough to sear yet.' : t.T < 200 ? 'Hot: good for sautéing.' : 'Ripping hot: sear away.', 20, 320);
       this.tex.needsUpdate = true; return;
     }
+    if (!p.th && !p.thermo && !p.contents) { // a tool or board: only its food-safety state is interesting
+      c.fillText(p.def.name, 20, 32); c.fillStyle = '#9dff8a'; c.font = '700 26px system-ui'; c.fillText('⚠ Raw-chicken germs!', 20, 90);
+      c.fillStyle = '#b7a58f'; c.font = '500 21px system-ui'; c.fillText('Rinse it under the running faucet before it', 20, 140); c.fillText('touches anything ready to eat.', 20, 170);
+      this.tex.needsUpdate = true; return;
+    }
     const th = p.th, F = th.faces, fd = p.fdef;
     let title = fd.name;
+    if (fd.dough) title += ` · gluten ${Math.round((th.cook.gluten || 0) * 100)}% · proof ${Math.round((th.cook.proof || 0) * 100)}%${th.cook.noYeast ? ' (no yeast)' : th.cook.yeastDead ? ' (yeast dead)' : ''}`;
+    if (fd.cheese) title += ` · ${Math.round((th.cook.melt || 0) * 100)}% melted`;
+    if (fd.oxidise && !p.whole) title += ` · browning ${Math.round((th.cook.oxid || 0) * 100)}%`;
+    if (p.isBatter) title += ` · set ${Math.round((th.cook.set || 0) * 100)}%${p.foodKey === 'pancake' && p.extra.z > 0.5 ? ' · FLIP!' : ''}`;
     if (fd.look === 'beef') title += ` · ${beefDoneness(th.coreMax)}`;
     if (p.isPuddle) title = `Egg · white ${Math.round(th.cook.set * 100)}% set · yolk ${Math.round(p.yolk.cook.set * 100)}% set`;
     if (fd.look === 'onion') title += ` · sweat ${Math.round((th.cook.sweat || 0) * 100)}%`;
@@ -4999,7 +5173,8 @@ const ChefEye = {
     if (fd.gel) title += ` · ${donenessOf(th)}`;
     const co = th.coat; if (co && co.flour + co.egg + co.crumbs > 0.05) title += ` · coat: ${(p.coatOrder || []).join('→')}`;
     if (p.isPile) title = p.def.name;
-    c.fillText(title, 20, 30);
+    if (p.contam) title = '⚠ germs · ' + title;
+    c.fillText(title.length > 44 ? title.slice(0, 43) + '…' : title, 20, 30);
     c.fillStyle = '#f4e9d8'; c.font = '600 22px system-ui';
     c.fillText(`Core ${fmtT(th.core)}   peak ${fmtT(th.coreMax)}`, 20, 64);
     c.fillStyle = '#b7a58f'; c.font = '500 17px system-ui';
@@ -5284,7 +5459,8 @@ const Thermometer = {
       const l = this._l.copy(p).sub(f.renderPos).applyQuaternion(this._q.copy(f.renderQuat).invert());
       const fr = f.frame, th = f.th;
       const s = fr.shape === 'sphere' ? l.sub(fr.o).length() / fr.L : _v8.subVectors(l, fr.o).dot(fr.ax) / fr.L + 0.5;
-      return { T: th.T[clamp(Math.round(clamp(s, 0, 1) * (th.N - 1)), 0, th.N - 1)], what: f.fdef.name };
+      const T = th.T[clamp(Math.round(clamp(s, 0, 1) * (th.N - 1)), 0, th.N - 1)], lim = f.fdef.safeT || SAFETY_FLAG[f.foodKey];
+      return { T, what: lim ? (T < lim ? `UNDER ${lim}° ${f.fdef.name}` : `SAFE ${f.fdef.name}`) : f.fdef.name };
     }
     const v = Liquids.liquidAt(p);
     if (v) return { T: v.contents.T, what: v.contents.stage() };
@@ -5301,7 +5477,7 @@ const Thermometer = {
     this._p.copy(this.tip).applyQuaternion(prop.renderQuat).add(prop.renderPos);
     const r = this.sampleAt(this._p);
     s.T += (r.T - s.T) * (1 - Math.exp(-dt / 0.9));
-    s.what = r.what;
+    s.what = r.what; s.food = this.hitFood;
     this.draw(prop);
   },
   draw(prop) {
@@ -5795,7 +5971,7 @@ const Sink = {
       else if (p && p.th) {
         for (let fi = 0; fi < 3; fi++) { const f = p.th.faces[fi]; if (f.area <= 0) continue; f.wet = Math.max(f.wet, 0.03); p.th.addHeat(fi, 900 * f.area * (Tw - (f.Ts ?? p.th.surfaceT(fi))) * dt); }
         p.washedAt = Sim.time;
-      }
+      } else if (p) p.washedAt = Sim.time; // tools & boards rinse clean (food safety)
     }
     if (Math.random() < this.flow * 0.5) Particles.emit('splash', S.x + (Math.random() - 0.5) * 0.03, hitY + 0.01, S.z + (Math.random() - 0.5) * 0.03);
     this.audio(this.flow, this.fillFrac);
@@ -6016,12 +6192,13 @@ const Fire = {
   reset() { for (const f of this.list) this.stopVoice(f); this.list.length = 0; },
   at(src) { return this.list.find((f) => f.src === src); },
   ignite(src, fuel, pos) {
-    if (this.at(src)) return;
+    if (this.at(src) || Game.noHazards) return;
+    Mentor.say('fire', true);
     const f = { src, sim: new FireSim(fuel), pos: pos.clone(), water: 0, soda: 0, spray: 0, t: 0 };
     this.list.push(f); if (src.contents) src.fire = f; else src.fire = f;
     AudioSys.ignite(pos); toast('🔥 Grease fire! Lid, baking soda or the extinguisher. Never water!', 3500);
   },
-  onWater(src, kg) { const f = this.at(src); if (f) f.water += kg; },
+  onWater(src, kg) { const f = this.at(src); if (f) { f.water += kg; Mentor.say('water'); } },
   onSoda(pt, kg) { for (const f of this.list) if (f.pos.distanceTo(pt) < 0.25) f.soda += kg; },
   sprayAt(o, dir, range) { for (const f of this.list) { this._v.subVectors(f.pos, o); const t = this._v.dot(dir); if (t < 0 || t > range) continue; if (this._v.addScaledVector(dir, -t).length() < 0.12 + t * 0.25) f.spray = 1; } },
   nearFlame(p) {
@@ -7143,6 +7320,7 @@ const Grab = {
   },
   attach(h, prop) {
     if (h.held) this.release(h, false);
+    Safety.onGrab(h, prop);
     if (prop.holders.length) {
       const other = prop.holders[0];
       if (!(prop.def.twoHanded && prop.holders.length === 1 && other !== h)) this.release(other, false);
@@ -7599,7 +7777,7 @@ const Loco = {
 /* ======================================== [UI] ====================================== */
 // World-space wrist menu drawn with Canvas2D (immediate-mode widgets, redrawn only when dirty).
 const UI = {
-  open: false, mode: 'wrist', tab: 'Comfort', dirty: true,
+  open: false, mode: 'wrist', tab: 'Home', homePage: 'main', dirty: true,
   widgets: [], hoverId: null, drag: null, confirmReset: 0,
   spawnCat: 'Food', spawnQty: 1, peekT: 0, pointerHand: null, _cands: [null, null],
   _inv: new THREE.Matrix4(), _n: new THREE.Vector3(), _c: new THREE.Vector3(), _hit: new THREE.Vector3(),
@@ -7610,8 +7788,17 @@ const UI = {
     this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: this.tex, transparent: true, toneMapped: false }));
     this.mesh.renderOrder = 20; this.mesh.visible = false; scene.add(this.mesh);
   },
+  // World-space main menu: a standing board in the kitchen in front of the player.
+  openBoard(page = 'main') {
+    Loco.updateHead(); const yaw = Loco.headYaw, d = 1.05;
+    this.open = true; this.mode = 'board'; this.tab = 'Home'; this.homePage = page; this.dirty = true;
+    this.mesh.position.set(Loco.headPos.x - Math.sin(yaw) * d, Math.max(1.2, Loco.headPos.y - 0.15), Loco.headPos.z - Math.cos(yaw) * d);
+    this.mesh.rotation.set(-0.08, yaw, 0, 'YXZ'); this.mesh.scale.setScalar(0.85);
+    if (Input.mode === 'desktop') Desktop.onMenu(true);
+  },
+  closeBoard() { if (this.open && this.mode !== 'wrist') { this.open = false; this.dirty = true; } },
   toggleFloat() {
-    if (this.open && this.mode === 'float') { this.open = false; }
+    if (this.open && this.mode !== 'wrist') { this.open = false; }
     else { this.open = true; this.mode = 'float'; this.placeFloat(); }
     this.dirty = true; AudioSys.uiClick();
     if (Input.mode === 'desktop') Desktop.onMenu(this.open);
@@ -7680,7 +7867,7 @@ const UI = {
       const mi = menuHand.input;
       if (mi.bPressed && menuHand.active) this.toggleFloat();
       // Wrist peek: palm toward face + looking at it.
-      if (!(this.open && this.mode === 'float') && menuHand.active) {
+      if (!(this.open && this.mode !== 'wrist') && menuHand.active) {
         _v1.set(-menuHand.sign, 0, 0).applyQuaternion(menuHand.targetQuat);
         _v2.subVectors(Loco.headPos, menuHand.targetPos).normalize();
         _v3.set(0, 0, -1).applyQuaternion(Loco.headQuat);
@@ -7692,7 +7879,7 @@ const UI = {
       this.mesh.visible = this.open;
       if (this.open) {
         if (this.mode === 'wrist') this.placeWrist(menuHand);
-        const cands = this._cands; cands[0] = ptrHand; cands[1] = this.mode === 'float' ? menuHand : null;
+        const cands = this._cands; cands[0] = ptrHand; cands[1] = this.mode !== 'wrist' ? menuHand : null;
         for (let ci = 0; ci < 2; ci++) {
           const h = cands[ci]; if (!h || !h.active || h.held) continue;
           const i = h.input;
@@ -7747,11 +7934,12 @@ const UI = {
     this.rrect(4, 4, S - 8, S - 8, 36, C.bg, C.line);
     this.label('MISE EN PLACE', 44, 58, 38, C.text, 'left', 800);
     this.label('VR', 44 + c.measureText('MISE EN PLACE').width + 14, 58, 38, C.accent, 'left', 800);
-    this.label(Input.mode === 'xr' ? (this.mode === 'wrist' ? 'Wrist menu · Y/B pins it' : 'Pinned · Y/B closes') : 'M / Tab closes', S - 44, 58, 22, C.muted, 'right', 500);
-    const tabs = ['Settings', 'Comfort', 'Spawn', 'Recipes', 'Level'];
-    tabs.forEach((t, i) => this.button('tab:' + t, 36 + i * 191, 96, 183, 64, t, () => { this.tab = t; }, { active: this.tab === t, size: 28 }));
+    this.label(Input.mode === 'xr' ? (this.mode === 'wrist' ? 'Wrist menu · Y/B pins it' : this.mode === 'board' ? 'Main menu · point & trigger' : 'Pinned · Y/B closes') : 'M / Tab closes', S - 44, 58, 22, C.muted, 'right', 500);
+    const tabs = ['Home', 'Settings', 'Comfort', 'Spawn', 'Recipes', 'Level'];
+    tabs.forEach((t, i) => this.button('tab:' + t, 36 + i * 159, 96, 151, 64, t, () => { this.tab = t; if (t === 'Home') this.homePage = 'main'; }, { active: this.tab === t, size: 25 }));
     const y0 = 190;
-    if (this.tab === 'Comfort') this.drawComfort(y0);
+    if (this.tab === 'Home') this.drawHome(y0);
+    else if (this.tab === 'Comfort') this.drawComfort(y0);
     else if (this.tab === 'Settings') this.drawSettings(y0);
     else if (this.tab === 'Spawn') this.drawSpawn(y0);
     else if (this.tab === 'Recipes') this.drawRecipes(y0);
@@ -7850,36 +8038,109 @@ const UI = {
     });
     this.label('Items appear in front of you. Fridge food starts at 4°C, pantry food at 21°C.', X, 950, 21, this.C.muted, 'left', 500);
   },
+  drawHome(y) {
+    const X = 44, W = S_UI_W, C = this.C, stars = Progress.totalStars();
+    if (this.homePage === 'challenge') return this.drawChallenges(y);
+    this.label('Welcome to the line, chef.', X, y + 16, 34, C.text, 'left', 700);
+    this.label(`${stars} ★`, X + W, y + 16, 34, '#ffd36a', 'right', 800);
+    y += 54; const bw = (W - 20) / 2, bh = 120;
+    const big = (id, x, yy, t, sub, fn) => { this.button(id, x, yy, bw, bh, '', fn); this.label(t, x + bw / 2, yy + 46, 40, C.text, 'center', 800); this.label(sub, x + bw / 2, yy + 92, 21, C.muted, 'center', 500); };
+    big('home:sandbox', X, y, 'Sandbox', 'Cook anything · time scale · saves', () => { Game.startSandbox(); });
+    big('home:challenge', X + bw + 20, y, 'Challenge', '24 levels · 4 tiers · tickets & stars', () => { this.homePage = 'challenge'; });
+    big('home:settings', X, y + bh + 16, 'Settings', 'Comfort, audio, display', () => { this.tab = 'Settings'; });
+    big('home:recipes', X + bw + 20, y + bh + 16, 'Recipe Book', 'Step-by-step with ghost hints', () => { this.tab = 'Recipes'; });
+    y += 2 * bh + 52;
+    this.label('Your look (unlock with stars)', X, y, 26, C.accent, 'left', 700); y += 34;
+    for (const kind of ['knife', 'apron', 'theme']) {
+      this.label(kind === 'knife' ? 'Knife' : kind === 'apron' ? 'Apron' : 'Kitchen', X, y + 26, 22, C.muted, 'left', 600);
+      const list = COSMETICS[kind], cw = (W - 130 - (list.length - 1) * 8) / list.length;
+      list.forEach((c, i) => { const ok = Progress.unlocked(kind, i); this.button(`cos:${kind}:${i}`, X + 130 + i * (cw + 8), y, cw, 52, ok ? c.name : `🔒 ${c.need}★`, () => Cosmetics.equip(kind, i), { active: Progress.d.equip[kind] === i, size: 19 }); });
+      y += 62;
+    }
+    if (Game.mode !== 'menu') this.button('home:resume', X, y + 6, W, 56, Challenge.active ? `Resume ${Challenge.lvl.id} ${Challenge.lvl.name}` : 'Resume', () => { this.open = false; }, { size: 24 });
+  },
+  drawChallenges(y) {
+    const X = 44, W = S_UI_W, C = this.C;
+    this.button('ch:back', X, y, 140, 48, '‹ Back', () => { this.homePage = 'main'; }, { size: 22 });
+    this.label(`Challenge · ${Progress.totalStars()} ★`, X + 170, y + 24, 30, C.text, 'left', 700); y += 66;
+    const tiers = ['Line Cook (tutorials)', 'Short-Order Rush', 'Bistro', 'Head Chef'];
+    for (let t = 1; t <= 4; t++) {
+      const lv = LEVELS.filter((l) => l.tier === t), prev = LEVELS.filter((l) => l.tier === t - 1).reduce((s, l) => s + (Progress.d.stars[l.id] | 0), 0), open = t === 1 || prev >= 6;
+      this.label(`Tier ${t}: ${tiers[t - 1]}${open ? '' : `  🔒 ${6 - prev} more ★ in tier ${t - 1}`}`, X, y + 14, 23, open ? C.accent : C.muted, 'left', 700); y += 30;
+      const cw = (W - 5 * 8) / 6;
+      lv.forEach((l, i) => {
+        const st = Progress.d.stars[l.id] | 0, best = Progress.d.best[l.id];
+        this.button('lvl:' + l.id, X + i * (cw + 8), y, cw, 118, '', () => { if (open) Challenge.start(l.id); else toast('Earn more stars in the previous tier', 1300); }, { size: 18 });
+        this.label(l.id, X + i * (cw + 8) + 12, y + 22, 22, open ? C.accent : C.muted, 'left', 800);
+        this.label('★'.repeat(st) + '☆'.repeat(3 - st), X + i * (cw + 8) + cw - 10, y + 22, 20, '#ffd36a', 'right', 700);
+        const words = l.name.split(' '); let line = '', ly = y + 54; for (const w of words) { if ((line + w).length > 14) { this.label(line, X + i * (cw + 8) + 10, ly, 17, C.text, 'left', 600); ly += 22; line = ''; } line += w + ' '; } this.label(line, X + i * (cw + 8) + 10, ly, 17, C.text, 'left', 600);
+        if (best !== undefined) this.label(`best ${best}`, X + i * (cw + 8) + 10, y + 106, 15, C.muted, 'left', 500);
+      });
+      y += 128;
+    }
+  },
   drawRecipes(y) {
-    const X = 44;
-    this.label('Recipe book', X, y + 10, 30, this.C.accent, 'left', 700);
-    this.label('Step-by-step guidance and ghost hints unlock once the cooking', X, y + 52, 22, this.C.muted, 'left', 500);
-    this.label('simulation lands (M2–M5). Target dishes:', X, y + 84, 22, this.C.muted, 'left', 500);
-    const dishes = ['Pan-seared steak, butter baste', 'Smash burger', 'Double-fried fries', 'Crispy-skin salmon', 'Fried chicken', 'Roast chicken',
-      'Classic omelette', 'Scrambled eggs', 'Fried eggs', 'Spaghetti al pomodoro', 'Carbonara', 'Fried rice', 'Stir-fry', 'Grilled cheese',
-      'Neapolitan pizza', 'Pancakes', 'Choc-chip cookies', 'Bread loaf', 'Mashed potatoes', 'French onion soup', 'Guacamole', 'Caesar salad', 'Tacos', 'Caramel sauce'];
-    dishes.forEach((d, i) => this.label(`${i + 1}. ${d}`, X + (i % 2) * 470, y + 132 + Math.floor(i / 2) * 50, 22, this.C.text, 'left', 500));
+    const X = 44, W = S_UI_W, C = this.C, cols = 3, bw = (W - (cols - 1) * 10) / cols;
+    RECIPES.forEach((r, i) => this.button('rec:' + r.k, X + (i % cols) * (bw + 10), y + Math.floor(i / cols) * 44, bw, 38, r.name.length > 26 ? r.name.slice(0, 25) + '…' : r.name, () => RecipeBook.open(r.k), { active: RecipeBook.cur === r, size: 18 }));
+    y += Math.ceil(RECIPES.length / cols) * 44 + 14;
+    const r = RecipeBook.cur;
+    if (!r) { this.label('Pick a recipe: steps tick off as you cook, and a ghost hint marks the next tool or ingredient.', X, y + 20, 21, C.muted, 'left', 500); return; }
+    this.label(r.name, X, y + 18, 30, C.accent, 'left', 800);
+    this.button('rec:stop', X + W - 170, y, 170, 40, 'Stop guide', () => { RecipeBook.cur = null; Ghost.set(null); }, { size: 19 });
+    y += 50;
+    r.steps.forEach((s, i) => { const done = i < RecipeBook.step, cur = i === RecipeBook.step; this.label(`${done ? '✓' : cur ? '▶' : '·'} ${s.t}`.slice(0, 92), X, y + 14 + i * 34, 20, done ? C.on : cur ? C.text : C.muted, 'left', cur ? 700 : 500); });
+    const yb = y + r.steps.length * 34 + 12;
+    this.button('rec:prev', X, yb, 150, 44, '‹ Prev', () => { RecipeBook.step = Math.max(0, RecipeBook.step - 1); }, { size: 20 });
+    this.button('rec:next', X + 160, yb, 150, 44, 'Next ›', () => { RecipeBook.step = Math.min(r.steps.length, RecipeBook.step + 1); }, { size: 20 });
   },
   drawLevel(y) {
-    const X = 44, W = S_UI_W, half = (W - 20) / 2;
-    this.label('Mode', X, y + 24, 26, this.C.muted);
-    this.button('modeSandbox', X + 100, y, 260, 52, 'Sandbox', () => {}, { active: true, size: 24 });
-    this.button('modeChallenge', X + 380, y, 360, 52, 'Challenge (M5)', () => toast('Challenge mode arrives in Milestone 5'), { size: 24 });
-    y += 84;
-    this.button('cleanup', X, y, half, 64, 'Clean up kitchen', () => { Props.cleanUp(); toast('Spawned items removed, tools returned'); }, { size: 26 });
+    const X = 44, W = S_UI_W, half = (W - 20) / 2, C = this.C;
+    if (Challenge.active) {
+      const l = Challenge.lvl;
+      this.label(`${l.id}  ${l.name}`, X, y + 16, 32, C.accent, 'left', 800);
+      this.label(`${Math.floor(Challenge.t / 60)}:${String(Math.floor(Challenge.t % 60)).padStart(2, '0')}`, X + W, y + 16, 28, C.text, 'right', 700);
+      let yy = y + 56; const words = l.brief.split(' '); let line = '';
+      for (const w of words) { if ((line + w).length > 70) { this.label(line, X, yy, 21, C.muted, 'left', 500); yy += 28; line = ''; } line += w + ' '; } this.label(line, X, yy, 21, C.muted, 'left', 500); yy += 40;
+      for (const t of Challenge.tickets) if (t.printed) { this.label(`#${t.id} ${t.dishes.map((d) => DISH_SPECS[d.d].name).join(' + ')}`.slice(0, 64), X, yy, 21, t.done ? C.muted : C.text, 'left', 600); this.label(t.done ? `${t.result.total}/100` : `${Math.max(0, Math.ceil(t.left))} s`, X + W, yy, 21, t.done ? C.on : C.accent, 'right', 700); yy += 30; }
+      if (l.tut) { yy += 8; TUTORIALS[l.tut].forEach((s, i) => { const done = i < Challenge.tutStep, cur = i === Challenge.tutStep; this.label(`${done ? '✓' : cur ? '▶' : '·'} ${s.t}`.slice(0, 88), X, yy, 19, done ? C.on : cur ? C.text : C.muted, 'left', cur ? 700 : 500); yy += 28; }); }
+      for (const p of Challenge.penalties) { this.label(`−${p.pts} ${p.why}`, X, yy + 6, 20, C.danger, 'left', 600); yy += 28; }
+      const yb = 880;
+      this.button('ch:restart', X, yb, (W - 40) / 3, 60, 'Restart level', () => Challenge.start(l.id), { size: 22 });
+      this.button('ch:quit', X + (W - 40) / 3 + 20, yb, (W - 40) / 3, 60, 'Quit to Sandbox', () => { Challenge.quit(); Game.startSandbox(); }, { danger: true, size: 22 });
+      this.button('ch:menu', X + 2 * ((W - 40) / 3 + 20), yb, (W - 40) / 3, 60, 'Main menu', () => this.openBoard('challenge'), { size: 22 });
+      return;
+    }
+    this.label('Sandbox', X, y + 16, 30, C.accent, 'left', 800);
+    this.label('Time', X + 180, y + 18, 24, C.muted);
+    this.segment('ts', X + 260, y - 6, W - 260, 48, [1, 2, 5, 10].map((v) => ({ v, l: v + '×' })), Game.timeScale, (v) => Game.setTimeScale(v));
+    y += 62;
+    this.toggle('chefsEye2', X, y, half, "Chef's Eye (X-ray)", settings.chefsEye, (v) => this.set('chefsEye', v));
+    this.toggle('nohaz', X + half + 20, y, half, 'No fire hazards', Game.noHazards, (v) => { Game.noHazards = v; if (v) Fire.reset(); });
+    y += 66;
+    this.toggle('inf', X, y, half, 'Infinite burners & oil', Game.infinite, (v) => { Game.infinite = v; });
+    this.toggle('tips', X + half + 20, y, half, 'Chef mentor tips', Mentor.enabled, (v) => { Mentor.enabled = Game.tips = v; });
+    y += 70;
+    this.slider('grav', X, y, W, 'Gravity (fun mode)', Game.gravity, 0.1, 1.5, 0.05, (v) => v === 1 ? 'Earth' : v.toFixed(2) + '×', (v) => Game.setGravity(v));
+    y += 92;
+    this.button('cleanup', X, y, half, 60, 'Clean up kitchen', () => { Props.cleanUp(); toast('Spawned items removed, tools returned'); }, { size: 24 });
     const confirming = this.confirmReset > 0;
-    this.button('reset', X + half + 20, y, half, 64, confirming ? 'Tap again to confirm' : 'Reset kitchen', () => {
-      if (this.confirmReset > 0) { this.confirmReset = 0; Props.resetKitchen(); Loco.recenter(); toast('Kitchen reset'); }
+    this.button('reset', X + half + 20, y, half, 60, confirming ? 'Tap again to confirm' : 'Reset kitchen', () => {
+      if (this.confirmReset > 0) { this.confirmReset = 0; Props.resetKitchen(); Cosmetics.apply(); Loco.recenter(); toast('Kitchen reset'); }
       else this.confirmReset = 3;
-    }, { danger: true, size: 26 });
-    y += 100;
-    this.button('recenter2', X, y, half, 64, 'Return to start', () => Loco.recenter(), { size: 26 });
-    y += 110;
-    this.label('Milestone 4B build', X, y, 28, this.C.accent, 'left', 700);
-    const lines = ['Cutting, range, oven, sink, liquids, boiling, pasta & rice, butter (M2–M3);', 'deep fryer, grill with sear marks & flare-ups, dredging, grease fires,',
-      'all proteins & vegetables, seasoning that sticks, eating with bites & taste cards.', 'Next (M4B): dough, batters, bread, mixing, appliances, dairy & fruit.'];
-    lines.forEach((t, i) => this.label(t, X, y + 44 + i * 36, 22, this.C.muted, 'left', 500));
-    this.label(`Props: ${Props.list.length}`, X + W, y, 22, this.C.muted, 'right', 500);
+    }, { danger: true, size: 24 });
+    y += 84;
+    this.label('Kitchen layouts', X, y + 10, 24, C.accent, 'left', 700); y += 34;
+    for (let i = 0; i < 3; i++) {
+      const info = Slots.info(i), bw = (W - 20) / 2 - 150;
+      this.label(`Slot ${i + 1}: ${info ? `${info.when} · ${info.n} items` : 'empty'}`, X, y + 26, 21, info ? C.text : C.muted, 'left', 500);
+      this.button('save' + i, X + W - 300, y, 140, 50, 'Save', () => Slots.save(i), { size: 21 });
+      this.button('load' + i, X + W - 150, y, 150, 50, 'Load', () => Slots.load(i), { size: 21 });
+      y += 60;
+    }
+    y += 10;
+    this.button('recenter2', X, y, half, 56, 'Return to start', () => Loco.recenter(), { size: 22 });
+    this.button('mainmenu', X + half + 20, y, half, 56, 'Main menu', () => this.openBoard(), { size: 22 });
+    this.label(`Props: ${Props.list.length} · food pieces: ${Foods.pieces.length}`, X + W, 990, 18, C.muted, 'right', 500);
   },
 };
 const S_UI_W = CONFIG.ui.canvas - 88;
@@ -7898,6 +8159,643 @@ const Spawner = {
   },
 };
 
+
+/* ===================================== [PROGRESS] =================================== */
+// Stars, personal bests and cosmetic unlocks (localStorage via Save — every access is try/catch'd there).
+const COSMETICS = {
+  knife: [{ name: 'Classic steel', need: 0, tint: 0xffffff }, { name: 'Damascus', need: 6, tint: 0x9fb0c8 }, { name: 'Copper', need: 15, tint: 0xf0a070 },
+    { name: 'Obsidian', need: 30, tint: 0x55555e }, { name: 'Gold leaf', need: 50, tint: 0xffd36a }],
+  apron: [{ name: 'Chef white', need: 0, col: 0xf2efe8 }, { name: 'Denim', need: 3, col: 0x3d5f86 }, { name: 'Tomato red', need: 10, col: 0xc8402e },
+    { name: 'Sage', need: 20, col: 0x7f9b74 }, { name: 'Charcoal', need: 40, col: 0x2f2f34 }],
+  theme: [{ name: 'Classic', need: 0 }, { name: 'Midnight Bistro', need: 12 }, { name: 'Provence Morning', need: 24 }],
+};
+const Progress = {
+  d: null,
+  load() {
+    const p = Save.loadProgress();
+    this.d = { stars: {}, best: {}, plays: {}, equip: { knife: 0, apron: 0, theme: 0 }, seen: {} };
+    if (p && typeof p === 'object') for (const k of Object.keys(this.d)) if (p[k] && typeof p[k] === 'object') Object.assign(this.d[k], p[k]);
+  },
+  save() { Save.saveProgress(this.d); },
+  totalStars() { let n = 0; for (const k in this.d.stars) n += this.d.stars[k] | 0; return n; },
+  unlocked(kind, i) { return this.totalStars() >= COSMETICS[kind][i].need; },
+  // Record a level result; returns { best, newBest, unlocks: [names] }.
+  record(id, score, stars) {
+    const before = this.totalStars(), d = this.d;
+    d.plays[id] = (d.plays[id] | 0) + 1;
+    const newBest = score > (d.best[id] ?? -1); if (newBest) d.best[id] = score;
+    d.stars[id] = Math.max(d.stars[id] | 0, stars);
+    const after = this.totalStars(), unlocks = [];
+    for (const kind in COSMETICS) for (const c of COSMETICS[kind]) if (c.need > before && c.need <= after) unlocks.push(`${c.name} (${kind === 'theme' ? 'kitchen theme' : kind === 'knife' ? 'knife skin' : 'apron'})`);
+    this.save(); return { best: d.best[id], newBest, unlocks };
+  },
+};
+
+/* ===================================== [COSMETICS] ================================== */
+const Cosmetics = {
+  knifeMats: [], apronMat: null,
+  init() {
+    // Knife skins: tinted copies of the uber material (same shader program; only the colour uniform differs).
+    this.knifeMats = COSMETICS.knife.map((k) => { const m = makeUber(TEX.atlas); m.color.setHex(k.tint); return m; });
+    // Kitchen themes re-tint the merged static kitchen through its own uber instance (props keep theirs).
+    this.kitchenMat = makeUber(TEX.atlas);
+    for (const m of Kitchen.meshes) if (m.material === UBER) m.material = this.kitchenMat;
+    this.base = { hemi: hemi.color.getHex(), hemiI: hemi.intensity, gnd: hemi.groundColor.getHex(), sun: sun.color.getHex(), sunI: sun.intensity, pend: pendantLight.color.getHex(), pendI: pendantLight.intensity };
+    // Apron on a hook by the pass (it is the "chef's whites" you unlock colours for).
+    const s = new THREE.Shape(); s.moveTo(-0.12, 0); s.lineTo(0.12, 0); s.lineTo(0.15, -0.55); s.quadraticCurveTo(0, -0.6, -0.15, -0.55); s.lineTo(-0.12, 0);
+    const bib = new THREE.Shape(); bib.moveTo(-0.08, 0); bib.lineTo(0.08, 0); bib.lineTo(0.06, 0.2); bib.lineTo(-0.06, 0.2); bib.lineTo(-0.08, 0);
+    const g = mergeGeometries([new THREE.ShapeGeometry(s, 6), new THREE.ShapeGeometry(bib, 2)].map((x) => x.toNonIndexed()));
+    this.apronMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9, side: THREE.DoubleSide });
+    const apron = new THREE.Mesh(g, this.apronMat); apron.position.set(-CONFIG.kitchen.halfX + 0.012, 1.7, 1.55); apron.rotation.y = Math.PI / 2; apron.castShadow = true; scene.add(apron);
+    const strap = new THREE.Mesh(new THREE.TorusGeometry(0.07, 0.006, 4, 16, Math.PI), this.apronMat); strap.position.set(-CONFIG.kitchen.halfX + 0.012, 1.9, 1.55); strap.rotation.y = Math.PI / 2; scene.add(strap);
+    const hook = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 0.04, 8), new THREE.MeshStandardMaterial({ color: 0x888888, metalness: 1, roughness: 0.3 })); hook.rotation.z = Math.PI / 2; hook.position.set(-CONFIG.kitchen.halfX + 0.02, 1.97, 1.55); scene.add(hook);
+    this.apply();
+  },
+  equip(kind, i) { if (!Progress.unlocked(kind, i)) { toast(`Unlocks at ${COSMETICS[kind][i].need} ★`, 1400); return; } Progress.d.equip[kind] = i; Progress.save(); this.apply(); AudioSys.uiClick(); },
+  apply() {
+    const e = Progress.d.equip;
+    const km = this.knifeMats[e.knife] || this.knifeMats[0];
+    for (const p of Props.list) if (p.def.knife) for (const m of p.meshes) { m.material = km; m.userData.baseMat = km; }
+    this.apronMat.color.setHex(COSMETICS.apron[e.apron]?.col ?? 0xffffff);
+    const B = this.base, th = e.theme | 0;
+    // 0 Classic · 1 Midnight Bistro (dim cool room, warm pendant pools) · 2 Provence Morning (bright, buttery)
+    const T = [{ tint: 0xffffff, hemi: B.hemi, hemiI: B.hemiI, gnd: B.gnd, sun: B.sun, sunI: B.sunI, pend: B.pend, pendI: B.pendI },
+      { tint: 0x8d97b8, hemi: 0x7d8bb8, hemiI: 0.45, gnd: 0x1c1a24, sun: 0x8fa2d8, sunI: 0.55, pend: 0xffb066, pendI: 11 },
+      { tint: 0xfff0d2, hemi: 0xfff6e2, hemiI: 1.05, gnd: 0x6a5232, sun: 0xffe9b0, sunI: 3.1, pend: 0xffe2b5, pendI: 4 }][th] || null;
+    if (!T) return;
+    this.kitchenMat.color.setHex(T.tint); hemi.color.setHex(T.hemi); hemi.intensity = T.hemiI; hemi.groundColor.setHex(T.gnd);
+    sun.color.setHex(T.sun); sun.intensity = T.sunI; pendantLight.color.setHex(T.pend); pendantLight.intensity = T.pendI;
+  },
+};
+
+/* ===================================== [MENTOR] ===================================== */
+// Chef mentor: short, context-aware lines (text bubble + procedural "voice" blips), with a global and a per-line
+// cooldown so it never nags. The same bubble shows in-world toasts in VR (DOM toasts are invisible in a headset).
+const Bubble = {
+  t: 0, ttl: 0, text: '', who: '',
+  init() {
+    this.canvas = Tex.canvas(1024, 192); this.ctx = this.canvas.getContext('2d'); this.tex = Tex.finish(this.canvas); this.tex.wrapS = this.tex.wrapT = THREE.ClampToEdgeWrapping;
+    this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.56, 0.105), new THREE.MeshBasicMaterial({ map: this.tex, transparent: true, depthTest: false, toneMapped: false }));
+    this.mesh.renderOrder = 30; this.mesh.visible = false; scene.add(this.mesh);
+    this.pos = new THREE.Vector3(); this.q = new THREE.Quaternion();
+  },
+  show(text, who = '', ms = 2600) {
+    this.text = text; this.who = who; this.ttl = ms / 1000; this.t = 0;
+    const c = this.ctx, W = 1024, H = 192; c.clearRect(0, 0, W, H);
+    UI.rrect.call({ ctx: c }, 6, 6, W - 12, H - 12, 40, who ? 'rgba(36,26,18,0.94)' : 'rgba(20,20,20,0.85)', who ? 'rgba(224,164,88,0.8)' : 'rgba(255,255,255,0.25)');
+    let x = 36;
+    if (who) { c.font = '64px system-ui'; c.textBaseline = 'middle'; c.textAlign = 'left'; c.fillText('👨‍🍳', 30, H / 2 + 4); x = 120; }
+    c.fillStyle = who ? '#f4e9d8' : '#ffffff'; c.textAlign = 'left'; c.textBaseline = 'middle';
+    let size = 44; c.font = `600 ${size}px system-ui, sans-serif`; while (c.measureText(text).width > W - x - 30 && size > 24) { size -= 2; c.font = `600 ${size}px system-ui, sans-serif`; }
+    if (c.measureText(text).width > W - x - 30) { // two lines
+      const words = text.split(' '); let a = ''; let i = 0; for (; i < words.length; i++) { if (c.measureText(a + words[i] + ' ').width > W - x - 30) break; a += words[i] + ' '; }
+      c.fillText(a.trim(), x, H / 2 - size * 0.6); c.fillText(words.slice(i).join(' '), x, H / 2 + size * 0.6);
+    } else c.fillText(text, x, H / 2 + 2);
+    this.tex.needsUpdate = true;
+    if (Input.mode === 'xr' && !this.mesh.visible) this.snap();
+  },
+  snap() { Loco.updateHead(); this.target(this.pos); this.mesh.position.copy(this.pos); },
+  target(out) { const yaw = Loco.headYaw; return out.set(Loco.headPos.x - Math.sin(yaw) * 0.85, Loco.headPos.y - 0.28, Loco.headPos.z - Math.cos(yaw) * 0.85); },
+  update(dt) {
+    if (this.ttl <= 0 || Input.mode !== 'xr') { this.mesh.visible = false; return; }
+    this.t += dt; if (this.t > this.ttl) { this.ttl = 0; this.mesh.visible = false; return; }
+    // Lazy follow (comfort: no head-locked jitter).
+    this.target(_v1); this.mesh.position.lerp(_v1, Math.min(1, dt * 3));
+    this.mesh.lookAt(Loco.headPos); this.mesh.visible = true;
+    this.mesh.material.opacity = Math.min(1, (this.ttl - this.t) * 3);
+  },
+};
+const MENTOR_LINES = {
+  panCold: ["Pan's not hot yet. Patience!", 'Wait for the shimmer, chef.', "That pan's barely warm. It'll stick and steam."],
+  steaming: ["You're steaming that, not searing it.", 'Too wet, too cold. That\'s a sauna, not a sear.'],
+  rest: ['Let it rest!', 'Whoa, let it rest a few minutes first!', 'Resting is cooking too, chef.'],
+  crust: ['Beautiful crust.', 'Now THAT is a crust.', 'Look at that colour!'],
+  burnt: ["That's... charcoal. Turn it down.", 'Something is burning. Probably not on purpose.'],
+  oilSmoke: ["Oil's smoking. Back off the heat.", "Smoke point reached. Easy!"],
+  crowded: ["Crowded pan: they'll stew, not brown.", 'Give them some room to breathe.'],
+  chickenSafe: ['74°C. Safe and juicy.', "Chicken's at 74. Perfect, pull it."],
+  chickenLow: ['Not there yet: chicken needs 74°C.', 'Keep going, that chicken is under 74.'],
+  alDente: ['Al dente! Drain it now.', 'Bite test says: al dente.'],
+  rawBoard: ['Raw chicken on that board: wash it before the salad meets it.', 'Board is contaminated now. Sink, then veg.'],
+  contamUse: ['That knife touched raw chicken! Wash it first.', 'Cross-contamination! Wash your tools.'],
+  fire: ['Lid it! Lid, baking soda or the extinguisher!', 'Grease fire! Smother it, don\'t water it!'],
+  water: ['NOT water on a grease fire!!', 'Water + burning oil = fireball. Lid next time!'],
+  salty: ['Easy on the salt!', "That's a salt lick now."],
+  flip: ['Bubbles! Flip it.', 'Bubbles are holding: flip time.'],
+  idleHot: ['Your pan is ripping hot with nothing in it.'],
+  served: ['Service!', 'Order up!', 'Walking!'],
+  alarm: ['Smoke alarm! Clear that smoke!', 'Hush that alarm: press the button!'],
+  burner: ['Burner died! Move your pan to another one.'],
+  hello: ['Welcome to the line, chef. Grab an apron.'],
+};
+const Mentor = {
+  last: -99, lastBy: {}, gap: 8, lineCd: 50, seen: new WeakMap(), _acc: 0, enabled: true,
+  say(kind, force = false) {
+    if (!this.enabled && !force) return false;
+    const now = Sim.clock; if (!force && (now - this.last < this.gap || now - (this.lastBy[kind] ?? -1e9) < this.lineCd)) return false;
+    const L = MENTOR_LINES[kind]; if (!L) return false; const line = L[(Math.random() * L.length) | 0];
+    this.last = now; this.lastBy[kind] = now;
+    Bubble.show(line, 'chef', 2800); domToast('👨‍🍳 ' + line, 2600); this.blip(line); return true;
+  },
+  // Procedural "voice": one formant-filtered chirp per syllable-ish chunk.
+  blip(line) {
+    if (!AudioSys.ready) return; const n = Math.min(10, Math.max(2, Math.round(line.length / 6)));
+    const v = AudioSys.voice(null, n * 0.085 + 0.2, 0.35); if (!v) return;
+    const c = AudioSys.ctx, t0 = c.currentTime, f = c.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 900; f.Q.value = 2.2; f.connect(v);
+    for (let i = 0; i < n; i++) { const t = t0 + i * 0.085, p = 150 + Math.random() * 90 + (i === n - 1 ? -30 : 0); AudioSys.osc(f, 'sawtooth', p, t, 0.075, 0.5, 0.07, p * (0.9 + Math.random() * 0.25)); f.frequency.setValueAtTime(600 + Math.random() * 1400, t); }
+  },
+  once(p, kind) { let s = this.seen.get(p); if (!s) { s = {}; this.seen.set(p, s); } if (s[kind]) return false; s[kind] = 1; return true; },
+  // Look for teachable moments ~3× a second.
+  update(dt) {
+    this._acc += dt; if (this._acc < 0.33) return; this._acc = 0;
+    if (!this.enabled) return;
+    const panCount = this._pc || (this._pc = new Map()); panCount.clear();
+    for (const p of Foods.pieces) {
+      if (!p.alive) continue; const th = p.th, d = p.fdef;
+      if (p.inPan) {
+        panCount.set(p.inPan, (panCount.get(p.inPan) || 0) + 1);
+        p.panT = (p.panT || 0) + 0.33; p.leftPanAt = Sim.clock;
+        const pt = p.inPan.thermo.T;
+        if (d.protein && p.panT > 1 && p.panT < 3 && pt < 120 && this.once(p, 'cold')) this.say('panCold');
+        if (d.protein && p.panT > 25 && pt < 135 && th.faces[p.downFace >= 0 ? p.downFace : 0].wet > 0.015 && this.once(p, 'steam')) this.say('steaming');
+      } else p.panT = 0;
+      if (d.protein || d.look === 'bread') {
+        let best = 0, ch = 0; for (const f of th.faces) if (f.area > 0) { best = Math.max(best, f.brown); ch = Math.max(ch, f.char); }
+        if (best > 0.68 && ch < 0.08 && this.once(p, 'crust')) this.say('crust');
+      }
+      if (th.faces[0].char > 0.35 && this.once(p, 'burnt')) this.say('burnt');
+      if (th.salt / Math.max(1e-4, th.mass) > 0.018 && this.once(p, 'salty')) this.say('salty');
+      if (d.pasta && p.inLiquid && (th.cook.hyd || 0) > 0.64 && this.once(p, 'aldente')) this.say('alDente');
+      if (p.isBatter && p.foodKey === 'pancake' && p.extra.z > 0.6 && this.once(p, 'flip')) this.say('flip');
+    }
+    for (const [pan, n] of panCount) if (n >= 7 && this.once(pan, 'crowd' + Math.floor(Sim.clock / 120))) this.say('crowded');
+    for (const v of Liquids.vessels) if (v.contents.smoke > 0.25 && this.once(v, 'smoke' + Math.floor(Sim.clock / 90))) this.say('oilSmoke');
+    // Thermometer in poultry
+    for (const p of Props.list) if (p.key === 'thermometer' && p.state && p.state.food && p.state.food.alive && p.state.food.fdef.doneness === 'poultry') {
+      const f = p.state.food; if (p.state.T >= 74 && this.once(f, 'safe74')) this.say('chickenSafe'); else if (p.state.T < 70 && p.state.T > 30 && this.once(f, 'low' + Math.floor(Sim.clock / 30))) this.say('chickenLow');
+    }
+  },
+};
+
+/* ===================================== [SAFETY] ===================================== */
+// Lighthearted cross-contamination: raw chicken "germs" ride on boards, knives and hands until washed at the sink.
+// Ready-to-eat food touched by a contaminated tool is flagged (and costs points in Challenge). Cooking hot kills it.
+// The smoke alarm listens to real smoke (burning food, smoking oil, fires).
+const Safety = {
+  _acc: 0, smokeHits: 0, smokeRate: 0, alarmOn: false, alarmT: 0, alarmClear: 0, alarmCount: 0, falseAlarm: false, washAcc: new WeakMap(),
+  init() {
+    // Count smoke puffs at the source (all smoke goes through Particles.emit).
+    const pe = Particles.emit; const self = this;
+    Particles.emit = function (type, x, y, z) { if (type === 'smoke' && this === Particles) self.smokeHits++; return pe.call(this, type, x, y, z); };
+    // Wall-mounted smoke alarm with a hush button (grab it / LMB-drag on desktop).
+    const pos = this.alarmPos = new THREE.Vector3(-CONFIG.kitchen.halfX + 0.03, 1.95, 1.0);
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.065, 0.035, 24).rotateZ(Math.PI / 2), new THREE.MeshStandardMaterial({ color: 0xf4f4f0, roughness: 0.6 })); body.position.copy(pos); scene.add(body);
+    this.led = new THREE.Mesh(new THREE.SphereGeometry(0.008, 8, 6), new THREE.MeshBasicMaterial({ color: 0x330000 })); this.led.position.copy(pos).add(_v1.set(0.02, 0.025, 0)); scene.add(this.led);
+    this.ctrl = Controls.add({ name: 'Smoke alarm hush', r: 0.12, grabPos: pos.clone().add(_v1.set(0.03, 0, 0)), begin: () => this.hush(), drag: () => {}, end: () => {}, mouse: () => this.hush() });
+  },
+  isRTE(p) { const d = p.fdef; return !d.safeT && !d.protein && !d.dough && !d.pasta && !d.rawDough || (d.safeT && p.th.coreMax >= d.safeT); },
+  isRawPoultry(p) { return p.fdef.doneness === 'poultry' && p.th.coreMax < 60; },
+  flag(p, why) {
+    if (p.contam) return; p.contam = 1;
+    if (Challenge.active && this.isRTE(p)) { Challenge.penalty(5, 'used a contaminated tool on ready-to-eat food'); Mentor.say('contamUse'); }
+  },
+  // Called by the knife system right before a cut.
+  onCut(knife, f) {
+    if (this.isRawPoultry(f)) { if (!knife.contam) knife.contam = 1; }
+    else if (knife.contam && this.isRTE(f)) this.flag(f, 'knife');
+    if (f.fdef.doneness === 'beef' && f.th.coreMax > 45 && f.leftPanAt && Sim.clock - f.leftPanAt < 45) Mentor.say('rest');
+  },
+  afterCut(f, n0) { if (!f.contam) return; for (let i = n0; i < Foods.pieces.length; i++) Foods.pieces[i].contam = 1; },
+  onGrab(h, p) {
+    if (!p || !p.th) return;
+    if (this.isRawPoultry(p)) h.contam = 1; else if (h.contam && this.isRTE(p)) this.flag(p, 'hands');
+  },
+  update(dt) {
+    // Smoke detector: exponential average of puffs/s.
+    this.smokeRate += (this.smokeHits / Math.max(dt, 1e-3) - this.smokeRate) * Math.min(1, dt / 2.5); this.smokeHits = 0;
+    if (!Game.noHazards && (Challenge.active || settings.smokeAlarm)) {
+      if (!this.alarmOn && this.smokeRate > 9) this.trigger(false);
+      if (this.alarmOn && !this.falseAlarm) { if (this.smokeRate < 3) { this.alarmClear += dt; if (this.alarmClear > 5) this.stop(); } else this.alarmClear = 0; }
+    }
+    if (this.alarmOn) { this.alarmT += dt; this.beep(dt); this.led.material.color.setHex(Math.floor(this.alarmT * 4) % 2 ? 0xff2020 : 0x330000); if (this.falseAlarm && this.alarmT > 25) { Challenge.penalty(5, 'ignored the smoke alarm'); this.stop(); } }
+    this._acc += dt; if (this._acc < 0.25) return; const step = this._acc; this._acc = 0;
+    // Hands: washed under the faucet → clean.
+    for (const h of HANDS) if (h.contam && h.washedAt !== undefined && Sim.time - h.washedAt < 0.3) { h.washT = (h.washT || 0) + step; if (h.washT > 1.0) { h.contam = 0; h.washT = 0; toast('Hands washed ✓', 900); } }
+    for (const p of Props.list) {
+      if (!p.alive) continue;
+      // Tools/boards under running water for ~1.5 s are clean again.
+      if (p.contam && p.washedAt !== undefined && Sim.time - p.washedAt < 0.3) { const w = (this.washAcc.get(p) || 0) + step; this.washAcc.set(p, w); if (w > 1.5) { p.contam = 0; this.washAcc.set(p, 0); toast(`${p.def.name} washed clean ✓`, 1000); } }
+      if (p.contam && Math.random() < 0.5 && p.renderPos.distanceToSquared(Loco.headPos) < 6) Particles.emit('germ', p.renderPos.x + (Math.random() - 0.5) * 0.06, p.renderPos.y + 0.03, p.renderPos.z + (Math.random() - 0.5) * 0.06);
+      // Cooking kills it.
+      if (p.th && p.contam && Math.min(p.th.T[0], p.th.T[p.th.N - 1]) > 75) p.contam = 0;
+      // Boards: raw poultry resting on one contaminates it; contaminated boards pass it to ready-to-eat food.
+      if (p.key === 'cuttingBoard') {
+        for (const f of Foods.pieces) {
+          if (!f.alive || f.holders.length) continue; const dx = f.renderPos.x - p.renderPos.x, dz = f.renderPos.z - p.renderPos.z, dy = f.renderPos.y - p.renderPos.y;
+          if (Math.abs(dx) > 0.2 || Math.abs(dz) > 0.15 || dy < 0 || dy > 0.08) continue;
+          if (this.isRawPoultry(f)) { if (!p.contam) { p.contam = 1; Mentor.say('rawBoard'); } }
+          else if (p.contam && this.isRTE(f)) this.flag(f, 'board');
+        }
+      }
+    }
+  },
+  trigger(fake) { this.alarmOn = true; this.alarmT = 0; this.alarmClear = 0; this.falseAlarm = fake; this.alarmCount++; Mentor.say('alarm', true); if (Challenge.active && !fake) Challenge.penalty(5, 'set off the smoke alarm'); },
+  hush() { if (!this.alarmOn) return; if (this.falseAlarm || this.smokeRate < 6) { this.stop(); toast('Alarm hushed', 900); } else toast('Still smoky: clear the smoke first (turn the heat down)', 1600); },
+  stop() { this.alarmOn = false; this.falseAlarm = false; this.led.material.color.setHex(0x330000); },
+  beep(dt) {
+    if (!AudioSys.ready) return; this._b = (this._b || 0) - dt; if (this._b > 0) return; this._b = 0.5;
+    const v = AudioSys.voice(this.alarmPos, 0.4, 0.5); if (!v) return; const t = AudioSys.ctx.currentTime;
+    for (let i = 0; i < 3; i++) AudioSys.osc(v, 'square', 3150, t + i * 0.11, 0.07, 0.25, 0.07);
+  },
+};
+
+/* ===================================== [GAME] ======================================= */
+// Mode state + sandbox options (time scale, hazards, infinite burners/oil, gravity) and 3 kitchen save slots.
+const Game = {
+  mode: 'menu', noHazards: false, infinite: false, gravity: 1, timeScale: 1, tips: true,
+  setTimeScale(s) { this.timeScale = s; Sim.timeScale = s; UI.dirty = true; },
+  setGravity(g) { this.gravity = g; world.gravity = { x: 0, y: CONFIG.physics.gravity * g, z: 0 }; for (const p of Props.list) p.body.wakeUp(); UI.dirty = true; },
+  // First thing after Play: the main menu board stands in the kitchen in front of you.
+  onStart() { setTimeout(() => { if (Game.mode === 'menu') { UI.openBoard(); Mentor.say('hello', true); } }, Input.mode === 'xr' ? 900 : 200); },
+  startSandbox() { if (Challenge.active) Challenge.quit(true); this.mode = 'sandbox'; Mentor.enabled = this.tips; Pass.idle(); UI.closeBoard(); toast('Sandbox: cook anything. Wrist menu → Spawn / Level for tools & options', 2600); },
+  update(dt) {
+    // Infinite burners & oil: the fryer and oil bottles never run dry; burners never fail.
+    if (this.infinite && this.mode === 'sandbox') {
+      for (const p of Props.list) if ((p.key === 'oilOlive' || p.key === 'oilVeg') && p.contents && p.contents.m.oil < 0.3) p.contents.m.oil = 0.5;
+      if (Fryer.vessel && Fryer.vessel.contents.m.oil < 14) Fryer.vessel.contents.m.oil = 15;
+    }
+  },
+};
+const Slots = {
+  KEY: (i) => `mep.slot.${i}`,
+  info(i) { try { const r = localStorage.getItem(this.KEY(i)); if (!r) return null; const d = JSON.parse(r); return { when: d.when, n: d.props.length + d.foods.length }; } catch (e) { return null; } },
+  save(i) {
+    const r3 = (v) => Math.round(v * 1000) / 1000;
+    const props = Props.list.filter((p) => p.alive && !p.th && !p.isPile && PROP_DEFS[p.key]).map((p) => ({ k: p.key, p: p.currPos.toArray().map(r3), q: p.currQuat.toArray().map(r3), m: p.contents ? Object.fromEntries(Object.entries(p.contents.m).filter(([, v]) => v > 1e-5)) : null, T: p.contents ? r3(p.contents.T) : null }));
+    const foods = Foods.pieces.filter((f) => f.alive && (f.spawnKey || Foods.table[f.foodKey]) && f.whole !== false && !f.isBatter && !f.isPile).map((f) => ({ k: f.spawnKey || f.foodKey, p: f.currPos.toArray().map(r3), q: f.currQuat.toArray().map(r3), T: r3(f.th.core) }));
+    const data = { v: 1, when: new Date().toISOString().slice(0, 16).replace('T', ' '), props, foods };
+    try { localStorage.setItem(this.KEY(i), JSON.stringify(data)); toast(`Kitchen saved to slot ${i + 1}`, 1400); } catch (e) { toast('Save failed (storage full or blocked)', 1800); }
+    UI.dirty = true;
+  },
+  load(i) {
+    let d = null; try { const r = localStorage.getItem(this.KEY(i)); d = r ? JSON.parse(r) : null; } catch (e) { d = null; }
+    if (!d || !Array.isArray(d.props)) { toast('That slot is empty', 1200); return; }
+    for (const p of Props.list.slice()) Props.remove(p);
+    for (const s of d.props) { const p = Props.spawn(s.k, new THREE.Vector3().fromArray(s.p), new THREE.Quaternion().fromArray(s.q), false); if (p && p.contents && s.m) { p.contents.m = Object.assign(p.contents.m, Object.fromEntries(Object.keys(p.contents.m).map((k) => [k, 0])), s.m); p.contents.T = s.T ?? THERMO.Tamb; } }
+    for (const s of d.foods) Foods.spawn(s.k, new THREE.Vector3().fromArray(s.p), new THREE.Quaternion().fromArray(s.q), false, s.T);
+    Liquids.reset(); Fryer.reset(); Fire.reset(); resetAppliances(); Cosmetics.apply();
+    toast(`Loaded slot ${i + 1}`, 1200); UI.dirty = true;
+  },
+};
+
+/* ====================================== [PASS] ====================================== */
+// Plating station on the left run: the zone the bell judges, the ticket rail and the scoreboard on the wall.
+const PASS_ZONE = { x0: -3.0, x1: -2.3, z0: 0.15, z1: 0.95, y0: 0.9, y1: 1.4 };
+const Pass = {
+  inZone(p) { const Z = PASS_ZONE; return p.x > Z.x0 && p.x < Z.x1 && p.z > Z.z0 && p.z < Z.z1 && p.y > Z.y0 && p.y < Z.y1; },
+  init() {
+    const X = -CONFIG.kitchen.halfX + 0.012;
+    const mk = (w, h, cw, ch) => { const c = Tex.canvas(cw, ch), tex = Tex.finish(c); tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping; const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: tex, toneMapped: false })); m.rotation.y = Math.PI / 2; scene.add(m); return { c, ctx: c.getContext('2d'), tex, m }; };
+    this.rail = mk(0.8, 0.27, 1024, 346); this.rail.m.position.set(X, 1.36, 0.55);
+    this.board = mk(0.78, 0.78, 1024, 1024); this.board.m.position.set(X, 1.45, 1.55 - 0.8);
+    this.board.m.position.set(X + 0.001, 1.38, 1.38); this.board.m.scale.setScalar(0.85);
+    this.lastRail = ''; this.idle();
+    // Bell: tap it with an open hand too (not only grab + trigger).
+    const ring = PROP_DEFS.serviceBell.use; PROP_DEFS.serviceBell.use = (p, h) => { ring(p, h); Challenge.onBell(); };
+    this.bellCd = 0;
+  },
+  idle() { this.drawBoard(null); this.drawRail(true); },
+  update(dt) {
+    this.bellCd -= dt;
+    const bell = Props.list.find((p) => p.key === 'serviceBell' && p.alive);
+    if (bell && this.bellCd <= 0) for (const h of HANDS) {
+      if (!h.active || h.held) continue; const gp = h.grabPoint(_v1);
+      if (Math.hypot(gp.x - bell.renderPos.x, gp.z - bell.renderPos.z) < 0.05 && gp.y - bell.renderPos.y < 0.075 && gp.y - bell.renderPos.y > 0.02 && h.vel.y < -0.25) { PROP_DEFS.serviceBell.use(bell, h); this.bellCd = 1; haptic(h.side, 0.5, 30); }
+    }
+    this.drawRail();
+  },
+  // Plates/bowls on the pass and what is on each.
+  collect() {
+    const out = [];
+    for (const v of Props.list) {
+      if (!v.alive || (v.key !== 'plate' && v.key !== 'bowl' && v.key !== 'mixingBowl') || v.holders.length || !this.inZone(v.renderPos)) continue;
+      const comps = [];
+      for (const f of Props.list) {
+        if (!f.alive || !f.th || f.holders.length) continue;
+        const dx = f.renderPos.x - v.renderPos.x, dz = f.renderPos.z - v.renderPos.z, dy = f.renderPos.y - v.renderPos.y;
+        const r = v.key === 'plate' ? 0.135 : 0.09; if (dx * dx + dz * dz > r * r || dy < -0.01 || dy > 0.14) continue;
+        comps.push({ key: f.foodKey, th: f.th, contam: f.contam, whole: f.whole, folded: f.folded, pile: !!f.isPile, piece: f });
+      }
+      out.push({ v, comps, stage: v.contents ? v.contents.stage() : null });
+    }
+    return out;
+  },
+  strays(plates) {
+    const on = new Set(); for (const pl of plates) for (const c of pl.comps) on.add(c.piece);
+    return Foods.pieces.concat(Foods.piles).filter((f) => f.alive && !on.has(f) && !f.holders.length && this.inZone(f.renderPos));
+  },
+  // Wall rail: tickets with dish names, requests and countdown bars.
+  drawRail(force) {
+    const R = this.rail, c = R.ctx, W = 1024, H = 346, T = Challenge.tickets.filter((t) => !t.done);
+    const key = Challenge.active ? T.map((t) => `${t.id}:${Math.ceil(t.left)}`).join('|') + Challenge.lvl?.id : 'idle';
+    if (!force && key === this.lastRail) return; this.lastRail = key;
+    c.fillStyle = '#2b2f33'; c.fillRect(0, 0, W, H); c.fillStyle = '#9aa3aa'; c.fillRect(0, 0, W, 16);
+    if (!Challenge.active) { c.fillStyle = '#d9dee2'; c.font = '700 44px system-ui'; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText('ORDER RAIL', W / 2, H / 2 - 30); c.font = '500 28px system-ui'; c.fillStyle = '#9aa3aa'; c.fillText('Challenge tickets print here · Plate on the pass · Ring the bell', W / 2, H / 2 + 26); R.tex.needsUpdate = true; return; }
+    const tw = Math.min(330, (W - 20) / Math.max(1, T.length) - 10);
+    T.slice(0, 3).forEach((t, i) => {
+      const x = 14 + i * (tw + 10), y = 24, h = H - 34;
+      c.fillStyle = '#fbf8ef'; c.fillRect(x, y, tw, h); c.fillStyle = '#c8402e'; c.fillRect(x, y, tw, 8);
+      c.fillStyle = '#222'; c.textAlign = 'left'; c.textBaseline = 'top'; c.font = '700 26px ui-monospace, monospace'; c.fillText(`#${t.id}`, x + 12, y + 16);
+      let yy = y + 54; c.font = '600 23px system-ui';
+      for (const d of t.dishes) { c.fillStyle = '#111'; c.fillText('• ' + DISH_SPECS[d.d].name.slice(0, 22), x + 12, yy); yy += 28; if (d.req || d.forbid) { c.fillStyle = '#b03020'; c.font = 'italic 600 20px system-ui'; c.fillText('  ' + [d.req, d.forbid ? 'no ' + d.forbid.join(', ') : ''].filter(Boolean).join(', '), x + 12, yy); yy += 26; c.font = '600 23px system-ui'; } }
+      const f = clamp(t.left / t.limit, 0, 1); c.fillStyle = '#ddd'; c.fillRect(x + 10, y + h - 40, tw - 20, 18); c.fillStyle = f > 0.5 ? '#6fbf73' : f > 0.2 ? '#e0a458' : '#c8402e'; c.fillRect(x + 10, y + h - 40, (tw - 20) * f, 18);
+      c.fillStyle = '#333'; c.font = '700 22px ui-monospace, monospace'; c.textAlign = 'right'; c.fillText(`${Math.floor(Math.max(0, t.left) / 60)}:${String(Math.floor(Math.max(0, t.left) % 60)).padStart(2, '0')}`, x + tw - 10, y + 16);
+    });
+    if (T.length > 3) { c.fillStyle = '#d9dee2'; c.font = '700 26px system-ui'; c.textAlign = 'right'; c.fillText(`+${T.length - 3}`, W - 10, H - 30); }
+    R.tex.needsUpdate = true;
+  },
+  // Scoreboard: level brief, live status or the full scorecard breakdown.
+  drawBoard(card) {
+    const B = this.board, c = B.ctx, W = 1024, H = 1024, C = UI.C;
+    c.fillStyle = '#1f1813'; c.fillRect(0, 0, W, H); c.strokeStyle = C.accent; c.lineWidth = 6; c.strokeRect(8, 8, W - 16, H - 16);
+    c.textAlign = 'left'; c.textBaseline = 'middle';
+    const L = (t, x, y, s, col = C.text, w = 600, a = 'left') => { c.font = `${w} ${s}px system-ui, sans-serif`; c.fillStyle = col; c.textAlign = a; c.fillText(t, x, y); };
+    if (!card) {
+      L('SCOREBOARD', 40, 60, 44, C.accent, 800);
+      if (Challenge.active && Challenge.lvl) { const l = Challenge.lvl; L(`${l.id}  ${l.name}`, 40, 130, 36); wrapText(c, l.brief, 40, 180, W - 80, 30, C.muted); L(`Best: ${Progress.d.best[l.id] ?? '–'}   ${'★'.repeat(Progress.d.stars[l.id] | 0)}`, 40, 330, 30, C.accent); }
+      else { L(`Stars: ${Progress.totalStars()} ★`, 40, 130, 36); L('Start a Challenge from the menu (wrist → Level, or the main menu).', 40, 190, 26, C.muted, 500); }
+      B.tex.needsUpdate = true; return;
+    }
+    if (card.level) { // level summary
+      L(`${card.level.id}  ${card.level.name}: complete`, 40, 60, 38, C.accent, 800);
+      L(`${card.score}`, 40, 170, 120, C.text, 800); L('/100', 40 + c.measureText(String(card.score)).width + 10, 190, 40, C.muted);
+      L('★'.repeat(card.stars) + '☆'.repeat(3 - card.stars), 560, 170, 90, '#ffd36a', 700);
+      let y = 280; for (const t of card.tickets) { L(`Ticket #${t.id}: ${t.total}`, 40, y, 30); y += 40; }
+      for (const p of card.penalties) { L(`−${p.pts}  ${p.why}`, 40, y, 26, C.danger, 600); y += 36; }
+      L(card.newBest ? `New personal best! (${card.best})` : `Personal best: ${card.best}`, 40, y + 20, 30, C.on); y += 70;
+      for (const u of card.unlocks) { L(`Unlocked: ${u}`, 40, y, 28, '#ffd36a'); y += 38; }
+      L('Ring the bell or use the menu for the next level.', 40, H - 50, 24, C.muted, 500);
+      B.tex.needsUpdate = true; return;
+    }
+    // Ticket scorecard: every dish, every weighted row.
+    L(`Ticket #${card.id}: ${card.total}/100`, 40, 54, 40, C.accent, 800);
+    let y = 110; const dishes = card.dishes.slice(0, 4), rowH = dishes.length > 2 ? 21 : 27, fs = dishes.length > 2 ? 18 : 22;
+    for (const d of dishes) {
+      L(`${d.name}${d.req ? ` (${d.req})` : ''}: ${d.total}  ${'★'.repeat(d.stars)}`, 40, y, fs + 8, d.failed ? C.danger : C.text, 700); y += rowH + 12;
+      for (const r of d.rows) { L(`${r.k}`, 60, y, fs, C.muted, 600); L(`${r.pts.toFixed(0)}/${r.w}`, 300, y, fs, C.text, 700, 'right'); L(r.note.slice(0, 64), 320, y, fs - 2, C.muted, 500); y += rowH; }
+      for (const n of d.notes) { L('• ' + n.slice(0, 78), 60, y, fs, n.startsWith('FAIL') ? C.danger : '#e0a458', 600); y += rowH; }
+      y += 10;
+    }
+    B.tex.needsUpdate = true;
+  },
+};
+function wrapText(c, text, x, y, maxW, lh, col) { c.fillStyle = col; c.font = `500 ${lh - 4}px system-ui`; let line = ''; for (const w of text.split(' ')) { if (c.measureText(line + w).width > maxW) { c.fillText(line, x, y); y += lh; line = ''; } line += w + ' '; } c.fillText(line, x, y); return y; }
+
+/* ==================================== [CHALLENGE] =================================== */
+// 24 levels in 4 tiers. Tickets print onto the rail with a countdown; plate on the pass and ring the bell.
+// tickets: [{ at: s after start, limit: s, dishes: [{ d, req?, forbid? }] }]. prep: kitchen set-up. tut: tutorial steps.
+const LEVELS = [
+  // Tier 1 — Line Cook tutorials: grabbing, cutting, heat control, the thermometer
+  { id: '1-1', tier: 1, name: 'First Shift: Grab & Slice', brief: 'Grab a tomato and the chef\'s knife, slice it on the board, plate 3 slices on the pass and ring the bell.', tickets: [{ at: 2, limit: 300, dishes: [{ d: 'tomatoSlices' }] }], tut: 'slice' },
+  { id: '1-2', tier: 1, name: 'Toast', brief: 'Two slices of golden toast: drop them in the toaster, dial ~3, press the lever.', tickets: [{ at: 2, limit: 360, dishes: [{ d: 'toast' }] }], prep: { spawn: [['breadSlice', -1.45, 1.0, -2.0], ['breadSlice', -1.55, 1.0, -2.0]] }, tut: 'toast' },
+  { id: '1-3', tier: 1, name: 'Heat Control: Fried Egg', brief: 'Nonstick on a burner, medium heat. Crack the egg when the pan is ~150°C; serve when the white sets and the yolk is still runny.', tickets: [{ at: 2, limit: 480, dishes: [{ d: 'friedEgg' }] }], tut: 'egg' },
+  { id: '1-4', tier: 1, name: 'Pasta Night', brief: 'Fill the stock pot at the sink, boil, salt it, cook spaghetti al dente (~9 min) and serve it in a bowl.', tickets: [{ at: 2, limit: 1500, dishes: [{ d: 'pasta' }] }], tut: 'pasta' },
+  { id: '1-5', tier: 1, name: 'The Thermometer', brief: 'Sear a chicken breast and probe it: 74°C core is the line between safe and sorry.', tickets: [{ at: 2, limit: 1200, dishes: [{ d: 'chicken' }] }], prep: { spawn: [['chickenBreast', -0.9, 1.0, -2.0]] }, tut: 'thermo' },
+  { id: '1-6', tier: 1, name: 'Soft Scramble', brief: 'Pour the beaten eggs into a gentle nonstick and keep them moving into soft curds.', tickets: [{ at: 2, limit: 480, dishes: [{ d: 'scrambled' }] }], tut: 'scramble' },
+  // Tier 2 — Short-Order Rush: several tickets, overlapping timers
+  { id: '2-1', tier: 2, name: 'Breakfast Rush', brief: 'Eggs and toast, back to back.', tickets: [{ at: 2, limit: 420, dishes: [{ d: 'friedEgg' }] }, { at: 60, limit: 420, dishes: [{ d: 'toast' }] }, { at: 150, limit: 420, dishes: [{ d: 'friedEgg' }] }], prep: { spawn: [['breadSlice', -1.45, 1.0, -2.0], ['breadSlice', -1.55, 1.0, -2.0]] } },
+  { id: '2-2', tier: 2, name: 'Pancake Saturday', brief: 'Flip on the bubbles. Bacon on the side.', tickets: [{ at: 2, limit: 600, dishes: [{ d: 'pancakes' }] }, { at: 90, limit: 600, dishes: [{ d: 'bacon' }] }] },
+  { id: '2-3', tier: 2, name: 'Diner Lunch', brief: 'Grilled cheese, then fries (the fryer is already hot).', tickets: [{ at: 2, limit: 600, dishes: [{ d: 'grilledCheese' }] }, { at: 60, limit: 900, dishes: [{ d: 'fries' }] }], prep: { fryer: 175, spawn: [['breadSlice', -1.45, 1.0, -2.0], ['breadSlice', -1.55, 1.0, -2.0], ['potato', 2.3, 1.0, 1.5], ['potato', 2.4, 1.0, 1.5]] } },
+  { id: '2-4', tier: 2, name: 'Burger Joint', brief: 'Two smash burgers: smash early, flip once, cook to 71°C.', tickets: [{ at: 2, limit: 720, dishes: [{ d: 'burger' }] }, { at: 120, limit: 720, dishes: [{ d: 'burger' }] }], prep: { spawn: [['burger', -0.95, 1.0, -2.0], ['burger', -0.85, 1.0, -2.05], ['bun', -2.6, 1.0, 1.1], ['bun', -2.45, 1.0, 1.1]] } },
+  { id: '2-5', tier: 2, name: 'Eggs Three Ways', brief: 'Over hard, French omelette, soft scramble.', tickets: [{ at: 2, limit: 480, dishes: [{ d: 'friedEgg', req: 'over hard' }] }, { at: 80, limit: 540, dishes: [{ d: 'omelette' }] }, { at: 170, limit: 540, dishes: [{ d: 'scrambled' }] }] },
+  { id: '2-6', tier: 2, name: 'Fry Station', brief: 'Fries twice, shrimp in between.', tickets: [{ at: 2, limit: 900, dishes: [{ d: 'fries' }] }, { at: 90, limit: 600, dishes: [{ d: 'shrimp' }] }, { at: 240, limit: 900, dishes: [{ d: 'fries' }] }], prep: { fryer: 175, spawn: [['potato', 2.3, 1.0, 1.5], ['potato', 2.4, 1.0, 1.5], ['potato', 2.5, 1.0, 1.5]] } },
+  // Tier 3 — Bistro: doneness requests, sauces, plating
+  { id: '3-1', tier: 3, name: 'Steak, Rare', brief: 'The guest wants it rare: peak core 46–53°C. Remember carryover while it rests.', tickets: [{ at: 2, limit: 900, dishes: [{ d: 'steak', req: 'rare' }] }] },
+  { id: '3-2', tier: 3, name: 'Two Steaks', brief: 'One medium-rare, one medium. Same pan, different pulls.', tickets: [{ at: 2, limit: 1000, dishes: [{ d: 'steak', req: 'medium-rare' }] }, { at: 30, limit: 1000, dishes: [{ d: 'steak', req: 'medium' }] }], prep: { spawn: [['filet', -0.9, 1.0, -2.0]] } },
+  { id: '3-3', tier: 3, name: 'Fish Course', brief: 'Crispy-skin salmon, then garlic shrimp.', tickets: [{ at: 2, limit: 840, dishes: [{ d: 'salmon' }] }, { at: 120, limit: 600, dishes: [{ d: 'shrimp' }] }] },
+  { id: '3-4', tier: 3, name: 'Pan Sauce', brief: 'Sear a steak medium-rare, then mount a glossy butter sauce (stock + cold butter) and serve it in a bowl on the pass.', tickets: [{ at: 2, limit: 1200, dishes: [{ d: 'steakSauce', req: 'medium-rare' }] }] },
+  { id: '3-5', tier: 3, name: 'Roman Holiday', brief: 'Carbonara: eggs + parmesan + pasta water, off the heat so it stays silky.', tickets: [{ at: 2, limit: 1500, dishes: [{ d: 'carbonara' }] }] },
+  { id: '3-6', tier: 3, name: 'Pork & Greens', brief: 'Pork chop to 63°C, and a Caesar with an emulsified dressing.', tickets: [{ at: 2, limit: 1000, dishes: [{ d: 'porkChop' }] }, { at: 60, limit: 900, dishes: [{ d: 'caesar' }] }], prep: { spawn: [['porkChop', -0.9, 1.0, -2.0], ['lettuce', 0.5, 1.0, 0.0]] } },
+  // Tier 4 — Head Chef: 3–4 dish tickets, special requests, incidents
+  { id: '4-1', tier: 4, name: 'Friday Service', brief: 'Steak frites and a Caesar on one ticket. Watch your burners.', tickets: [{ at: 2, limit: 1500, dishes: [{ d: 'steak', req: 'medium-rare' }, { d: 'fries' }, { d: 'caesar' }] }], prep: { fryer: 175, spawn: [['potato', 2.3, 1.0, 1.5], ['potato', 2.4, 1.0, 1.5], ['lettuce', 0.5, 1.0, 0.0]] }, incidents: ['burner'] },
+  { id: '4-2', tier: 4, name: 'Family Table', brief: '"Burger medium, no onion", a chicken breast and fries.', tickets: [{ at: 2, limit: 1500, dishes: [{ d: 'burger', req: 'medium', forbid: ['onion'] }, { d: 'chicken' }, { d: 'fries' }] }], prep: { fryer: 175, spawn: [['burger', -0.95, 1.0, -2.0], ['bun', -2.6, 1.0, 1.1], ['chickenBreast', -0.85, 1.0, -2.05], ['potato', 2.3, 1.0, 1.5]] }, incidents: ['alarm'] },
+  { id: '4-3', tier: 4, name: "Critic's Table", brief: 'Steak rare with butter sauce, salmon, carbonara. The critic notices everything.', tickets: [{ at: 2, limit: 1800, dishes: [{ d: 'steakSauce', req: 'rare' }, { d: 'salmon' }, { d: 'carbonara' }] }], incidents: ['burner', 'alarm'] },
+  { id: '4-4', tier: 4, name: 'Brunch Chaos', brief: 'Eggs, bacon, pancakes and toast for one table.', tickets: [{ at: 2, limit: 1200, dishes: [{ d: 'friedEgg' }, { d: 'bacon' }, { d: 'pancakes' }, { d: 'toast' }] }], prep: { spawn: [['breadSlice', -1.45, 1.0, -2.0], ['breadSlice', -1.55, 1.0, -2.0]] }, incidents: ['alarm'] },
+  { id: '4-5', tier: 4, name: 'Surf & Turf', brief: 'Steak medium-well, shrimp, fries and a Caesar.', tickets: [{ at: 2, limit: 1800, dishes: [{ d: 'steak', req: 'medium-well' }, { d: 'shrimp' }, { d: 'fries' }, { d: 'caesar' }] }], prep: { fryer: 175, spawn: [['potato', 2.3, 1.0, 1.5], ['lettuce', 0.5, 1.0, 0.0]] }, incidents: ['burner'] },
+  { id: '4-6', tier: 4, name: 'Head Chef Finale', brief: 'Two full tables. Everything you have learned, at once.', tickets: [{ at: 2, limit: 1800, dishes: [{ d: 'burger', req: 'medium', forbid: ['onion'] }, { d: 'fries' }, { d: 'chicken' }] }, { at: 300, limit: 1800, dishes: [{ d: 'steak', req: 'rare' }, { d: 'salmon' }, { d: 'carbonara' }, { d: 'caesar' }] }], prep: { fryer: 175, spawn: [['burger', -0.95, 1.0, -2.0], ['bun', -2.6, 1.0, 1.1], ['chickenBreast', -0.85, 1.0, -2.05], ['potato', 2.3, 1.0, 1.5], ['lettuce', 0.5, 1.0, 0.0]] }, incidents: ['burner', 'alarm'] },
+];
+// Tier 1 tutorial steps: text + ghost-hint target + completion check (all read live world state).
+const TUTORIALS = {
+  slice: [
+    { t: 'Grab the tomato on the island (grip / LMB).', hint: () => W.food('tomato'), done: () => W.held((p) => p.foodKey === 'tomato') },
+    { t: 'Put it on the cutting board, then grab the chef\'s knife.', hint: () => W.prop('chefKnife'), done: () => W.held((p) => p.key === 'chefKnife') },
+    { t: 'Push the edge down through the tomato. Saw a little. Make 3+ slices.', hint: () => W.food('tomato'), done: () => W.count((p) => p.foodKey === 'tomato' && !p.whole) >= 3 },
+    { t: 'Grab a plate and set it on the steel pass by the bell.', hint: () => W.prop('plate'), done: () => Pass.collect().length > 0 },
+    { t: 'Put 3 tomato slices on the plate.', hint: () => W.plateOnPass(), done: () => Pass.collect().some((pl) => pl.comps.filter((c) => c.key === 'tomato').length >= 3) },
+    { t: 'Ring the service bell (tap it, or grab it and press trigger).', hint: () => W.prop('serviceBell'), done: () => false },
+  ],
+  toast: [
+    { t: 'Grab a slice of bread by the toaster.', hint: () => W.food('breadSlice'), done: () => W.held((p) => p.foodKey === 'breadSlice') },
+    { t: 'Drop both slices into the toaster slots.', hint: () => Toaster.leverMesh, done: () => Foods.pieces.filter((p) => p.alive && Toaster.slotOf(p.renderPos) >= 0).length >= 2 || Toaster.down },
+    { t: 'Turn the dial to ~3, then push the lever down.', hint: () => Toaster.leverMesh, done: () => Toaster.down },
+    { t: 'They pop up golden. Plate them on the pass.', hint: () => W.plateOnPass() || W.prop('plate'), done: () => Pass.collect().some((pl) => pl.comps.filter((c) => c.key === 'breadSlice').length >= 2) },
+    { t: 'Ring the bell!', hint: () => W.prop('serviceBell'), done: () => false },
+  ],
+  egg: [
+    { t: 'Set the nonstick pan on a burner.', hint: () => W.prop('nonstick'), done: () => W.pan('nonstick')?.onBurner >= 0 },
+    { t: 'Twist that burner\'s knob: click-click, then back to medium.', hint: () => W.knobFor(W.pan('nonstick')), done: () => { const k = W.knobFor(W.pan('nonstick')); return k && k.lit; } },
+    { t: 'Wait for ~150°C (X / Chef\'s Eye shows the pan temperature).', hint: () => W.pan('nonstick'), done: () => (W.pan('nonstick')?.thermo.T || 0) > 140 },
+    { t: 'Crack an egg on the rim (tap it, or press trigger) into the pan.', hint: () => W.food('egg') || W.food('eggShell'), done: () => W.count((p) => p.foodKey === 'eggWhite' && p.inPan) > 0 },
+    { t: 'When the white is set and the yolk still glossy, slide it onto a plate at the pass.', hint: () => W.plateOnPass() || W.prop('plate'), done: () => Pass.collect().some((pl) => pl.comps.some((c) => c.key === 'eggWhite')) },
+    { t: 'Ring the bell!', hint: () => W.prop('serviceBell'), done: () => false },
+  ],
+  pasta: [
+    { t: 'Fill the stock pot at the faucet (lift the lever).', hint: () => W.prop('stockPot'), done: () => (W.prop('stockPot')?.contents.m.water || 0) > 2 },
+    { t: 'Put it on a big burner, high heat. A lid speeds it up.', hint: () => W.prop('stockPot'), done: () => W.prop('stockPot')?.onBurner >= 0 },
+    { t: 'At a rolling boil, salt it well (shake the salt box over it).', hint: () => W.prop('saltBox'), done: () => (W.prop('stockPot')?.contents.m.salt || 0) > 0.01 },
+    { t: 'Add two bundles of spaghetti from the pantry.', hint: () => W.food('spaghetti'), done: () => W.count((p) => p.fdef.pasta && p.inLiquid) > 0 },
+    { t: 'Fish it out when al dente (~9 min) into a bowl on the pass.', hint: () => W.prop('bowl'), done: () => Pass.collect().some((pl) => pl.comps.some((c) => c.key === 'spaghetti')) },
+    { t: 'Ring the bell!', hint: () => W.prop('serviceBell'), done: () => false },
+  ],
+  thermo: [
+    { t: 'Heat the cast-iron pan on a burner, a little oil in it.', hint: () => W.prop('castIron'), done: () => (W.prop('castIron')?.thermo.T || 0) > 170 },
+    { t: 'Lay the chicken breast in. Flip every couple of minutes.', hint: () => W.food('chickenBreast'), done: () => W.count((p) => p.foodKey === 'chickenBreast' && p.inPan) > 0 },
+    { t: 'Grab the thermometer and push the probe into the thickest part.', hint: () => W.prop('thermometer'), done: () => { const t = W.prop('thermometer'); return t && t.state && t.state.food && t.state.food.fdef.doneness === 'poultry'; } },
+    { t: 'Cook until the probe reads 74°C, then plate it on the pass.', hint: () => W.plateOnPass() || W.prop('plate'), done: () => Pass.collect().some((pl) => pl.comps.some((c) => c.key === 'chickenBreast')) },
+    { t: 'Ring the bell!', hint: () => W.prop('serviceBell'), done: () => false },
+  ],
+  scramble: [
+    { t: 'Nonstick on a burner, LOW heat. A knob of butter helps.', hint: () => W.prop('nonstick'), done: () => W.pan('nonstick')?.onBurner >= 0 && (W.knobFor(W.pan('nonstick'))?.lit) },
+    { t: 'Pour the beaten eggs (fridge) into the pan.', hint: () => W.prop('beatenEggs'), done: () => W.count((p) => p.foodKey === 'beatenEgg') > 0 },
+    { t: 'Drag a spatula or spoon through them to break curds.', hint: () => W.prop('spatula'), done: () => Foods.piles.some((p) => p.alive && p.foodKey === 'beatenEgg') },
+    { t: 'Plate the soft curds on the pass.', hint: () => W.plateOnPass() || W.prop('plate'), done: () => Pass.collect().some((pl) => pl.comps.some((c) => c.key === 'beatenEgg')) },
+    { t: 'Ring the bell!', hint: () => W.prop('serviceBell'), done: () => false },
+  ],
+};
+// World-state query helpers for tutorials / recipes / ghost hints.
+const W = {
+  prop: (k) => Props.list.find((p) => p.alive && p.key === k) || null,
+  food: (k) => Foods.pieces.find((p) => p.alive && p.foodKey === k && !p.holders.length) || Foods.pieces.find((p) => p.alive && p.foodKey === k) || null,
+  held: (fn) => HANDS.some((h) => h.held && fn(h.held)),
+  ovenPos: () => { const O = Oven.O; return O ? new THREE.Vector3((O.x0 + O.x1) / 2, O.y1 + 0.05, O.z1) : null; },
+  count: (fn) => { let n = 0; for (const p of Foods.pieces) if (p.alive && fn(p)) n++; return n; },
+  pan: (k) => W.prop(k),
+  knobFor: (pan) => pan && pan.onBurner >= 0 ? Stove.knobs.find((k) => k.burner === pan.onBurner) : Stove.knobs.find((k) => k.burner === 1),
+  plateOnPass: () => { const c = Pass.collect(); return c.length ? c[0].v : null; },
+  anyFoodIn: (k, vesselKey) => Foods.pieces.some((p) => p.alive && p.foodKey === k && p.inPan && p.inPan.key === vesselKey),
+};
+// Ghost hint: a pulsing translucent marker + arrow over the next tool or ingredient.
+const Ghost = {
+  target: null,
+  init() {
+    this.mat = new THREE.MeshBasicMaterial({ color: 0x8fe3ff, transparent: true, opacity: 0.5, depthWrite: false, blending: THREE.AdditiveBlending });
+    this.ring = new THREE.Mesh(new THREE.TorusGeometry(0.08, 0.006, 6, 32), this.mat); this.ring.rotation.x = Math.PI / 2;
+    this.arrow = new THREE.Mesh(new THREE.ConeGeometry(0.025, 0.06, 12).rotateX(Math.PI), this.mat);
+    this.g = new THREE.Group(); this.g.add(this.ring, this.arrow); this.g.visible = false; this.g.renderOrder = 15; scene.add(this.g);
+  },
+  set(t) { this.target = t; },
+  update(dt) {
+    const t = this.target; let p = null;
+    if (t) p = t.isVector3 ? t : t.renderPos || (t.pos && t.pos.isVector3 ? t.pos : null) || (t.position && t.position.isVector3 ? t.getWorldPosition(_v2) : null);
+    if (!p) { this.g.visible = false; return; }
+    const k = 0.5 + 0.5 * Math.sin(Sim.clock * 5);
+    this.g.position.copy(p); this.g.visible = true; this.ring.scale.setScalar(1 + 0.25 * k); this.mat.opacity = 0.35 + 0.35 * k;
+    this.arrow.position.y = 0.16 + 0.03 * k; this.ring.position.y = 0.01;
+  },
+};
+
+const Challenge = {
+  active: false, lvl: null, tickets: [], t: 0, nextId: 101, penalties: [], results: [], tutStep: 0, incidents: [], done: false,
+  start(id) {
+    const lvl = LEVELS.find((l) => l.id === id); if (!lvl) return;
+    UI.closeBoard(); Game.mode = 'challenge'; Game.setTimeScale(1); Game.setGravity(1); Game.noHazards = false; Mentor.enabled = true;
+    Props.resetKitchen(); Cosmetics.apply(); Safety.stop();
+    this.lvl = lvl; this.active = true; this.done = false; this.t = 0; this.penalties = []; this.results = []; this.tutStep = 0; this.nextId = 101 + Math.floor(Math.random() * 50);
+    this.tickets = lvl.tickets.map((t) => ({ ...t, id: 0, printed: false, done: false, left: t.limit }));
+    const P = lvl.prep || {};
+    if (P.fryer) { const fk = Stove.knobs.find((k) => k.oven === 'fryer'); Stove.setAngle(fk, 0.3 + (P.fryer - FRYER.minT) / (FRYER.maxT - FRYER.minT) * (CONFIG.stove.knobMax - 0.3)); Fryer.thermo.contents.T = P.fryer; }
+    for (const [k, x, y, z] of P.spawn || []) Foods.spawn(k, new THREE.Vector3(x, y, z), new THREE.Quaternion(), true, ['breadSlice', 'bun', 'potato', 'lettuce'].includes(k) ? 21 : 4);
+    // Tier 4 incidents at random moments in the first few minutes.
+    this.incidents = (lvl.incidents || []).map((kind) => ({ kind, at: 90 + Math.random() * 240, fired: false }));
+    Pass.drawBoard(null); Pass.drawRail(true);
+    toast(`${lvl.id} ${lvl.name}: ${lvl.brief}`, 5000); Bubble.show(`${lvl.id} ${lvl.name}`, '', 3000);
+    if (lvl.tut) Ghost.set(null);
+    Loco.recenter();
+  },
+  quit(silent) { this.active = false; this.lvl = null; this.tickets = []; Ghost.set(null); Game.mode = 'sandbox'; Safety.stop(); for (const k of Stove.knobs) k.failed = 0; Pass.idle(); if (!silent) toast('Left the challenge', 1200); },
+  penalty(pts, why) { if (!this.active) return; const p = this.penalties.find((q) => q.why === why); if (p) { if (p.pts < 20) p.pts += pts; } else this.penalties.push({ pts, why }); },
+  update(dt) {
+    if (!this.active) return;
+    this.t += dt;
+    for (const t of this.tickets) {
+      if (!t.printed && this.t >= t.at) { t.printed = true; t.id = this.nextId++; this.printSound(); toast(`Ticket #${t.id}: ${t.dishes.map((d) => DISH_SPECS[d.d].name + (d.req ? ` (${d.req})` : '') + (d.forbid ? ` no ${d.forbid}` : '')).join(' + ')}`, 3500); }
+      if (t.printed && !t.done) { t.left -= dt; if (t.left <= -60) { t.done = true; t.result = { id: t.id, total: 0, dishes: [] }; this.results.push(t.result); toast(`Ticket #${t.id} walked out (too slow)`, 2000); } }
+    }
+    for (const inc of this.incidents) if (!inc.fired && this.t > inc.at) { inc.fired = true; this.incident(inc.kind); }
+    // Tutorial steps (tier 1): ghost hint the next tool, advance when its check passes.
+    if (this.lvl.tut && !this.done) {
+      const steps = TUTORIALS[this.lvl.tut], s = steps[this.tutStep];
+      if (s) { let tg = null; try { tg = s.hint(); } catch (e) { tg = null; } Ghost.set(tg); let ok = false; try { ok = s.done(); } catch (e) { ok = false; } if (ok) { this.tutStep++; AudioSys.uiTick(); UI.dirty = true; const n = steps[this.tutStep]; if (n) Bubble.show(n.t, 'chef', 4500); } }
+      if (this.tutHintT === undefined || this.t - this.tutHintT > 20) { this.tutHintT = this.t; if (s) { Bubble.show(s.t, 'chef', 4500); domToast('👨‍🍳 ' + s.t, 4000); } }
+    }
+    if (!this.done && this.tickets.every((t) => t.done)) this.finish();
+  },
+  incident(kind) {
+    if (kind === 'burner') {
+      const lit = Stove.knobs.filter((k) => k.burner >= 0 && k.burner < 4 && k.lit), k = lit.find((q) => Stove.pans.some((p) => p.onBurner === q.burner)) || lit[0] || Stove.knobs.find((q) => q.burner === 0);
+      k.failed = 60; if (k.lit) { k.lit = false; AudioSys.flameOff(k.pos); } Mentor.say('burner', true); toast(`⚠ Burner ${k.burner + 1} failed! It won't light for a minute.`, 3000);
+    } else if (kind === 'alarm') { Safety.trigger(true); toast('⚠ The smoke alarm is going off! Hush it (button on the wall by the pass).', 3000); }
+  },
+  printSound() { if (!AudioSys.ready) return; const v = AudioSys.voice(Pass.rail.m.position, 0.7, 0.4); if (!v) return; const t = AudioSys.ctx.currentTime; for (let i = 0; i < 6; i++) AudioSys.burst(v, t + i * 0.09, 0.07, 0.6, 'bandpass', 2500, 3); },
+  // The bell: judge the oldest open ticket against what is plated on the pass.
+  onBell() {
+    if (!this.active) { if (Game.mode !== 'sandbox') return; const pl = Pass.collect(); if (pl.length && pl.some((p) => p.comps.length)) this.sandboxCard(pl); return; }
+    if (this.done) { const i = LEVELS.indexOf(this.lvl); if (LEVELS[i + 1]) this.start(LEVELS[i + 1].id); return; }
+    const t = this.tickets.find((q) => q.printed && !q.done); if (!t) { toast('No tickets on the rail yet', 1200); return; }
+    const plates = Pass.collect().filter((p) => p.comps.length || (p.stage && p.stage !== 'empty'));
+    if (!plates.length) { toast('Plate the food on the pass first', 1400); return; }
+    const res = this.judge(t, plates);
+    t.done = true; t.result = res; this.results.push(res);
+    Pass.drawBoard(res); Mentor.say('served', true);
+    toast(`Ticket #${t.id}: ${res.total}/100 ${'★'.repeat(starsFor(res.total))}`, 2500);
+    // Clear the pass: served food goes out, plates come back clean.
+    for (const pl of plates) { for (const c of pl.comps) if (c.piece.alive) Props.remove(c.piece); if (pl.v.contents) { pl.v.contents = new Contents(); } if (pl.v.spawned) Props.remove(pl.v); else pl.v.teleport(pl.v.homePos, pl.v.homeQuat); }
+  },
+  judge(t, plates) {
+    const stages = plates.map((p) => p.stage).filter(Boolean), strays = Pass.strays(plates);
+    // Score every dish against every plate, then assign greedily (best pairs first).
+    const cand = [];
+    t.dishes.forEach((d, di) => plates.forEach((pl, pi) => {
+      const forbidFound = d.forbid ? [...new Set(pl.comps.filter((c) => d.forbid.some((f) => c.key.startsWith(f))).map((c) => c.key))] : [];
+      const keys = DISH_SPECS[d.d].comps.flatMap((c) => c.keys), spill = strays.filter((s) => keys.includes(s.foodKey)).length;
+      const r = scoreDish(d.d, pl.comps, { req: d.req, remaining: t.left, limit: t.limit, stages, forbidFound, spill });
+      cand.push({ di, pi, r });
+    }));
+    cand.sort((a, b) => b.r.total - a.r.total);
+    const usedD = new Set(), usedP = new Set(), dishes = [];
+    for (const c of cand) { if (usedD.has(c.di) || usedP.has(c.pi)) continue; usedD.add(c.di); usedP.add(c.pi); dishes[c.di] = c.r; }
+    t.dishes.forEach((d, di) => { if (!dishes[di]) dishes[di] = { name: DISH_SPECS[d.d].name, req: d.req || '', total: 0, failed: true, rows: [], notes: ['not served'], stars: 0 }; });
+    const total = Math.round(dishes.reduce((s, d) => s + d.total, 0) / dishes.length);
+    return { id: t.id, total, dishes };
+  },
+  sandboxCard(plates) {
+    // Sandbox: ring the bell to get a scorecard for whatever is plated (best-matching dish per plate).
+    const dishes = [];
+    for (const pl of plates.slice(0, 3)) { let best = null; for (const k in DISH_SPECS) { const r = scoreDish(k, pl.comps, { stages: plates.map((p) => p.stage).filter(Boolean) }); if (!best || r.total > best.total) best = r; } if (best) dishes.push(best); }
+    if (!dishes.length) return; Pass.drawBoard({ id: 'sandbox', total: Math.round(dishes.reduce((s, d) => s + d.total, 0) / dishes.length), dishes }); toast('Scorecard on the board by the pass', 1500);
+  },
+  finish() {
+    this.done = true; Ghost.set(null);
+    const avg = this.results.length ? this.results.reduce((s, r) => s + r.total, 0) / this.results.length : 0;
+    const pen = this.penalties.reduce((s, p) => s + p.pts, 0), score = Math.max(0, Math.round(avg - pen)), stars = starsFor(score);
+    const rec = Progress.record(this.lvl.id, score, stars);
+    Pass.drawBoard({ level: this.lvl, score, stars, tickets: this.results, penalties: this.penalties, best: rec.best, newBest: rec.newBest, unlocks: rec.unlocks });
+    Mentor.say(stars >= 2 ? 'crust' : 'served', true);
+    toast(`${this.lvl.name} complete: ${score}/100 ${'★'.repeat(stars)}${rec.unlocks.length ? '  Unlocked: ' + rec.unlocks.join(', ') : ''}`, 5000);
+    for (const k of Stove.knobs) k.failed = 0; Safety.stop(); UI.dirty = true;
+  },
+};
+
+/* ==================================== [RECIPES] ===================================== */
+// Free recipe book: step-by-step guidance with live completion checks and a ghost hint on the next item.
+const R = (t, hint, done) => ({ t, hint, done: done || (() => false) });
+const RECIPES = [
+  { k: 'steak', name: 'Pan-seared steak, butter baste', steps: [R('Pat the ribeye dry with a paper towel and salt it.', () => W.food('ribeye'), () => (W.food('ribeye')?.th.salt || 0) > 0.002), R('Cast iron on the big burner, high, until it smokes (~230°C).', () => W.prop('castIron'), () => (W.prop('castIron')?.thermo.T || 0) > 220), R('Lay the steak in; flip every minute.', () => W.food('ribeye'), () => W.anyFoodIn('ribeye', 'castIron')), R('Add butter, tilt the pan and baste with a spoon.', () => W.food('butter'), () => (W.prop('castIron')?.contents.m.butterfat || 0) > 0.01), R('Pull at 52°C core (thermometer); rest 5 min → ~56°C.', () => W.prop('thermometer'), () => (W.food('ribeye')?.th.coreMax || 0) > 52), R('Slice against the grain and plate.', () => W.prop('chefKnife'))] },
+  { k: 'burger', name: 'Smash burger', steps: [R('Cast iron very hot (~230°C).', () => W.prop('castIron'), () => (W.prop('castIron')?.thermo.T || 0) > 220), R('Patty in, smash it flat with the spatula (trigger).', () => W.prop('spatula'), () => (W.food('burger')?.smashes || 0) > 0), R('Flip once when deeply browned; cook to 71°C.', () => W.food('burger'), () => (W.food('burger')?.th.coreMax || 0) >= 71), R('Cheese on top to melt, then into a toasted bun.', () => W.food('cheddar'))] },
+  { k: 'fries', name: 'Double-fried fries', steps: [R('Cut potatoes into batons.', () => W.food('potato'), () => W.count((p) => p.foodKey === 'potato' && !p.whole) >= 4), R('Fryer to 160°C: blanch 5–6 min until soft, not coloured.', () => Fryer.vessel), R('Hang the basket, let them rest; fryer up to 190°C.', () => Fryer.vessel), R('Second fry 2–3 min until golden and crisp. Salt while hot.', () => W.prop('saltBox'))] },
+  { k: 'salmon', name: 'Crispy-skin salmon', steps: [R('Dry the skin well; salt.', () => W.food('salmon')), R('Hot pan with oil; skin side down, press flat 30 s.', () => W.prop('sautePan'), () => W.anyFoodIn('salmon', 'sautePan')), R('Cook 80% on the skin; flip briefly. Pull at ~50°C.', () => W.prop('thermometer'), () => (W.food('salmon')?.th.coreMax || 0) > 48)] },
+  { k: 'friedChicken', name: 'Fried chicken', steps: [R('Dredge: flour → egg wash → crumbs (bowls by the fryer).', () => W.prop('flourBowl')), R('Fryer at 170°C.', () => Fryer.vessel), R('Fry until 74°C core and golden.', () => W.prop('thermometer'))] },
+  { k: 'roastChicken', name: 'Roast chicken', steps: [R('Oven to 220°C bake (dials left/right).', () => W.ovenPos()), R('Whole chicken in the baking dish, on the middle rack.', () => W.prop('bakingDish')), R('Roast until the thigh reads 74°C+ (about an hour). Rest 15 min.', () => W.prop('thermometer'))] },
+  { k: 'omelette', name: 'Classic omelette', steps: [R('Nonstick, medium-low, butter.', () => W.prop('nonstick')), R('Pour the beaten eggs; swirl and stir gently.', () => W.prop('beatenEggs'), () => W.count((p) => p.foodKey === 'beatenEgg') > 0), R('When almost set, fold it with the spatula (trigger).', () => W.prop('spatula'), () => Foods.pieces.some((p) => p.alive && p.folded))] },
+  { k: 'scrambled', name: 'Scrambled eggs', steps: [R('Nonstick on low with butter.', () => W.prop('nonstick')), R('Pour the beaten eggs and keep stirring into curds.', () => W.prop('spatula'), () => Foods.piles.some((p) => p.alive && p.foodKey === 'beatenEgg')), R('Pull them while still glossy.', () => W.prop('plate'))] },
+  { k: 'friedEgg', name: 'Fried eggs', steps: [R('Nonstick to ~150°C with a little butter.', () => W.prop('nonstick'), () => (W.prop('nonstick')?.thermo.T || 0) > 140), R('Crack the egg on the rim into the pan.', () => W.food('eggShell') || W.food('egg'), () => W.count((p) => p.foodKey === 'eggWhite') > 0), R('Cook until the white sets; yolk stays runny.', () => W.food('eggWhite'))] },
+  { k: 'pomodoro', name: 'Spaghetti al pomodoro', steps: [R('Boil salted water in the stock pot.', () => W.prop('stockPot'), () => (W.prop('stockPot')?.contents.boiling || 0) > 0.5), R('Saucepan: olive oil, garlic, canned tomatoes; simmer to thicken.', () => W.prop('cannedTomatoes')), R('Spaghetti in for ~9 min (al dente).', () => W.food('spaghetti')), R('Toss pasta in the sauce with a splash of pasta water.', () => W.prop('ladle'))] },
+  { k: 'carbonara', name: 'Carbonara', steps: [R('Cook spaghetti al dente; keep some pasta water.', () => W.food('spaghetti')), R('Bowl: yolks + grated parmesan + pepper.', () => W.prop('eggYolks')), R('OFF the heat: pasta + egg mix + pasta water; stir until silky (stays under ~70°C).', () => W.prop('mixingBowl'))] },
+  { k: 'friedRice', name: 'Fried rice', steps: [R('Cook rice (or use cooled rice).', () => W.prop('riceBag')), R('Wok screaming hot, oil.', () => W.prop('wok'), () => (W.prop('wok')?.thermo.T || 0) > 220), R('Rice in; toss (flick the wok up) so it toasts, not scorches. Soy at the end.', () => W.prop('soySauce'))] },
+  { k: 'stirfry', name: 'Stir-fry', steps: [R('Slice peppers, carrot, broccoli and chicken thin.', () => W.prop('chefKnife')), R('Wok smoking hot; cook in batches; keep tossing.', () => W.prop('wok')), R('Chicken to 74°C; finish with soy.', () => W.prop('thermometer'))] },
+  { k: 'grilledCheese', name: 'Grilled cheese', steps: [R('Grate or slice cheddar between two bread slices.', () => W.prop('grater')), R('Butter in a medium pan; lid on to melt the cheese.', () => W.prop('potLid')), R('Flip when golden; serve when gooey.', () => W.prop('spatula'))] },
+  { k: 'pizza', name: 'Neapolitan pizza', steps: [R('Knead the pizza dough with two hands until springy.', () => W.food('pizzaDough'), () => (W.food('pizzaDough')?.th.cook.gluten || 0) > 0.6), R('Stretch it (pull hands apart) or roll it into a base.', () => W.prop('rollingPin')), R('Sauce + mozzarella on the sheet pan; oven max, broil to finish.', () => W.prop('sheetPan'))] },
+  { k: 'pancakes', name: 'Pancakes', steps: [R('Nonstick at medium (~170°C).', () => W.prop('nonstick'), () => (W.prop('nonstick')?.thermo.T || 0) > 150), R('Pour pancake batter (fridge) into rounds.', () => W.prop('pancakeBatter'), () => W.count((p) => p.foodKey === 'pancake') > 0), R('Flip when bubbles stay open on top.', () => W.prop('spatula'))] },
+  { k: 'cookies', name: 'Choc-chip cookies', steps: [R('Oven 180°C bake.', () => W.ovenPos()), R('Cookie dough balls on the sheet pan, spaced out.', () => W.food('cookieDough')), R('Bake ~11 min: golden edges, soft middles.', () => W.prop('sheetPan'))] },
+  { k: 'bread', name: 'Bread loaf', steps: [R('Mix flour + water + yeast + salt in the mixing bowl; stir until a dough forms.', () => W.prop('mixingBowl')), R('Knead (two hands) until springy; proof somewhere warm.', () => W.food('breadDough')), R('Into the loaf pan; bake at 220°C until 93–99°C inside.', () => W.prop('loafPan'))] },
+  { k: 'mash', name: 'Mashed potatoes', steps: [R('Cube potatoes; boil in salted water until tender.', () => W.food('potato')), R('Mash with a spoon/whisk; butter and milk in.', () => W.prop('woodenSpoon'))] },
+  { k: 'onionSoup', name: 'French onion soup', steps: [R('Slice onions; slowly caramelize in butter, low heat (~40 min).', () => W.food('onion')), R('Add stock; simmer.', () => W.prop('stockCarton')), R('Top with toast and cheese; broil.', () => W.prop('grater'))] },
+  { k: 'guac', name: 'Guacamole', steps: [R('Halve the avocado (knife), pit it, scoop with a spoon.', () => W.food('avocado')), R('Mash; lime juice (squeeze a cut lime); salt.', () => W.food('lime') || W.food('limeF'))] },
+  { k: 'caesar', name: 'Caesar salad', steps: [R('Whisk oil + lemon + yolk + parmesan into a creamy dressing.', () => W.prop('whisk')), R('Tear/cut lettuce; dress it in a bowl.', () => W.food('lettuce'))] },
+  { k: 'tacos', name: 'Tacos', steps: [R('Warm tortillas in a dry pan.', () => W.food('tortilla')), R('Brown the filling; season.', () => W.food('burger')), R('Fill and fold (trigger on a tortilla).', () => W.food('tortilla'))] },
+  { k: 'caramel', name: 'Caramel sauce', steps: [R('Sugar + splash of water in the saucepan, medium heat.', () => W.prop('sugarBag')), R('Swirl until amber; don\'t stir.', () => W.prop('saucepan')), R('Off the heat, whisk in cream.', () => W.prop('creamCarton'))] },
+];
+const RecipeBook = {
+  cur: null, step: 0,
+  open(k) { this.cur = RECIPES.find((r) => r.k === k) || null; this.step = 0; UI.dirty = true; },
+  update() {
+    if (!this.cur || Challenge.active) return;
+    const s = this.cur.steps[this.step]; if (!s) { Ghost.set(null); return; }
+    let tg = null; try { tg = s.hint(); } catch (e) { tg = null; } Ghost.set(tg);
+    let ok = false; try { ok = s.done(); } catch (e) { ok = false; }
+    if (ok) { this.step++; AudioSys.uiTick(); UI.dirty = true; const n = this.cur.steps[this.step]; if (n) Bubble.show(n.t, 'chef', 4000); else Bubble.show(`${this.cur.name}: done! Plate it and ring the bell for a scorecard.`, 'chef', 4000); }
+  },
+};
 /* ======================================= [SIM] ====================================== */
 // Fixed-step simulation clock. The thermal/cooking model (M2+) plugs in here; M1 runs timers.
 const Sim = {
@@ -8189,7 +9087,7 @@ const XRSession = {
     camera.position.set(0, 0, 0); camera.rotation.set(0, 0, 0);
     $('overlay').classList.add('hidden'); $('hint').style.display = 'none'; $('crosshair').style.display = 'none';
     for (const h of HANDS) { if (h.held) Grab.release(h, false); h.setActive(false); }
-    UI.open = false;
+    UI.open = false; Game.onStart();
   },
   onEnd() {
     this.session = null; Input.mode = 'desktop';
@@ -8270,6 +9168,7 @@ function frame() {
   safe('piles', U.piles);
   safe('liquids', U.liquids, dt);
   safe('m4', U.m4, dt);
+  safe('m5', U.m5, dt);
   safe('sim', U.sim, dt);
   safe('stove', U.stove, dt);
   safe('particles', U.particles, dt);
@@ -8308,6 +9207,8 @@ async function boot() {
     Foods.initial();
     Hands.init();
     UI.init();
+    Progress.load(); Cosmetics.init(); Bubble.init(); Ghost.init(); Safety.init(); Pass.init();
+    toastSink = (m, ms) => { if (Input.mode === 'xr') Bubble.show(m, '', ms); };
     Loco.init();
     PerfHUD.init();
     Input.setupXR();
@@ -8322,6 +9223,7 @@ async function boot() {
       stove: Stove.update.bind(Stove), particles: Particles.update.bind(Particles), chefsEye: ChefEye.update.bind(ChefEye),
       oven: Oven.update.bind(Oven), liquids: Liquids.update.bind(Liquids),
       m4pre: (dt) => { Fryer.update(dt); Utensils.update(dt); Fridge.update(dt); Microwave.update(dt); Toaster.update(dt); Mixer.update(dt); Bakery.update(dt); Kitchenware.update(dt); ShadowLOD.update(); },
+      m5: (dt) => { Game.update(dt); Challenge.update(dt); RecipeBook.update(); Ghost.update(dt); Mentor.update(dt); Safety.update(dt); Pass.update(dt); Bubble.update(dt); },
       m4: (dt) => { Grill.update(dt); Fire.update(dt); FX.update(dt); Seasoning.update(); Eating.update(dt); TasteCard.update(dt); Reaction.update(dt); Kettle.update(dt); },
     });
     renderer.xr.addEventListener('sessionstart', () => XRSession.onStart());
@@ -8333,14 +9235,14 @@ async function boot() {
     if (new URLSearchParams(location.search).has('test')) setTimeout(() => safe('testMode', () => TestMode.run()), 50);
     renderer.setAnimationLoop(frame);
     // Debug handle for the browser console (inspect state, tweak CONFIG live).
-    window.MEP = { THREE, RAPIER, CONFIG, resolveLayout, Nav, Phys, Main, PerfHUD, THERMO, FOOD_DEFS, PAN_DEFS, Thermo, PanThermo, simPanCook, simRest, preheat, Foods, FoodPiece, Stove, Oven, OvenThermo, Contents, GROUPS, Fryer, Grill, Fire, FireSim, Seasoning, Dredge, Eating, TasteCard, Utensils, Fridge, Microwave, Toaster, Mixer, Blender, Kettle, Bakery, BatterPuddle, Kitchenware, ambientAt, tasteReport, foodSafe, FryerThermo, GrillThermo, FX, Liquids, Sink, Controls, Thermometer, simPot, simPanMulti, exposeSubmerged, dropletFate, LIQ, OVEN, OILS, Cutting, Tongs, Particles, ChefEye, TestMode, settings, scene, camera, rig, renderer, world, Hands, Props, Loco, UI, Grab, Input, Desktop, Sim, Kitchen, U };
+    window.MEP = { THREE, RAPIER, CONFIG, resolveLayout, Nav, Phys, Main, PerfHUD, THERMO, FOOD_DEFS, PAN_DEFS, Thermo, PanThermo, simPanCook, simRest, preheat, Foods, FoodPiece, Stove, Oven, OvenThermo, Contents, GROUPS, Fryer, Grill, Fire, FireSim, Seasoning, Dredge, Eating, TasteCard, Utensils, Fridge, Microwave, Toaster, Mixer, Blender, Kettle, Bakery, BatterPuddle, Kitchenware, ambientAt, Game, Challenge, Pass, Progress, Cosmetics, Mentor, Bubble, Safety, Slots, RecipeBook, RECIPES, LEVELS, TUTORIALS, Ghost, scoreDish, DISH_SPECS, SCORE_W, W, tasteReport, foodSafe, FryerThermo, GrillThermo, FX, Liquids, Sink, Controls, Thermometer, simPot, simPanMulti, exposeSubmerged, dropletFate, LIQ, OVEN, OILS, Cutting, Tongs, Particles, ChefEye, TestMode, settings, scene, camera, rig, renderer, world, Hands, Props, Loco, UI, Grab, Input, Desktop, Sim, Kitchen, U };
 
     const btnVR = $('btnVR'), btnD = $('btnDesktop');
     btnD.disabled = false;
     btnD.onclick = () => {
       Main.started = true; Input.mode = 'desktop'; AudioSys.init();
       $('overlay').classList.add('hidden'); $('hint').style.display = 'block';
-      renderer.domElement.requestPointerLock();
+      Game.onStart();
     };
     let vrOK = false;
     try { vrOK = !!(navigator.xr && await navigator.xr.isSessionSupported('immersive-vr')); } catch (e) { vrOK = false; }
