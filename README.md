@@ -46,69 +46,10 @@ WebXR needs a secure context, so the page must be served over **HTTPS** (or `loc
 | Season | Shake the salt, paprika or chili shakers (turn over and shake, or trigger); twist or trigger the pepper grinder; trigger near the salt cellar with an empty hand takes a pinch, releasing it sprinkles |
 | Eat | Hold food (or a spoon, ladle or bowl with liquid) at your mouth for a moment to take a bite (or a sip); a taste card appears |
 | Smash / scoop / mash | Press the spatula down hard on a burger; drag a spoon through a cut avocado half; press a spoon or whisk into an avocado or potato pile |
-
-Every stick function (Move / Teleport / Turn / Teleport+Turn / None) can be assigned to either hand
-independently in **Menu → Comfort**. The panel shows the resolved axis layout, including auto-assigned turning.
-
-**Desktop:** `WASD` move · mouse look · hold `LMB` to grab, release to drop/throw · `RMB` use ·
-wheel = hold distance · `R` + mouse rotates the held item · `1`–`9` tools, `0` empty hand · `F` force-grab ·
-hold `T` to aim a teleport · `Q`/`E` snap turn · `C` crouch · `M`/`Tab` menu · `P` perf HUD ·
-`RMB` with a knife chops at the crosshair (`Shift`+`RMB` crushes with the flat) · `LMB`-drag a stove knob to twist it ·
-hold `RMB` with tongs to grip · `X` toggles Chef's Eye · `LMB`-drag the oven door, a rack or the faucet lever ·
-`R` + mouse tilts a held vessel to pour · `RMB` with the salt box shakes it · `V` flicks water off a wet hand ·
-`B` bites (or sips) the held item · `G` takes a pinch from the salt cellar under the crosshair, `G` again sprinkles it.
-
-**Test mode:** open the page with `?test` (e.g. `index.html?test`) to run the headless thermal scenarios and show
-a pass/fail table.
-
-## Milestone status
-
-- [x] **M1**: kitchen blockout, XR session, physics hands, grabbing/throwing, two-handed items, force grab,
-  per-hand locomotion (smooth / teleport / snap & smooth turn, vignette, blink, seated, recalibrate, recenter,
-  dominant hand), wrist menu, desktop fallback, settings persistence.
-- [x] **M2**: tools & plane-slicing with inherited thermal state, minced piles, garlic crush, two-node pan
-  thermals (cast iron / stainless / nonstick / saucepan), gas range with twist knobs and flames, 1D thermal sim
-  with evaporation, crust formation and carryover, ribeye / egg / onion / garlic, Maillard browning and char,
-  smoke and steam, sizzle audio, Chef's Eye, `?test` mode
-- [x] **M3**: instant-read thermometer, oven (bake / convection / broil, hinged door with window and light,
-  sliding racks, preheat indicator, door-open heat loss, broil radiation), sink and faucet (flow and temperature,
-  washing food and hands), water and boiling (real heat capacity, lids, salt concentration by evaporation, boil
-  visuals and audio), spaghetti and penne (hydration timing, al dente to mushy, salt uptake, snap and limp
-  coil), rice by absorption with scorching, liquids (fill surfaces with wobble, weir-law pouring by viscosity,
-  streams, transfers, puddles, oils with smoke points and shimmer), butter (melt, foam, noisette, burnt,
-  basting), pan crowding with pooled juices, and Leidenfrost droplets
-- [x] **M4A**:
-  - Deep fryer: 18 L, thermostat, gauge, basket with hang-to-drain, oil drop and recovery, crackle and spatter.
-  - Grill: bars plus radiant flames, per-face sear-mark stripes, fat flare-ups, embers.
-  - Dredging: flour → egg → crumbs as ordered coating layers that brown and crisp.
-  - Grease fires: water flare-up; lid, baking soda or extinguisher puts them out.
-  - Proteins: filet, burger (smash), chicken breast and thigh (crisping skin), pork chop, bacon (renders), sausage (splits), salmon (skin, albumin), cod, shrimp (curls), tofu.
-  - Vegetables: tomato (squashes under a non-serrated knife), peppers and jalapeño, potato (fries, cubes, baked), carrot, mushroom, broccoli, zucchini, corn, spinach (wilts), lettuce, avocado (pit, scoop, mash), garlic bulb.
-  - Seasoning that sticks to food.
-  - Eating: carved bites with teeth marks, chew audio by texture, taste cards, reactions.
-- [ ] M4B: dough, batters, bread, mixing, appliances, dairy & fruit, all §7 dishes
-- [ ] M5: Sandbox complete, Challenge mode, scoring, mentor
-- [ ] M6: polish, particles, audio mix, performance pass
-
-## Code map (inside `index.html`)
-
-Search for the banner comments: `[CONFIG] [UTIL] [SAVE] [RENDERER] [TEXTURES] [AUDIO] [HAPTICS] [PHYSICS]
-[THERMAL] [KITCHEN] [PROPS] [FOOD] [STOVE] [SIZZLE] [PARTICLES] [CHEF'S EYE] [TEST MODE] [CONTROLS] [OVEN]
-[THERMOMETER] [LIQUIDS] [SINK] [BOIL AUDIO] [FRYER] [GRILL] [FIRE] [SEASONING] [DREDGE] [EATING] [UTENSILS]
-[INPUT] [HANDS] [GRAB]
-[LOCOMOTION] [UI] [SIM] [DESKTOP] [PERFHUD] [XR SESSION] [MAIN]`.
-
-- `[THERMAL]` is pure JS (no rendering or physics): `THERMO` constants, data-driven `FOOD_DEFS` and `PAN_DEFS`,
-  the `Thermo` finite-volume food model, the two-node `PanThermo`, vessel `Contents` (water, oil, butter, salt,
-  rice), the two-node `OvenThermo` and the test scenarios.
-- `[LIQUIDS]` gives every vessel a `Contents`. It finds the free-surface height by sorting interior sample points,
-  pours past the lowest rim point with a weir law, and traces streams to decide where liquid lands.
-
-- All tunables live in `CONFIG`, with units in comments. Player settings are in `DEFAULT_SETTINGS` and are saved to
-  `localStorage`.
-- Props are data-driven (`PROP_DEFS`). Tools are authored with the grip at the origin, the working end toward −Z
-  and the edge toward −Y, so snap grips need no per-tool offsets.
-- Opaque surfaces share one "uber" material: a 2048² procedural atlas plus per-vertex roughness, metalness and
-  emissive. The static kitchen is 2 draw calls and each prop is 1. The measured M1 scene is about 38 draws per
-  eye plus 42 shadow draws, roughly 118 per VR frame.
-- `window.MEP` exposes the main systems for console debugging.
+| Fridge / microwave | Grip the door handle and swing it open (LMB-drag on desktop). The fridge keeps food at 4°C. Microwave: close the door and twist the timer dial (up to 5 min); the turntable spins and heating is uneven |
+| Toaster | Drop slices into the slots, push the lever down; the dial sets the browning; they pop up with a ding |
+| Stand mixer / blender | Set the mixer bowl on the base (it locks), twist the speed dial. Put the blender jar on its base, press the button (8 s). Without the lid it sprays everywhere |
+| Kettle | Fill it at the faucet and put it on a burner; it whistles at the boil |
+| Dough | Mix flour + water (+ yeast) in a bowl until it comes together. Squeeze with both hands to knead (builds gluten), pull apart to stretch (needs gluten), roll with the rolling pin (or RMB with the pin). Leave it somewhere warm to proof |
+| Batter | Pour batter or beaten egg on a hot pan for pancakes or an omelette; flip when bubbles stay open (spatula: trigger flips, or folds an omelette). Bake cake batter in a dish |
+| Dairy & fruit | Rub cheese down the grater; squeeze a cut lemon or lime over food or into a bowl; peel a banana (trigger) |
