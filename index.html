@@ -89,6 +89,12 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import RAPIER from '@dimforge/rapier3d-compat';
 
 /* =====================================================================================
@@ -260,6 +266,7 @@ const DEFAULT_SETTINGS = {
   perfHud: false,
   heatShimmer: true,
   renderScale: 1.0,         // × XR framebuffer scale (applied when entering VR)
+  gfx: 'high',              // desktop graphics: low | medium (bloom) | high (+ AO, heat haze) | ultra (full-res AO, 4K shadows)
   jazz: false,
   musicVolume: 0.5,
   smokeAlarm: false,
@@ -368,6 +375,9 @@ renderer.toneMapping = THREE.NeutralToneMapping; // Khronos PBR Neutral: true-to
 renderer.toneMappingExposure = 0.92;
 renderer.shadowMap.enabled = settings.shadows;
 renderer.shadowMap.type = THREE.PCFShadowMap;
+// Custom shaders write display-referred colour straight to the screen; inside the desktop post stack (linear HDR,
+// tone-mapped at the end) they switch to linear output through this shared uniform.
+const POSTU = { uLin: { value: 0 } };
 renderer.xr.enabled = true;
 renderer.xr.setReferenceSpaceType('local-floor');
 renderer.xr.setFramebufferScaleFactor(CONFIG.render.framebufferScale);
@@ -390,7 +400,7 @@ scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 scene.environmentIntensity = 0.5;
 pmrem.dispose();
 
-const hemi = new THREE.HemisphereLight(0xfff0dc, 0x4a3526, 0.85);
+const hemi = new THREE.HemisphereLight(0xfff0dc, 0x6e5e4e, 0.85);
 scene.add(hemi);
 
 // One shadow-casting "window sun" (warm, late afternoon) coming through the left-wall window.
@@ -402,7 +412,7 @@ sun.shadow.mapSize.set(CONFIG.render.shadowMapSize, CONFIG.render.shadowMapSize)
 sun.shadow.camera.left = -4; sun.shadow.camera.right = 4;
 sun.shadow.camera.top = 4; sun.shadow.camera.bottom = -4;
 sun.shadow.camera.near = 1; sun.shadow.camera.far = 14;
-sun.shadow.bias = -0.0006; sun.shadow.normalBias = 0.025;
+sun.shadow.bias = -0.0006; sun.shadow.normalBias = 0.025; sun.shadow.radius = 3; // soft PCF (Vogel disk) penumbrae
 scene.add(sun, sun.target);
 
 // Warm pendant fill over the island (no shadows).
@@ -426,6 +436,7 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  if (typeof Post !== 'undefined') Post.resize();
 });
 
 /* ==================================== [TEXTURES] ==================================== */
@@ -719,27 +730,82 @@ function buildAtlas() {
   };
   Object.entries(skins).forEach(([k, o], i) => put(k, Tex.skin(o), 1024 + (i % 4) * 256, 1792 + Math.floor(i / 4) * 128, 256, 128));
   const t = Tex.finish(c, { aniso: 8 });
+  try { TEX.matAtlas = buildMatAtlas(c); } catch (e) { console.warn('relief atlas failed', e); }
   return t;
 }
+// Surface relief for every atlas cell, at half resolution: R = height (high-passed luminance; tiles get a plateau
+// with rounded edges so the grout reads as a groove), G = extra roughness in the low spots (grout, plank gaps,
+// open grain), B = cavity occlusion. The uber shader bump-maps from it in metres, so relief is right at any distance.
+// [amplitude, high-pass radius (px), roughness in the lows, cavity darkening]
+const RELIEF = { planks: [1.0, 6, 0.5, 0.55], marble: [0, 6, 0, 0], tile: [1, 0, 0.85, 0.6], butcher: [0.6, 5, 0.3, 0.45], oak: [0.45, 4, 0.35, 0.3],
+  board: [0.45, 4, 0.4, 0.3], walnut: [0.45, 4, 0.35, 0.3], beech: [0.4, 4, 0.35, 0.3], paint: [0.22, 4, 0.15, 0.1], steel: [0.05, 3, 0.15, 0], plaster: [0.75, 5, 0.15, 0.25],
+  castIron: [0.9, 3, 0.3, 0.35] };
+function buildMatAtlas(src) {
+  const S = 1024, c = Tex.canvas(S, S), ctx = c.getContext('2d');
+  ctx.drawImage(src, 0, 0, S, S);
+  const d = ctx.getImageData(0, 0, S, S).data, out = ctx.createImageData(S, S), o = out.data;
+  for (let i = 0; i < S * S; i++) { o[i * 4] = 128; o[i * 4 + 1] = 0; o[i * 4 + 2] = 255; o[i * 4 + 3] = 255; }
+  const blur = (A, w, h, r) => { // separable box blur, clamped edges
+    if (r < 1) return A.slice(); const T = new Float32Array(w * h), B = new Float32Array(w * h), n = 2 * r + 1;
+    for (let y = 0; y < h; y++) { let s = 0; for (let k = -r; k <= r; k++) s += A[y * w + clamp(k, 0, w - 1)]; for (let x = 0; x < w; x++) { T[y * w + x] = s / n; s += A[y * w + Math.min(w - 1, x + r + 1)] - A[y * w + Math.max(0, x - r)]; } }
+    for (let x = 0; x < w; x++) { let s = 0; for (let k = -r; k <= r; k++) s += T[clamp(k, 0, h - 1) * w + x]; for (let y = 0; y < h; y++) { B[y * w + x] = s / n; s += T[Math.min(h - 1, y + r + 1) * w + x] - T[Math.max(0, y - r) * w + x]; } }
+    return B; };
+  for (const [name, r] of Object.entries(ATLAS.cells)) {
+    const cfg = RELIEF[name] || (name.startsWith('lbl') ? [0.04, 3, 0, 0] : [0.25, 3, 0.1, 0.15]);
+    const x0 = Math.round(r[0] * S), x1 = Math.round((r[0] + r[2]) * S), y0 = Math.round((1 - r[1] - r[3]) * S), y1 = Math.round((1 - r[1]) * S), w = x1 - x0, h = y1 - y0;
+    if (w < 4 || h < 4) continue;
+    const L = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const k = ((y0 + y) * S + x0 + x) * 4; L[y * w + x] = (0.2126 * d[k] + 0.7152 * d[k + 1] + 0.0722 * d[k + 2]) / 255; }
+    let H;
+    if (name === 'tile') { // grout (dark) → 0, glaze → 1, softened into a rounded bevel
+      let lo = 1, hi = 0; for (const v of L) { if (v < lo) lo = v; if (v > hi) hi = v; }
+      H = new Float32Array(w * h); for (let i = 0; i < H.length; i++) H[i] = smoothstep(lo + 0.25 * (hi - lo), lo + 0.55 * (hi - lo), L[i]);
+      H = blur(H, w, h, 1);
+    } else { const B = blur(L, w, h, cfg[1]); H = new Float32Array(w * h); for (let i = 0; i < H.length; i++) H[i] = clamp(0.5 + (L[i] - B[i]) * 3 * cfg[0], 0, 1); }
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const hv = H[y * w + x], low = name === 'tile' ? 1 - hv : clamp((0.5 - hv) * 2.2, 0, 1), k = ((y0 + y) * S + x0 + x) * 4;
+      o[k] = hv * 255; o[k + 1] = low * cfg[2] * 255; o[k + 2] = (1 - low * cfg[3]) * 255;
+    }
+  }
+  ctx.putImageData(out, 0, 0);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.NoColorSpace; t.anisotropy = 8; t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+  return t;
+}
+// Bump amplitude (m) for the relief atlas; 0 skips the extra taps (VR under load).
+const RELIEF_U = { uMatAtlas: { value: null }, uBump: { value: 0.0022 } };
 // Shader patch: per-vertex PBR + atlas tiling. Shared by UBER and its highlight clone (same program).
 function uberPatch(shader) {
+  shader.uniforms.uMatAtlas = RELIEF_U.uMatAtlas; shader.uniforms.uBump = RELIEF_U.uBump;
   shader.vertexShader = shader.vertexShader
     .replace('#include <common>', '#include <common>\nattribute vec3 pbr;\nattribute vec4 atlas;\nvarying vec3 vPbr;\nvarying vec4 vAtlas;\nvarying vec2 vUvRaw;')
     .replace('#include <uv_vertex>', '#include <uv_vertex>\nvPbr = pbr; vAtlas = atlas; vUvRaw = uv;');
   shader.fragmentShader = shader.fragmentShader
-    .replace('#include <common>', '#include <common>\nvarying vec3 vPbr;\nvarying vec4 vAtlas;\nvarying vec2 vUvRaw;')
+    .replace('#include <common>', `#include <common>
+      varying vec3 vPbr; varying vec4 vAtlas; varying vec2 vUvRaw; uniform sampler2D uMatAtlas; uniform float uBump;
+      vec3 uberBump(vec3 dx, vec3 dy, vec3 n, vec2 dH, float fd) { vec3 R1 = cross(dy, n), R2 = cross(n, dx); float det = dot(dx, R1) * fd;
+        return normalize(abs(det) * n - sign(det) * (dH.x * R1 + dH.y * R2)); }`)
+    .replace('void main() {', `void main() {
+      vec2 uvDx = dFdx(vUvRaw), uvDy = dFdy(vUvRaw); vec3 pDx = dFdx(-vViewPosition), pDy = dFdy(-vViewPosition);
+      vec4 relief = vec4(0.5, 0.0, 1.0, 1.0); vec2 dH = vec2(0.0);`)
     .replace('#include <map_fragment>', `
       if (vAtlas.z > 0.0) {
-        vec2 auv = vAtlas.xy + fract(vUvRaw) * vAtlas.zw;
-        diffuseColor *= textureGrad(map, auv, dFdx(vUvRaw) * vAtlas.zw, dFdy(vUvRaw) * vAtlas.zw);
+        vec2 auv = vAtlas.xy + fract(vUvRaw) * vAtlas.zw, gx = uvDx * vAtlas.zw, gy = uvDy * vAtlas.zw;
+        diffuseColor *= textureGrad(map, auv, gx, gy);
+        if (uBump > 0.0) {
+          relief = textureGrad(uMatAtlas, auv, gx, gy);
+          dH = vec2(textureGrad(uMatAtlas, auv + gx, gx, gy).r, textureGrad(uMatAtlas, auv + gy, gx, gy).r) - relief.r;
+          diffuseColor.rgb *= mix(1.0, relief.b, 0.35);
+        }
       }`)
-    .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = vPbr.x;')
+    .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = clamp(vPbr.x + relief.g * (1.0 - vPbr.x), 0.0, 1.0);')
+    .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n if (vAtlas.z > 0.0 && uBump > 0.0) normal = uberBump(pDx, pDy, normal, dH * uBump, faceDirection);')
+    .replace('#include <aomap_fragment>', '#include <aomap_fragment>\n reflectedLight.indirectDiffuse *= relief.b; reflectedLight.indirectSpecular *= mix(1.0, relief.b, 0.7);')
     .replace('#include <metalnessmap_fragment>', 'float metalnessFactor = vPbr.y;')
     .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += diffuseColor.rgb * vPbr.z;');
 }
 function makeUber(map) {
   const m = new THREE.MeshStandardMaterial({ map, vertexColors: true, roughness: 1, metalness: 1 });
-  m.onBeforeCompile = uberPatch; m.customProgramCacheKey = () => 'uber-v1';
+  m.onBeforeCompile = uberPatch; m.customProgramCacheKey = () => 'uber-v2';
   return m;
 }
 // Surface spec helper
@@ -775,6 +841,7 @@ function uberize(geo, sp, { tint = 0xffffff, ao = null, uvWorld = 0 } = {}) {
 }
 function buildMaterials() {
   TEX.atlas = buildAtlas();
+  RELIEF_U.uMatAtlas.value = TEX.matAtlas || null; if (!TEX.matAtlas) RELIEF_U.uBump.value = 0;
   UBER = makeUber(TEX.atlas);
   TEX.sky = Tex.finish(Tex.sky()); TEX.sky.wrapS = TEX.sky.wrapT = THREE.ClampToEdgeWrapping;
   // Kitchen surfaces
@@ -791,7 +858,7 @@ function buildMaterials() {
   Object.assign(MAT, {
     knife: spec(0xe6e9ec, 0.18, 1.0, 'steel'), handle: spec(0xffffff, 0.45, 0, 'walnut'), beech: spec(0xffffff, 0.62, 0, 'beech'),
     board: spec(0xffffff, 0.6, 0, 'board'), castIron: spec(0xffffff, 0.55, 0.65, 'castIron'), nonstick: spec(0x232427, 0.35, 0.2),
-    potSteel: spec(0xe8eaec, 0.22, 1.0, 'steel'), ceramic: spec(0xf6f2ea, 0.12), ceramicBlue: spec(0x2f5d7c, 0.15),
+    potSteel: spec(0xe8eaec, 0.3, 1.0, 'steel'), ceramic: spec(0xf6f2ea, 0.12), ceramicBlue: spec(0x2f5d7c, 0.15),
     plastic: spec(0x1c1c1e, 0.5), red: spec(0xc0231d, 0.35, 0.1), cardboard: spec(0xe8a33a, 0.8), silicone: spec(0xc8553d, 0.6),
     tomato: spec(0xffffff, 0.28, 0, 'tomato'), onion: spec(0xffffff, 0.6, 0, 'onion'), lemon: spec(0xffffff, 0.4, 0, 'lemon'),
     apple: spec(0xffffff, 0.3, 0, 'apple'), potato: spec(0xffffff, 0.85, 0, 'potato'), carrot: spec(0xffffff, 0.55, 0, 'carrot'),
@@ -2693,8 +2760,12 @@ const Kitchen = {
     this.knobs = new THREE.InstancedMesh(uberize(knobGeo, MAT.plastic), UBER, 6); // 4 burners + oven temp & mode dials
     [-0.47, -0.33, -0.09, 0.05, -0.555, 0.12].forEach((x, i) => { _m1.makeTranslation(x, CT - 0.075, bz1 + 0.03); this.knobs.setMatrixAt(i, _m1); });
     this.knobs.castShadow = true; scene.add(this.knobs);
-    // Hood
-    KB.box('steel', 0.86, 0.22, 0.52, rcx, 1.82, bz0 + 0.26, { collide: false });
+    // Hood: sloped chimney canopy with a rolled lip and baffle filters, on a chimney stack
+    { const cg = new THREE.CylinderGeometry(Math.SQRT1_2, Math.SQRT1_2, 1, 4, 1, true); cg.rotateY(Math.PI / 4);
+      const p = cg.attributes.position; for (let i = 0; i < p.count; i++) { const top = p.getY(i) > 0; p.setX(i, p.getX(i) * (top ? 0.4 : 0.86)); p.setZ(i, p.getZ(i) * (top ? 0.3 : 0.52)); p.setY(i, p.getY(i) * 0.2); }
+      const cgf = cg.toNonIndexed(); cgf.computeVertexNormals(); KB.geo('steel', cgf, rcx, 1.83, bz0 + 0.26, { collide: false });
+      KB.box('steel', 0.88, 0.035, 0.54, rcx, 1.716, bz0 + 0.27, { collide: false });
+      for (const s of [-1, 1]) KB.box('darkSteel', 0.36, 0.006, 0.36, rcx + s * 0.2, 1.699, bz0 + 0.27, { collide: false }); }
     KB.box('steel', 0.36, H - 1.93, 0.3, rcx, (H + 1.93) / 2, bz0 + 0.15, { collide: false });
     KB.box('glow', 0.5, 0.004, 0.06, rcx, 1.708, bz0 + 0.3, { collide: false, uv: false });
     // Backsplash tile (back wall + left wall + behind range up to hood)
@@ -2732,6 +2803,39 @@ const Kitchen = {
     this.micro = { x0: mx0 + mw, x1: mcx1, y0: uy0 + mw, y1: uy0 + 0.4 - mw, z0: bz0 + mw, z1: bz0 + ud, hinge: new THREE.Vector3(mx0, uy0, bz0 + ud), dial: new THREE.Vector3((mcx1 + mx1) / 2, uy0 + 0.14, bz0 + ud + 0.02), display: new THREE.Vector3((mcx1 + mx1) / 2, uy0 + 0.3, bz0 + ud + 0.012) };
     KB.box('cabinet', mx1 - mx0, uy1 - uy0 - 0.4, ud, (mx0 + mx1) / 2, (uy0 + 0.4 + uy1) / 2, bz0 + ud / 2);
     KB.box('cabinet', mx1 - mx0 - 0.012, uy1 - uy0 - 0.412, 0.018, (mx0 + mx1) / 2, (uy0 + 0.4 + uy1) / 2, bz0 + ud + 0.009, { collide: false, tint: 0xf4f4f4 });
+    // Decor (static, merged into the kitchen draws): herbs on the window counter, a utensil crock, a magnetic knife
+    // strip, a rug at the sink, a trailing plant on the uppers and a stack of cookbooks.
+    Object.assign(MAT, { terracotta: spec(0xb4532c, 0.85, 0, 'plaster'), soil: spec(0x3a2a1d, 1), leaf: spec(0x3f7f33, 0.55), leafDark: spec(0x2c5e2a, 0.6),
+      rug: spec(0x8a2f2a, 0.95, 0, 'paint'), rugEdge: spec(0xd9c39a, 0.95, 0, 'paint'), book1: spec(0x2c4a6e, 0.7), book2: spec(0x9b3b2b, 0.7), book3: spec(0xd8c48e, 0.7) });
+    const rnd = rng(77);
+    const herbPot = (x, z, kind) => {
+      KB.geo('terracotta', latheGeo([[0, 0], [0.034, 0], [0.042, 0.07], [0.048, 0.072], [0.048, 0.085], [0.044, 0.085], [0.038, 0.074], [0, 0.074]], 18), x, CT, z, { collide: false });
+      KB.cyl('soil', 0.039, 0.039, 0.004, x, CT + 0.074, z, { collide: false, seg: 14 });
+      if (kind === 'chives') for (let i = 0; i < 26; i++) { const a = rnd() * 6.28, r = rnd() * 0.025, h = 0.08 + rnd() * 0.09, g = new THREE.CylinderGeometry(0.0012, 0.0018, h, 4); g.translate(0, h / 2, 0); g.rotateZ((rnd() - 0.5) * 0.4); g.rotateX((rnd() - 0.5) * 0.4); KB.geo(i % 3 ? 'leaf' : 'leafDark', g, x + Math.cos(a) * r, CT + 0.075, z + Math.sin(a) * r, { collide: false, uv: false }); }
+      else for (let i = 0; i < 22; i++) { const a = rnd() * 6.28, h = 0.03 + rnd() * 0.1, r = 0.012 + rnd() * 0.03 * (1 - h / 0.14), g = new THREE.SphereGeometry(0.016 + rnd() * 0.006, 8, 5); g.scale(1, 0.22, 0.6); g.rotateZ(-0.5 - rnd() * 0.4); g.rotateY(-a);
+        KB.geo(i % 4 ? 'leaf' : 'leafDark', g, x + Math.cos(a) * r, CT + 0.08 + h, z + Math.sin(a) * r, { collide: false, uv: false }); }
+    };
+    herbPot(-2.9, -0.13, 'basil'); herbPot(-2.9, 0.0, 'chives'); herbPot(-2.88, 0.12, 'basil');
+    // Utensil crock with spoons and a spatula
+    { const x = -2.25, z = -2.4; KB.geo('ceramicBlue', latheGeo([[0, 0], [0.055, 0], [0.058, 0.02], [0.056, 0.15], [0.06, 0.16], [0.052, 0.16], [0.05, 0.02], [0, 0.02]], 22), x, CT, z, { collide: false });
+      for (let i = 0; i < 5; i++) { const a = i / 5 * 6.28 + 0.3, tilt = 0.18 + rnd() * 0.12, g = new THREE.CylinderGeometry(0.006, 0.007, 0.3, 8); g.translate(0, 0.15, 0); g.rotateZ(Math.cos(a) * tilt); g.rotateX(Math.sin(a) * tilt);
+        KB.geo('beech', g, x + Math.cos(a) * 0.02, CT + 0.02, z + Math.sin(a) * 0.02, { collide: false });
+        const head = new THREE.SphereGeometry(0.02, 10, 6); head.scale(1, 1.4, 0.35); head.translate(0, 0.32, 0); head.rotateZ(Math.cos(a) * tilt); head.rotateX(Math.sin(a) * tilt); KB.geo('beech', head, x + Math.cos(a) * 0.02, CT + 0.02, z + Math.sin(a) * 0.02, { collide: false }); } }
+    // Magnetic knife strip with three knives on the backsplash
+    { const y = 1.33, z = bz0 + 0.02; KB.box('handle', 0.44, 0.045, 0.02, 0.62, y, z, { collide: false });
+      [[0.47, 0.2, 0.045], [0.62, 0.16, 0.035], [0.75, 0.12, 0.025]].forEach(([x, len, hgt]) => {
+        const b = bladeGeo(len, hgt, 0.002); b.rotateX(Math.PI / 2); b.rotateY(Math.PI / 2); KB.geo('knife', b, x, y - 0.012, z + 0.013, { collide: false }); // flat against the strip, blade up
+        const hnd = new THREE.CapsuleGeometry(0.011, 0.09, 4, 10); hnd.scale(0.8, 1, 1.1); KB.geo('handle', hnd, x - hgt * 0.35, y - 0.075, z + 0.014, { collide: false }); }); }
+    // Rug in front of the sink
+    KB.box('rugEdge', 0.82, 0.006, 1.22, -2.0, 0.003, -0.6, { collide: false }); KB.box('rug', 0.72, 0.007, 1.12, -2.0, 0.0035, -0.6, { collide: false });
+    for (let i = 0; i < 5; i++) KB.box('rugEdge', 0.6, 0.0075, 0.025, -2.0, 0.0038, -1.05 + i * 0.225, { collide: false });
+    // Trailing pothos on top of the left uppers
+    { const x = -2.2, z = bz0 + 0.18, y = uy1 + 0.05; KB.geo('terracotta', latheGeo([[0, 0], [0.06, 0], [0.07, 0.11], [0.075, 0.12], [0, 0.12]], 18), x, y, z, { collide: false });
+      for (let v = 0; v < 5; v++) { let px = x + (rnd() - 0.5) * 0.08, py = y + 0.12, pz = z + 0.06; const dx = (rnd() - 0.5) * 0.05;
+        for (let i = 0; i < 9 + v; i++) { px += dx * 0.3; pz = Math.min(bz0 + ud + 0.05, pz + 0.03); py -= i < 2 ? -0.01 : 0.055; const g = new THREE.SphereGeometry(0.024, 8, 5); g.scale(1, 0.25, 0.8); g.rotateX(0.9 + rnd() * 0.5); g.rotateY(rnd() * 6.28);
+          KB.geo(i % 3 ? 'leaf' : 'leafDark', g, px, py, pz, { collide: false, uv: false }); } } }
+    // Cookbooks leaning by the microwave
+    [['book1', 0.04, 0.24], ['book2', 0.035, 0.22], ['book3', 0.03, 0.2]].forEach(([m, t, h], i) => KB.box(m, t, h, 0.17, 1.17 + i * 0.045, CT + h / 2, bz0 + 0.12, { collide: false, rotZ: i === 2 ? -0.12 : 0 }));
     // Crown trim on uppers
     KB.box('trim', -0.72 + HX, 0.05, ud + 0.04, (-HX - 0.72) / 2, uy1 + 0.025, bz0 + ud / 2 + 0.02, { collide: false });
     KB.box('trim', 1.25 - 0.28, 0.05, ud + 0.04, (0.28 + 1.25) / 2, uy1 + 0.025, bz0 + ud / 2 + 0.02, { collide: false });
@@ -3007,11 +3111,17 @@ function bladeGeo(len, height, thick, { tipDrop = 0.004, serrated = false, squar
     s.closePath();
   }
   const g = new THREE.ExtrudeGeometry(s, { depth: thick, bevelEnabled: false, curveSegments: 12 });
-  g.translate(0, 0, -thick / 2); g.rotateY(Math.PI / 2);
+  g.translate(0, 0, -thick / 2);
+  // Grind: full thickness at the spine tapering to a fine edge, so the bevel catches its own highlight.
+  if (!square) { const p = g.attributes.position; for (let i = 0; i < p.count; i++) { const t = clamp((0.004 - p.getY(i)) / (height + 0.004), 0, 1); p.setZ(i, p.getZ(i) * lerp(1, 0.12, smoothstep(0.3, 1, t))); } g.computeVertexNormals(); }
+  g.rotateY(Math.PI / 2);
   return g;
 }
 function knifeHandle(P, len, rivets = true) {
-  const h = new THREE.CapsuleGeometry(0.0125, len - 0.025, 4, 12);
+  const h = new THREE.CapsuleGeometry(0.0125, len - 0.025, 6, 18), hp = h.attributes.position;
+  // palm swell in the middle, a flared butt for the heel of the hand
+  for (let i = 0; i < hp.count; i++) { const t = clamp(hp.getY(i) / len + 0.5, 0, 1), k = 1 + 0.12 * Math.sin(Math.PI * t) + 0.1 * smoothstep(0.82, 1, 1 - t); hp.setX(i, hp.getX(i) * k); hp.setZ(i, hp.getZ(i) * k); }
+  h.computeVertexNormals();
   P.add(MAT.handle, h, [0, -0.002, 0.012], [Math.PI / 2, 0, 0], [0.8, 1.1, 1]);
   if (rivets) for (const z of [-0.02, 0.012, 0.045]) P.add(MAT.brass, new THREE.CylinderGeometry(0.0035, 0.0035, 0.0215, 8), [0, -0.002, z], [0, 0, Math.PI / 2]);
   P.add(MAT.knife, new THREE.CylinderGeometry(0.0115, 0.0125, 0.012, 14), [0, 0, -len / 2 + 0.006], [Math.PI / 2, 0, 0], [0.85, 1.15, 1]);
@@ -3019,8 +3129,26 @@ function knifeHandle(P, len, rivets = true) {
 // Pan / pot body: outer profile [r, y] pairs from centre-bottom upward, with wall thickness.
 function vesselGeo(profile, wall = 0.004) {
   const outer = profile, inner = profile.slice().reverse().map(([r, y]) => [Math.max(0, r - wall), Math.max(y, profile[0][1] + wall)]);
-  return lathe([[0, profile[0][1]], ...outer, ...inner, [0, profile[0][1] + wall]], 40);
+  // Rolled rim: a half-round bead joins the outer and inner walls (sheet-steel pans are curled over at the lip).
+  const top = profile[profile.length - 1], R = wall / 2 + 0.0007, roll = [];
+  for (let k = 1; k < 7; k++) { const a = Math.PI * k / 7; roll.push([top[0] - wall / 2 + Math.cos(a) * R, top[1] + Math.sin(a) * R]); }
+  return lathe([[0, profile[0][1]], ...outer, ...roll, ...inner, [0, profile[0][1] + wall]], 56);
 }
+// Tapered handle along +Z (z ∈ [0, len]): rounded-rectangle section (w0×h0 at the root → w1×h1 at the end), domed tip.
+function taperBar(len, w0, h0, w1, h1, { segL = 10, segR = 18, ex = 3.2 } = {}) {
+  const pos = [], uv = [], idx = [], rings = [];
+  for (let i = 0; i <= segL; i++) rings.push([i / segL * len, lerp(w0, w1, i / segL) / 2, lerp(h0, h1, i / segL) / 2]);
+  for (let i = 1; i <= 3; i++) { const a = i / 4 * Math.PI / 2, s = Math.cos(a); rings.push([len + Math.sin(a) * h1 * 0.5, w1 / 2 * s, h1 / 2 * s]); }
+  rings.forEach(([z, w, h], i) => { for (let j = 0; j < segR; j++) { const a = j / segR * Math.PI * 2, c = Math.cos(a), s = Math.sin(a), k = Math.pow(Math.pow(Math.abs(c), ex) + Math.pow(Math.abs(s), ex), -1 / ex);
+    pos.push(c * k * w, s * k * h, z); uv.push(j / segR, z * 6); } });
+  for (let i = 0; i < rings.length - 1; i++) for (let j = 0; j < segR; j++) { const a = i * segR + j, b = i * segR + (j + 1) % segR, c2 = a + segR, d = b + segR; idx.push(a, b, c2, b, d, c2); }
+  const tip = pos.length / 3, last = (rings.length - 1) * segR; pos.push(0, 0, rings[rings.length - 1][0] + h1 * 0.08); uv.push(0.5, 0);
+  for (let j = 0; j < segR; j++) idx.push(last + j, last + (j + 1) % segR, tip);
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); g.setIndex(idx); g.computeVertexNormals();
+  return g;
+}
+// Rivet heads (outside on the wall, inside the pan) where a handle is fixed.
+function rivets(P, sp, pts, r = 0.0045) { for (const [x, y, z, ry] of pts) P.add(sp, new THREE.SphereGeometry(r, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2), [x, y, z], [Math.PI / 2, ry || 0, 0], [1, 0.5, 1]); }
 // Organic produce: a displaced sphere with sphere UVs.
 function lumpySphere(r, sx, sy, sz, amp, seed, wSeg = 20, hSeg = 14) {
   const g = new THREE.SphereGeometry(r, wSeg, hSeg), p = g.attributes.position, n = Noise.make(seed, 64);
@@ -3093,9 +3221,10 @@ const PROP_DEFS = {
   castIron: { name: 'Cast-Iron Skillet', cat: 'Cookware', mass: 2.4, sound: 'metal', grip: { zone: 0.1 }, twoHanded: true, size: 0.3, pan: { key: 'castIron', c: [0, -0.044, -0.19], r: 0.118, rim: 0.05 },
     build() { const P = Parts(), R = 0.13, cz = -0.06 - R;
       P.add(MAT.castIron, vesselGeo([[0.118, -0.05], [0.124, -0.048], [0.132, 0.0]], 0.006), [0, 0, cz]);
-      P.add(MAT.castIron, new THREE.BoxGeometry(0.03, 0.018, 0.15), [0, -0.006, 0.0], [0.12, 0, 0]);
-      P.add(MAT.castIron, new THREE.TorusGeometry(0.008, 0.004, 6, 10), [0, 0.0, 0.068], [Math.PI / 2, 0, 0]);
-      P.add(MAT.castIron, new THREE.BoxGeometry(0.05, 0.012, 0.035), [0, -0.006, cz - R - 0.012]);
+      P.add(MAT.castIron, taperBar(0.135, 0.034, 0.02, 0.024, 0.015), [0, -0.004, -0.07], [-0.12, 0, 0]);
+      P.add(MAT.castIron, new THREE.TorusGeometry(0.011, 0.0045, 10, 18), [0, 0.012, 0.072], [Math.PI / 2 - 0.12, 0, 0]);
+      P.add(MAT.castIron, new THREE.TorusGeometry(0.022, 0.006, 10, 20, Math.PI), [0, -0.006, cz - R - 0.004], [Math.PI / 2, 0, Math.PI]);
+      for (const s2 of [1, -1]) P.add(MAT.castIron, new THREE.SphereGeometry(0.012, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2), [s2 * R * 0.92, -0.002, cz], [0, 0, 0], [0.9, 0.35, 0.9]); // pour lips
       const s = [Shp.cyl(0.004, 0.12, 0, -0.046, cz), Shp.box(0.015, 0.009, 0.075, 0, -0.006, 0, 0.12, 0, 0), Shp.box(0.025, 0.006, 0.018, 0, -0.006, cz - R - 0.012)];
       Shp.ring(s, 0.127, -0.024, 0.024, 0.008, 12, 0, cz);
       return { parts: P.done(), shapes: s }; } },
@@ -3103,21 +3232,24 @@ const PROP_DEFS = {
     build() { const P = Parts(), R = 0.125, cz = -0.075 - R;
       P.add(MAT.nonstick, vesselGeo([[0.1, -0.045], [0.11, -0.042], [0.126, 0.0]], 0.003), [0, 0, cz]);
       P.add(MAT.plastic, new THREE.CapsuleGeometry(0.012, 0.15, 4, 10), [0, 0.0, 0.02], [Math.PI / 2 - 0.12, 0, 0], [1.3, 1, 0.8]);
-      P.add(MAT.potSteel, new THREE.BoxGeometry(0.02, 0.01, 0.05), [0, -0.01, -0.07]);
+      P.add(MAT.potSteel, taperBar(0.06, 0.03, 0.014, 0.022, 0.012), [0, -0.012, -0.09], [-0.1, 0, 0]);
+      rivets(P, MAT.potSteel, [[0.009, -0.012, cz + R * 0.99], [-0.009, -0.012, cz + R * 0.99], [0.009, -0.012, cz + R * 0.93, Math.PI], [-0.009, -0.012, cz + R * 0.93, Math.PI]], 0.0038);
       const s = [Shp.cyl(0.003, 0.105, 0, -0.043, cz), Shp.box(0.015, 0.01, 0.1, 0, 0, 0.0)];
       Shp.ring(s, 0.118, -0.022, 0.022, 0.006, 12, 0, cz);
       return { parts: P.done(), shapes: s }; } },
   saucepan: { name: 'Saucepan', cat: 'Cookware', mass: 1.1, sound: 'metal', grip: { zone: 0.1 }, size: 0.2, pan: { key: 'saucepan', c: [0, -0.097, -0.17], r: 0.085, rim: 0.1 },
     build() { const P = Parts(), R = 0.09, cz = -0.08 - R;
       P.add(MAT.potSteel, vesselGeo([[0.088, -0.1], [0.09, -0.095], [0.09, 0.0]], 0.003), [0, 0.0, cz]);
-      P.add(MAT.potSteel, new THREE.BoxGeometry(0.022, 0.01, 0.19), [0, -0.01, 0.0], [0.15, 0, 0]);
+      P.add(MAT.potSteel, taperBar(0.19, 0.026, 0.014, 0.02, 0.011), [0, -0.022, -0.095], [-0.15, 0, 0]);
+      rivets(P, MAT.potSteel, [[0.008, -0.02, cz + R], [-0.008, -0.02, cz + R], [0.008, -0.02, cz + R - 0.004, Math.PI], [-0.008, -0.02, cz + R - 0.004, Math.PI]], 0.0036);
       const s = [Shp.cyl(0.003, 0.088, 0, -0.098, cz), Shp.box(0.012, 0.008, 0.095, 0, -0.01, 0, 0.15, 0, 0)];
       Shp.ring(s, 0.09, -0.05, 0.05, 0.006, 12, 0, cz);
       return { parts: P.done(), shapes: s }; } },
   sautePan: { name: 'Stainless Sauté Pan', cat: 'Cookware', mass: 1.3, sound: 'metal', grip: { zone: 0.1 }, twoHanded: true, size: 0.28, pan: { key: 'sautePan', c: [0, -0.052, -0.2], r: 0.112, rim: 0.06 },
     build() { const P = Parts(), R = 0.12, cz = -0.08 - R;
       P.add(MAT.potSteel, vesselGeo([[0.114, -0.055], [0.118, -0.052], [0.12, 0.0]], 0.003), [0, 0, cz]);
-      P.add(MAT.potSteel, new THREE.BoxGeometry(0.024, 0.012, 0.2), [0, -0.004, 0.02], [0.14, 0, 0]);
+      P.add(MAT.potSteel, taperBar(0.2, 0.028, 0.015, 0.021, 0.012), [0, -0.018, -0.08], [-0.14, 0, 0]);
+      rivets(P, MAT.potSteel, [[0.009, -0.016, cz + R], [-0.009, -0.016, cz + R], [0.009, -0.016, cz + R - 0.004, Math.PI], [-0.009, -0.016, cz + R - 0.004, Math.PI]], 0.0038);
       P.add(MAT.potSteel, new THREE.TorusGeometry(0.022, 0.005, 6, 12, Math.PI), [0, -0.01, cz - R - 0.01], [Math.PI / 2, 0, Math.PI]);
       const s = [Shp.cyl(0.003, 0.114, 0, -0.052, cz), Shp.box(0.013, 0.008, 0.1, 0, -0.004, 0.02, 0.14, 0, 0), Shp.box(0.02, 0.005, 0.015, 0, -0.01, cz - R - 0.015)];
       Shp.ring(s, 0.12, -0.028, 0.028, 0.006, 12, 0, cz);
@@ -3125,7 +3257,8 @@ const PROP_DEFS = {
   stockPot: { name: 'Stock Pot (6 L)', cat: 'Cookware', mass: 1.9, sound: 'metal', twoHanded: true, size: 0.3, pan: { key: 'stockPot', c: [0, 0.006, 0], r: 0.105, rim: 0.185 },
     build() { const P = Parts();
       P.add(MAT.potSteel, vesselGeo([[0.108, 0.0], [0.11, 0.005], [0.11, 0.19]], 0.003));
-      for (const s of [1, -1]) P.add(MAT.potSteel, new THREE.TorusGeometry(0.03, 0.006, 6, 14, Math.PI), [s * 0.11, 0.155, 0], [Math.PI / 2, 0, s > 0 ? -Math.PI / 2 : Math.PI / 2]);
+      for (const s of [1, -1]) { P.add(MAT.potSteel, new THREE.TorusGeometry(0.03, 0.0065, 10, 20, Math.PI), [s * 0.11, 0.155, 0], [Math.PI / 2, 0, s > 0 ? -Math.PI / 2 : Math.PI / 2]);
+        rivets(P, MAT.potSteel, [[s * 0.111, 0.155, 0.024, s * Math.PI / 2], [s * 0.111, 0.155, -0.024, s * Math.PI / 2]], 0.0035); }
       const s = [Shp.cyl(0.003, 0.108, 0, 0.003, 0), Shp.box(0.03, 0.006, 0.03, 0.135, 0.155, 0), Shp.box(0.03, 0.006, 0.03, -0.135, 0.155, 0)];
       Shp.ring(s, 0.11, 0.095, 0.095, 0.006, 14);
       return { parts: P.done(), shapes: s }; } },
@@ -3141,9 +3274,13 @@ const PROP_DEFS = {
       return { parts: P.done(), shapes: [Shp.box(w / 2, 0.003, d / 2, 0, 0.001), Shp.box(w / 2, h / 2, 0.004, 0, h / 2, d / 2), Shp.box(w / 2, h / 2, 0.004, 0, h / 2, -d / 2), Shp.box(0.004, h / 2, d / 2, w / 2, h / 2, 0), Shp.box(0.004, h / 2, d / 2, -w / 2, h / 2, 0)] }; } },
   cuttingBoard: { name: 'Cutting Board', cat: 'Cookware', mass: 1.6, sound: 'wood', twoHanded: true, size: 0.3,
     build() { const P = Parts();
-      const g = new THREE.BoxGeometry(0.45, 0.028, 0.3); P.add(MAT.board, g, [0, 0.014, 0]);
+      const rr = (w, d, r) => { const s = new THREE.Shape(), x = -w / 2, y = -d / 2; s.moveTo(x + r, y); s.lineTo(x + w - r, y); s.quadraticCurveTo(x + w, y, x + w, y + r); s.lineTo(x + w, y + d - r); s.quadraticCurveTo(x + w, y + d, x + w - r, y + d); s.lineTo(x + r, y + d); s.quadraticCurveTo(x, y + d, x, y + d - r); s.lineTo(x, y + r); s.quadraticCurveTo(x, y, x + r, y); return s; };
+      const bg = new THREE.ExtrudeGeometry(rr(0.442, 0.292, 0.025), { depth: 0.022, bevelEnabled: true, bevelThickness: 0.003, bevelSize: 0.003, bevelSegments: 3, curveSegments: 8 });
+      bg.rotateX(-Math.PI / 2); bg.translate(0, 0.003, 0); P.add(MAT.board, bg);
+      const groove = rr(0.4, 0.25, 0.02); groove.holes.push(rr(0.388, 0.238, 0.014));
+      const gg = new THREE.ShapeGeometry(groove, 8); gg.rotateX(-Math.PI / 2); P.add({ ...MAT.board, color: MAT.board.color.clone().multiplyScalar(0.62), rough: 0.8 }, gg, [0, 0.0282, 0]);
       return { parts: P.done(), shapes: [Shp.box(0.225, 0.014, 0.15, 0, 0.014, 0)] }; } },
-  mixingBowl: { name: 'Mixing Bowl', cat: 'Cookware', mass: 0.45, sound: 'metal', twoHanded: true, size: 0.2, vessel: { c: [0, 0.004, 0], r: 0.1, h: 0.105 },
+  mixingBowl: { name: 'Mixing Bowl', cat: 'Cookware', mass: 0.45, sound: 'metal', twoHanded: true, size: 0.2, vessel: { c: [0, 0.004, 0], r: 0.1, h: 0.105, slope: [0.058, 0.127] },
     build() { const P = Parts();
       P.add(MAT.potSteel, vesselGeo([[0.06, 0.0], [0.09, 0.02], [0.12, 0.07], [0.13, 0.11]], 0.002));
       const s = [Shp.cyl(0.003, 0.07, 0, 0.003, 0)];
@@ -3153,7 +3290,7 @@ const PROP_DEFS = {
     build() { const P = Parts();
       P.add(MAT.ceramic, lathe([[0, 0.004], [0.07, 0.002], [0.075, 0.0], [0.09, 0.006], [0.13, 0.016], [0.135, 0.02], [0.133, 0.022], [0.09, 0.013], [0, 0.012]], 40));
       return { parts: P.done(), shapes: [Shp.cyl(0.006, 0.13, 0, 0.008, 0)] }; } },
-  bowl: { name: 'Bowl', cat: 'Tableware', mass: 0.35, sound: 'ceramic', size: 0.09, vessel: { c: [0, 0.006, 0], r: 0.058, h: 0.058 },
+  bowl: { name: 'Bowl', cat: 'Tableware', mass: 0.35, sound: 'ceramic', size: 0.09, vessel: { c: [0, 0.006, 0], r: 0.058, h: 0.058, slope: [0.036, 0.074] },
     build() { const P = Parts();
       P.add(MAT.ceramicBlue, vesselGeo([[0.04, 0.0], [0.06, 0.015], [0.075, 0.045], [0.08, 0.065]], 0.005));
       const s = [Shp.cyl(0.004, 0.045, 0, 0.004, 0)];
@@ -3296,7 +3433,7 @@ const PROP_DEFS = {
       _v1.set(0, 1, 0).applyQuaternion(prop.renderQuat);
       if (_v1.y < -0.2 && h.vel.length() > 0.55 && Sim.clock - (prop.lastShake || 0) > 0.15) { prop.lastShake = Sim.clock; Liquids.shake(prop, g, kind); haptic(h.side, 0.2, 15); }
     } },
-  riceBag: { name: 'Rice (1 kg)', cat: 'Pantry', mass: 1.05, sound: 'produce', size: 0.1, vessel: { c: [0, 0.01, 0], r: 0.045, h: 0.19, neck: 0.03, opaque: true }, fill: { riceDry: 1.0 },
+  riceBag: { name: 'Rice (1 kg)', cat: 'Pantry', mass: 1.05, sound: 'produce', size: 0.1, vessel: { c: [0, 0.01, 0], r: 0.05, h: 0.19, neck: 0.03, opaque: true }, fill: { riceDry: 1.0 },
     build() { const P = Parts();
       P.add(MAT.ricePaper, new THREE.BoxGeometry(0.12, 0.2, 0.07), [0, 0.1, 0]);
       P.add(MAT.lblRice, new THREE.BoxGeometry(0.1, 0.07, 0.072), [0, 0.1, 0]);
@@ -3324,26 +3461,26 @@ const PROP_DEFS = {
     build() { const P = Parts(); P.add(MAT.labelRed, new THREE.CylinderGeometry(0.025, 0.025, 0.09, 16), [0, 0.045, 0]); P.add(MAT.plastic, new THREE.CylinderGeometry(0.026, 0.026, 0.012, 16), [0, 0.095, 0]);
       return { parts: P.done(), shapes: [Shp.cyl(0.05, 0.026, 0, 0.05, 0)] }; },
     use(prop) { Liquids.shake(prop, 0.4, 'chili'); }, tick(prop) { PROP_DEFS.saltBox.shakeTick(prop, 'chili', 0.25); } },
-  flourBowl: { name: 'Flour (dredge)', cat: 'Pantry', mass: 0.35, sound: 'ceramic', size: 0.09, vessel: { c: [0, 0.006, 0], r: 0.058, h: 0.058 }, fill: { flour: 0.18 },
+  flourBowl: { name: 'Flour (dredge)', cat: 'Pantry', mass: 0.35, sound: 'ceramic', size: 0.09, vessel: { c: [0, 0.006, 0], r: 0.058, h: 0.058, slope: [0.036, 0.074] }, fill: { flour: 0.18 },
     build() { return Props.built('bowl'); } },
-  eggWashBowl: { name: 'Egg Wash (dredge)', cat: 'Pantry', mass: 0.35, sound: 'ceramic', size: 0.09, vessel: { c: [0, 0.006, 0], r: 0.058, h: 0.058 }, fill: { egg: 0.15 },
+  eggWashBowl: { name: 'Egg Wash (dredge)', cat: 'Pantry', mass: 0.35, sound: 'ceramic', size: 0.09, vessel: { c: [0, 0.006, 0], r: 0.058, h: 0.058, slope: [0.036, 0.074] }, fill: { egg: 0.15 },
     build() { return Props.built('bowl'); } },
-  crumbsBowl: { name: 'Breadcrumbs (dredge)', cat: 'Pantry', mass: 0.35, sound: 'ceramic', size: 0.09, vessel: { c: [0, 0.006, 0], r: 0.058, h: 0.058 }, fill: { crumbs: 0.1 },
+  crumbsBowl: { name: 'Breadcrumbs (dredge)', cat: 'Pantry', mass: 0.35, sound: 'ceramic', size: 0.09, vessel: { c: [0, 0.006, 0], r: 0.058, h: 0.058, slope: [0.036, 0.074] }, fill: { crumbs: 0.1 },
     build() { return Props.built('bowl'); } },
   avocadoPit: { name: 'Avocado Pit', cat: 'Hidden', mass: 0.04, sound: 'wood', size: 0.02, lifetime: 60,
     build() { const P = Parts(); P.add(MAT.handle, new THREE.SphereGeometry(0.021, 14, 10), [0, 0, 0], null, [1, 1.15, 1]); return { parts: P.done(), shapes: [Shp.ball(0.021)] }; } },
   /* ---------- M4B: pantry, dairy, baking & appliance props ---------- */
-  flourBag: { name: 'Flour (1 kg)', cat: 'Pantry', mass: 1.05, sound: 'produce', size: 0.1, vessel: { c: [0, 0.01, 0], r: 0.05, h: 0.2, neck: 0.04, opaque: true }, fill: { flour: 1.0 },
+  flourBag: { name: 'Flour (1 kg)', cat: 'Pantry', mass: 1.05, sound: 'produce', size: 0.1, vessel: { c: [0, 0.01, 0], r: 0.056, h: 0.2, neck: 0.04, opaque: true }, fill: { flour: 1.0 },
     build() { const P = Parts(); P.add(MAT.ricePaper, new THREE.BoxGeometry(0.12, 0.22, 0.08), [0, 0.11, 0]); P.add(MAT.lblFlour, new THREE.BoxGeometry(0.11, 0.08, 0.082), [0, 0.11, 0]); return { parts: P.done(), shapes: [Shp.box(0.06, 0.11, 0.04, 0, 0.11, 0)] }; } },
-  sugarBag: { name: 'Sugar (1 kg)', cat: 'Pantry', mass: 1.05, sound: 'produce', size: 0.1, vessel: { c: [0, 0.01, 0], r: 0.045, h: 0.18, neck: 0.03, opaque: true }, fill: { sugar: 1.0 },
+  sugarBag: { name: 'Sugar (1 kg)', cat: 'Pantry', mass: 1.05, sound: 'produce', size: 0.1, vessel: { c: [0, 0.01, 0], r: 0.05, h: 0.18, neck: 0.03, opaque: true }, fill: { sugar: 1.0 },
     build() { const P = Parts(); P.add(MAT.paper, new THREE.BoxGeometry(0.11, 0.2, 0.07), [0, 0.1, 0]); P.add(MAT.lblSugar, new THREE.BoxGeometry(0.1, 0.07, 0.072), [0, 0.1, 0]); return { parts: P.done(), shapes: [Shp.box(0.055, 0.1, 0.035, 0, 0.1, 0)] }; } },
   brownSugar: { name: 'Brown Sugar', cat: 'Pantry', mass: 0.55, sound: 'produce', size: 0.08, vessel: { c: [0, 0.01, 0], r: 0.04, h: 0.15, neck: 0.03, opaque: true }, fill: { sugar: 0.48, water: 0.02 },
     build() { const P = Parts(); P.add(MAT.cardboard, new THREE.BoxGeometry(0.09, 0.16, 0.06), [0, 0.08, 0]); P.add(MAT.lblBrown, new THREE.BoxGeometry(0.085, 0.06, 0.061), [0, 0.085, 0]); return { parts: P.done(), shapes: [Shp.box(0.045, 0.08, 0.03, 0, 0.08, 0)] }; } },
-  milkCarton: { name: 'Milk (1 L)', cat: 'Pantry', mass: 1.05, sound: 'produce', size: 0.1, vessel: { c: [0, 0.01, 0], r: 0.037, h: 0.21, neck: 0.012, opaque: true }, fill: { milk: 1.0 },
+  milkCarton: { name: 'Milk (1 L)', cat: 'Pantry', mass: 1.05, sound: 'produce', size: 0.1, vessel: { c: [0, 0.01, 0], r: 0.04, h: 0.21, neck: 0.012, opaque: true }, fill: { milk: 1.0 },
     build() { const P = Parts(); P.add(MAT.paper, new THREE.BoxGeometry(0.07, 0.21, 0.07), [0, 0.105, 0]); P.add(MAT.lblMilk, new THREE.BoxGeometry(0.071, 0.08, 0.071), [0, 0.1, 0]); P.add(MAT.paper, new THREE.ConeGeometry(0.05, 0.04, 4), [0, 0.23, 0], [0, Math.PI / 4, 0]); return { parts: P.done(), shapes: [Shp.box(0.035, 0.12, 0.035, 0, 0.12, 0)] }; } },
-  creamCarton: { name: 'Heavy Cream', cat: 'Pantry', mass: 0.52, sound: 'produce', size: 0.08, vessel: { c: [0, 0.01, 0], r: 0.03, h: 0.15, neck: 0.01, opaque: true }, fill: { cream: 0.5 },
+  creamCarton: { name: 'Heavy Cream', cat: 'Pantry', mass: 0.52, sound: 'produce', size: 0.08, vessel: { c: [0, 0.01, 0], r: 0.034, h: 0.15, neck: 0.01, opaque: true }, fill: { cream: 0.5 },
     build() { const P = Parts(); P.add(MAT.paper, new THREE.BoxGeometry(0.06, 0.15, 0.06), [0, 0.075, 0]); P.add(MAT.lblCream, new THREE.BoxGeometry(0.061, 0.055, 0.061), [0, 0.07, 0]); return { parts: P.done(), shapes: [Shp.box(0.03, 0.08, 0.03, 0, 0.08, 0)] }; } },
-  stockCarton: { name: 'Chicken Stock', cat: 'Pantry', mass: 1.0, sound: 'produce', size: 0.1, vessel: { c: [0, 0.01, 0], r: 0.037, h: 0.21, neck: 0.012, opaque: true }, fill: { water: 0.97, stock: 0.015, salt: 0.007 },
+  stockCarton: { name: 'Chicken Stock', cat: 'Pantry', mass: 1.0, sound: 'produce', size: 0.1, vessel: { c: [0, 0.01, 0], r: 0.04, h: 0.21, neck: 0.012, opaque: true }, fill: { water: 0.97, stock: 0.015, salt: 0.007 },
     build() { const P = Parts(); P.add(MAT.cardboard, new THREE.BoxGeometry(0.07, 0.21, 0.07), [0, 0.105, 0]); P.add(MAT.lblStock, new THREE.BoxGeometry(0.071, 0.09, 0.071), [0, 0.11, 0]); return { parts: P.done(), shapes: [Shp.box(0.035, 0.105, 0.035, 0, 0.105, 0)] }; } },
   cannedTomatoes: { name: 'Canned Tomatoes', cat: 'Pantry', mass: 0.45, sound: 'metal', size: 0.06, vessel: { c: [0, 0.006, 0], r: 0.036, h: 0.1, opaque: true }, fill: { water: 0.36, tomato: 0.04 },
     build() { const P = Parts(); P.add(MAT.potSteel, vesselGeo([[0.037, 0], [0.038, 0.11]], 0.002)); P.add(MAT.lblTomato, band(0.0385, 0.075, 24), [0, 0.055, 0]);
@@ -3360,17 +3497,17 @@ const PROP_DEFS = {
   yeast: { name: 'Yeast', cat: 'Pantry', mass: 0.05, sound: 'produce', size: 0.04, spout: [0, 0.05, 0],
     build() { const P = Parts(); P.add(MAT.labelRed, new THREE.BoxGeometry(0.07, 0.1, 0.012), [0, 0.05, 0]); return { parts: P.done(), shapes: [Shp.box(0.035, 0.05, 0.006, 0, 0.05, 0)] }; },
     use(prop) { Liquids.shake(prop, 3, 'yeast'); } },
-  eggWhites: { name: 'Egg Whites (cup)', cat: 'Pantry', mass: 0.3, sound: 'ceramic', size: 0.07, vessel: { c: [0, 0.006, 0], r: 0.058, h: 0.058 }, fill: { eggWhite: 0.12 }, build() { return Props.built('bowl'); } },
-  eggYolks: { name: 'Egg Yolks (cup)', cat: 'Pantry', mass: 0.3, sound: 'ceramic', size: 0.07, vessel: { c: [0, 0.006, 0], r: 0.058, h: 0.058 }, fill: { yolk: 0.06 }, build() { return Props.built('bowl'); } },
-  beatenEggs: { name: 'Beaten Eggs (3)', cat: 'Pantry', mass: 0.3, sound: 'ceramic', size: 0.07, vessel: { c: [0, 0.006, 0], r: 0.058, h: 0.058 }, fill: { egg: 0.15 }, fillMix: 1, build() { return Props.built('bowl'); } },
-  pancakeBatter: { name: 'Pancake Batter', cat: 'Pantry', mass: 0.35, sound: 'metal', size: 0.12, vessel: { c: [0, 0.004, 0], r: 0.1, h: 0.105 }, fill: { flour: 0.15, milk: 0.2, egg: 0.05, sugar: 0.02, butterfat: 0.02, salt: 0.002 }, fillMix: 0.35,
+  eggWhites: { name: 'Egg Whites (cup)', cat: 'Pantry', mass: 0.3, sound: 'ceramic', size: 0.07, vessel: { c: [0, 0.006, 0], r: 0.058, h: 0.058, slope: [0.036, 0.074] }, fill: { eggWhite: 0.12 }, build() { return Props.built('bowl'); } },
+  eggYolks: { name: 'Egg Yolks (cup)', cat: 'Pantry', mass: 0.3, sound: 'ceramic', size: 0.07, vessel: { c: [0, 0.006, 0], r: 0.058, h: 0.058, slope: [0.036, 0.074] }, fill: { yolk: 0.06 }, build() { return Props.built('bowl'); } },
+  beatenEggs: { name: 'Beaten Eggs (3)', cat: 'Pantry', mass: 0.3, sound: 'ceramic', size: 0.07, vessel: { c: [0, 0.006, 0], r: 0.058, h: 0.058, slope: [0.036, 0.074] }, fill: { egg: 0.15 }, fillMix: 1, build() { return Props.built('bowl'); } },
+  pancakeBatter: { name: 'Pancake Batter', cat: 'Pantry', mass: 0.35, sound: 'metal', size: 0.12, vessel: { c: [0, 0.004, 0], r: 0.1, h: 0.105, slope: [0.058, 0.127] }, fill: { flour: 0.15, milk: 0.2, egg: 0.05, sugar: 0.02, butterfat: 0.02, salt: 0.002 }, fillMix: 0.35,
     build() { return Props.built('mixingBowl'); } },
-  cakeBatter: { name: 'Cake Batter', cat: 'Pantry', mass: 0.35, sound: 'metal', size: 0.12, vessel: { c: [0, 0.004, 0], r: 0.1, h: 0.105 }, fill: { flour: 0.2, sugar: 0.2, egg: 0.1, butterfat: 0.1, milk: 0.1, vanilla: 0.005 }, fillMix: 0.4,
+  cakeBatter: { name: 'Cake Batter', cat: 'Pantry', mass: 0.35, sound: 'metal', size: 0.12, vessel: { c: [0, 0.004, 0], r: 0.1, h: 0.105, slope: [0.058, 0.127] }, fill: { flour: 0.2, sugar: 0.2, egg: 0.1, butterfat: 0.1, milk: 0.1, vanilla: 0.005 }, fillMix: 0.4,
     build() { return Props.built('mixingBowl'); } },
-  mixerBowl: { name: 'Stand-Mixer Bowl', cat: 'Cookware', mass: 0.6, sound: 'metal', size: 0.12, vessel: { c: [0, 0.008, 0], r: 0.085, h: 0.13 },
+  mixerBowl: { name: 'Stand-Mixer Bowl', cat: 'Cookware', mass: 0.6, sound: 'metal', size: 0.12, vessel: { c: [0, 0.008, 0], r: 0.085, h: 0.13, slope: [0.058, 0.103] },
     build() { const P = Parts(); P.add(MAT.potSteel, vesselGeo([[0.06, 0], [0.1, 0.06], [0.105, 0.14]], 0.002));
       const s = [Shp.cyl(0.004, 0.06, 0, 0.004, 0)]; Shp.ring(s, 0.085, 0.04, 0.035, 0.01, 12); Shp.ring(s, 0.103, 0.11, 0.03, 0.008, 14); return { parts: P.done(), shapes: s }; } },
-  blenderJar: { name: 'Blender Jar', cat: 'Cookware', mass: 0.9, sound: 'ceramic', size: 0.12, vessel: { c: [0, 0.03, 0], r: 0.06, h: 0.2 },
+  blenderJar: { name: 'Blender Jar', cat: 'Cookware', mass: 0.9, sound: 'ceramic', size: 0.12, vessel: { c: [0, 0.03, 0], r: 0.06, h: 0.2, slope: [0.052, 0.066] },
     build() { const P = Parts(); P.add(MAT.plastic, new THREE.CylinderGeometry(0.065, 0.07, 0.03, 16), [0, 0.015, 0]); P.add(MAT.plastic, new THREE.BoxGeometry(0.02, 0.12, 0.03), [0.085, 0.12, 0]);
       const glass = vesselGeo([[0.055, 0.03], [0.07, 0.25]], 0.003); const parts = P.done(); parts.push({ mat: MAT.glass, geo: glass, cast: false });
       const s = [Shp.cyl(0.015, 0.068, 0, 0.015, 0), Shp.box(0.01, 0.06, 0.015, 0.085, 0.12, 0)]; Shp.ring(s, 0.066, 0.14, 0.11, 0.006, 12); return { parts, shapes: s }; } },
@@ -4863,6 +5000,12 @@ const Foods = {
         for (const f of p.th.faces) { const before = f.wet; f.wet *= Math.exp(-dt * (2 + 20 * Math.min(1, v))); dried += before - f.wet; }
         if (dried > 1e-5 && t.holders.length) haptic(t.holders[0].side, 0.08, 20);
       }
+      // Wiping up: a towel moved over a spill soaks up the puddle or sweeps up the dusting.
+      if (t.holders.length && v > 0.05) for (let i = Liquids.puddles.length - 1; i >= 0; i--) {
+        const d = Liquids.puddles[i]; if (d.fire || Math.abs(t.renderPos.y - d.y) > 0.06 || Math.hypot(t.renderPos.x - d.x, t.renderPos.z - d.z) > d.r + 0.05) continue;
+        d.vol *= Math.exp(-dt * 5 * Math.min(1, v)); haptic(t.holders[0].side, 0.05, 12);
+        if (d.vol < 3e-7) Liquids.puddles.splice(i, 1);
+      }
     }
   },
   // Contact impacts (from physics events): eggs crack on pan rims / counters.
@@ -4941,7 +5084,7 @@ const Cutting = {
       Safety.onCut(knife, f);
       if (small) Foods.mince(f);
       else if (!Foods.cut(f, pts[2], bladeN)) continue;
-      Safety.afterCut(f, n0);
+      Safety.afterCut(f, n0); Remaster.chopBits(f, pts[2]);
       // Cutting cooked meat lets juices run (pink for rare beef, golden for poultry/pork).
       if (f.fdef.protein && f.th.coreMax > 42 && f.th.juiciness() > 0.5) { const red = f.fdef.doneness === 'beef' && f.th.coreMax < 64, n = Math.round(4 + 6 * f.th.juiciness()); for (let j = 0; j < n; j++) Particles.emitV(red ? 'juice' : 'juiceClear', pts[2].x + (Math.random() - 0.5) * 0.03, pts[2].y - 0.01, pts[2].z + (Math.random() - 0.5) * 0.03, (Math.random() - 0.5) * 0.1, -0.1, (Math.random() - 0.5) * 0.1); }
       if (pitIt) { const pit = Props.spawn('avocadoPit', f.renderPos.clone(), new THREE.Quaternion(), true); if (pit) pit.body.setLinvel({ x: 0, y: 0.5, z: 0 }, true); }
@@ -5016,21 +5159,38 @@ const Stove = {
       parts.push(c.index ? c.toNonIndexed() : c);
     }
     const fg = mergeGeometries(parts, false);
+    // Gas flame: a bright cyan inner cone fading to a blue-violet mantle; tongues flicker independently and now and
+    // then a tip flashes sodium-orange (dust in the burner), like a real hob.
     this.flameMat = new THREE.ShaderMaterial({
-      uniforms: { uTime: { value: 0 } },
-      vertexShader: `attribute float tip; attribute float seed; uniform float uTime; varying float vTip;
-        void main(){ vTip = tip; vec3 p = position;
-          float fl = 0.82 + 0.18 * sin(uTime * 23.0 + seed * 3.1) + 0.1 * sin(uTime * 41.0 + seed * 7.7);
-          p.y *= fl; p.xz *= 1.0 + 0.08 * tip * sin(uTime * 17.0 + seed);
+      uniforms: { uTime: { value: 0 }, uLin: POSTU.uLin },
+      vertexShader: `attribute float tip; attribute float seed; uniform float uTime; varying float vTip; varying float vSeed;
+        void main(){ vTip = tip; vSeed = seed; vec3 p = position;
+          float fl = 0.8 + 0.16 * sin(uTime * 23.0 + seed * 3.1) + 0.1 * sin(uTime * 41.0 + seed * 7.7) + 0.06 * sin(uTime * 67.0 + seed * 1.3);
+          p.y *= fl; p.xz *= 1.0 + 0.1 * tip * sin(uTime * 17.0 + seed);
           gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(p, 1.0); }`,
-      fragmentShader: `varying float vTip;
-        void main(){ vec3 c = mix(vec3(0.12, 0.28, 1.0), vec3(0.55, 0.8, 1.0), smoothstep(0.1, 0.8, vTip));
-          float a = (1.0 - smoothstep(0.55, 1.0, vTip)) * 0.85; gl_FragColor = vec4(c * 1.6, a); }`,
+      fragmentShader: `uniform float uTime; uniform float uLin; varying float vTip; varying float vSeed;
+        void main(){ float t = vTip;
+          vec3 c = mix(vec3(0.62, 0.9, 1.0) * 1.5, vec3(0.1, 0.24, 1.0), smoothstep(0.04, 0.45, t));
+          c = mix(c, vec3(0.38, 0.16, 0.85), smoothstep(0.55, 0.95, t));
+          float na = fract(sin(floor(uTime * 7.0 + vSeed * 3.0) * 12.9898 + vSeed * 4.1) * 43758.5453);
+          c = mix(c, vec3(1.0, 0.5, 0.12) * 1.6, step(0.965, na) * smoothstep(0.45, 0.85, t) * 0.85);
+          float a = (1.0 - smoothstep(0.5, 1.0, t)) * 0.9; gl_FragColor = vec4(c * 1.6, a);
+          if (uLin > 0.5) gl_FragColor.rgb = pow(max(gl_FragColor.rgb, 0.0), vec3(2.2)) * 1.6; }`,
       transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
     });
-    this.flames = new THREE.InstancedMesh(fg, this.flameMat, 4); this.flames.frustumCulled = false; this.flames.renderOrder = 6;
+    this.flames = new THREE.InstancedMesh(fg, this.flameMat, 4); this.flames.frustumCulled = false; this.flames.renderOrder = 6; this.flames.userData.noAO = true;
     for (let i = 0; i < 4; i++) { _m1.makeScale(0, 0, 0); this.flames.setMatrixAt(i, _m1); }
     scene.add(this.flames);
+    // Blue glow pooling on the burner cap and the pan above it.
+    const gg = new THREE.RingGeometry(0.02, 0.11, 32, 1); gg.rotateX(-Math.PI / 2);
+    this.glowMat = new THREE.ShaderMaterial({ uniforms: { uLin: POSTU.uLin },
+      vertexShader: `varying vec2 vP; void main(){ vP = position.xz; gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0); }`,
+      fragmentShader: `uniform float uLin; varying vec2 vP; void main(){ float r = length(vP); float a = smoothstep(0.02, 0.05, r) * smoothstep(0.11, 0.05, r) * 0.55;
+        gl_FragColor = vec4(vec3(0.25, 0.45, 1.0) * a, 1.0); if (uLin > 0.5) gl_FragColor.rgb = pow(gl_FragColor.rgb, vec3(2.2)) * 2.0; }`,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+    this.glow = new THREE.InstancedMesh(gg, this.glowMat, 4); this.glow.frustumCulled = false; this.glow.renderOrder = 6; this.glow.userData.noAO = true;
+    for (let i = 0; i < 4; i++) { _m1.makeScale(0, 0, 0); this.glow.setMatrixAt(i, _m1); }
+    scene.add(this.glow);
   },
   powerFrac(a) {
     const S = CONFIG.stove;
@@ -5060,7 +5220,7 @@ const Stove = {
       if (k.failed > 0) { k.failed -= dt; if (k.failed <= 0) { k.failed = 0; toast(`Burner ${k.burner + 1} is working again`, 1500); } }
       if (k.ign > 0) {
         k.ign -= dt; k.clickT -= dt;
-        if (k.clickT <= 0) { k.clickT = 0.11; AudioSys.igniterClick(Kitchen.burners[k.burner]); }
+        if (k.clickT <= 0) { k.clickT = 0.11; const bp = Kitchen.burners[k.burner]; AudioSys.igniterClick(bp); for (let s = 0; s < 3; s++) FX.emit('spark', bp.x + 0.045, bp.y + 0.005, bp.z); }
         if (k.ign <= 0) { if (k.failed > 0 && !(Game.infinite && Game.mode === 'sandbox')) k.ign = 0.6; else { k.lit = true; AudioSys.ignite(Kitchen.burners[k.burner]); } }
       }
       // The mode dial clicks into its nearest detent when let go.
@@ -5075,8 +5235,10 @@ const Stove = {
       if (f > 0) { const hs = 0.35 + 0.95 * f, rs = 0.85 + 0.2 * f; _m1.makeScale(rs, hs, rs); _m1.setPosition(bp.x, bp.y - 0.018, bp.z); }
       else _m1.makeScale(0, 0, 0);
       this.flames.setMatrixAt(b, _m1);
+      if (f > 0) { const gs = 0.7 + 0.5 * f; _m1.makeScale(gs, 1, gs); _m1.setPosition(bp.x, bp.y - 0.012, bp.z); }
+      this.glow.setMatrixAt(b, _m1);
     }
-    this.flames.instanceMatrix.needsUpdate = true;
+    this.flames.instanceMatrix.needsUpdate = true; this.glow.instanceMatrix.needsUpdate = true;
     Sizzle.update(dt);
   },
   // Fixed step: burners heat pans; pans lose heat to air and to their contents (food energy from Foods.simTick).
@@ -5164,87 +5326,170 @@ const Sizzle = {
 };
 
 /* ===================================== [PARTICLES] ================================== */
-// Pooled, instanced camera-facing puffs (steam, smoke). One draw call.
+// Pooled, instanced particles: one draw per system (Particles: alpha-blended, FX: additive). Each type picks a
+// shading mode: 0 soft volume (steam, smoke, flour, foam: domain-warped fbm that erodes into wisps, lit by the key
+// light with back-lit translucency), 1 streak (embers, spatter, sparks: stretched along screen-space velocity,
+// hot core), 2 bead (splash, juice, grains, debris, confetti: tiny lit spheres with a glint), 3 flame (upright
+// tongues of noise-distorted fire on a temperature ramp), 4 sparkle (four-point star), 5 germ (cartoon blob).
 const Particles = {
   n: 0,
   init() {
     const M = this.maxN || CONFIG.particles.max;
     this.max = M; this.pos = new Float32Array(M * 3); this.vel = new Float32Array(M * 3); this.life = new Float32Array(M); this.maxLife = new Float32Array(M);
     this.s0 = new Float32Array(M); this.s1 = new Float32Array(M); this.col = new Float32Array(M * 4); this.a0 = new Float32Array(M); this.gr = new Float32Array(M);
+    this.rot = new Float32Array(M); this.rotV = new Float32Array(M); this.seed = new Float32Array(M); this.mode = new Float32Array(M); this.drag = new Float32Array(M); this.turb = new Float32Array(M);
     const g = new THREE.PlaneGeometry(1, 1);
     this.iCol = new THREE.InstancedBufferAttribute(new Float32Array(M * 4), 4); this.iCol.setUsage(THREE.DynamicDrawUsage);
-    g.setAttribute('iCol', this.iCol);
+    this.iMisc = new THREE.InstancedBufferAttribute(new Float32Array(M * 4), 4); this.iMisc.setUsage(THREE.DynamicDrawUsage);
+    this.iVel = new THREE.InstancedBufferAttribute(new Float32Array(M * 3), 3); this.iVel.setUsage(THREE.DynamicDrawUsage);
+    g.setAttribute('iCol', this.iCol); g.setAttribute('iMisc', this.iMisc); g.setAttribute('iVel', this.iVel);
+    const sd = new THREE.Vector3().subVectors(sun.position, sun.target.position).normalize();
+    this.uniforms = { uTime: { value: 0 }, uLin: POSTU.uLin, uCheap: { value: 0 }, uSun: { value: sd }, uSunCol: { value: new THREE.Vector3(0.62, 0.55, 0.46) }, uAmb: { value: new THREE.Vector3(0.6, 0.58, 0.56) } };
     const mat = new THREE.ShaderMaterial({
-      vertexShader: `attribute vec4 iCol; varying vec4 vC; varying vec2 vUv; varying vec2 vSeed;
-        void main(){ vUv = uv; vC = iCol; vec3 c = (instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz; float s = length(instanceMatrix[0].xyz); vSeed = c.xz * 37.0 + c.y * 11.0;
-          vec4 mv = modelViewMatrix * vec4(c, 1.0); mv.xy += position.xy * s; gl_Position = projectionMatrix * mv; }`,
-      // Soft puffs with wispy value-noise breakup (each instance gets its own noise offset from its screen position).
-      fragmentShader: `varying vec4 vC; varying vec2 vUv; varying vec2 vSeed;
+      uniforms: this.uniforms,
+      vertexShader: `attribute vec4 iCol; attribute vec4 iMisc; attribute vec3 iVel; uniform vec3 uSun;
+        varying vec4 vC; varying vec2 vUv; varying vec4 vM; varying vec3 vLv;
+        void main(){ vUv = uv; vC = iCol; vM = iMisc;
+          vec3 c = (instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz; float s = length(instanceMatrix[0].xyz);
+          vec4 mv = modelViewMatrix * vec4(c, 1.0); vec2 p = position.xy; float mode = iMisc.z;
+          if (mode > 0.5 && mode < 1.5) {                       // streak: stretched along its screen-space motion
+            vec2 v2 = (modelViewMatrix * vec4(iVel, 0.0)).xy; float sp = length(v2); vec2 dir = sp > 1e-4 ? v2 / sp : vec2(0.0, 1.0);
+            p = dir * p.y * (s * 1.5 + sp * 0.05) + vec2(-dir.y, dir.x) * p.x * s;
+          } else if (mode > 2.5 && mode < 3.5) {                // flame: stands upright, taller than wide, base at the particle
+            vec2 u2 = (viewMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xy; u2 = length(u2) > 1e-3 ? normalize(u2) : vec2(0.0, 1.0);
+            p = vec2(u2.y, -u2.x) * p.x * s * 0.75 + u2 * (p.y + 0.32) * s * 1.7;
+          } else { float r = iMisc.x; p = mat2(cos(r), sin(r), -sin(r), cos(r)) * p * s; }
+          mv.xy += p; vLv = normalize((viewMatrix * vec4(uSun, 0.0)).xyz);
+          gl_Position = projectionMatrix * mv; }`,
+      fragmentShader: `uniform float uTime; uniform float uLin; uniform float uCheap; uniform vec3 uSunCol; uniform vec3 uAmb;
+        varying vec4 vC; varying vec2 vUv; varying vec4 vM; varying vec3 vLv;
         float h2(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
         float vn(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f); return mix(mix(h2(i), h2(i + vec2(1, 0)), f.x), mix(h2(i + vec2(0, 1)), h2(i + vec2(1, 1)), f.x), f.y); }
-        void main(){ vec2 d = vUv - 0.5; float r = length(d) * 2.0;
-          float n = 0.55 + 0.45 * (0.65 * vn(vUv * 3.5 + vSeed) + 0.35 * vn(vUv * 7.0 - vSeed));
-          float a = smoothstep(1.0, 0.15, r) * vC.a * n; if (a < 0.005) discard; gl_FragColor = vec4(vC.rgb, a); }`,
+        float fbm(vec2 p){ return vn(p) * 0.55 + vn(p * 2.03 + 3.1) * 0.3 + vn(p * 4.1 + 7.7) * 0.15; }
+        vec3 fireRamp(float t){ vec3 a = mix(vec3(0.45, 0.03, 0.0), vec3(1.0, 0.34, 0.03), smoothstep(0.0, 0.4, t)); vec3 b = mix(vec3(1.0, 0.7, 0.22), vec3(1.0, 0.97, 0.85), smoothstep(0.72, 1.0, t)); return mix(a, b, smoothstep(0.35, 0.8, t)); }
+        void main(){
+          float mode = vM.z, life = vM.w, seed = vM.y; vec2 d = vUv - 0.5; float r = length(d) * 2.0;
+          vec3 col = vC.rgb; float a = vC.a;
+          if (mode < 0.5) {
+            vec2 q = d * 2.3 + seed * 17.0;
+            vec2 w = uCheap > 0.5 ? vec2(vn(q * 1.3 - life), vn(q * 1.3 + 5.2 + life)) : vec2(fbm(q + vec2(0.0, -life * 1.4)), fbm(q + 5.2 + life * 0.8));
+            float n = fbm(q + w * 1.7 + vec2(0.0, -life * 0.9));
+            float dens = smoothstep(1.0, 0.2, r + (n - 0.5) * 0.6) * smoothstep(life * 0.6, life * 0.6 + 0.42, n + 0.22);
+            a *= dens;
+            vec3 N = normalize(vec3(d * 1.7 + (w - 0.5) * 0.6, 0.62));
+            float dif = dot(N, vLv) * 0.5 + 0.5, back = pow(max(-vLv.z, 0.0), 2.0) * (1.0 - dens * 0.5);
+            col = col * (uAmb + uSunCol * dif * 0.6) + uSunCol * back * 0.3 * col;
+          } else if (mode < 1.5) {
+            float core = exp(-d.x * d.x * 36.0) * smoothstep(0.5, 0.1, abs(d.y));
+            a *= core; col *= 1.1 + core * 0.9;
+          } else if (mode < 2.5) {
+            if (r > 1.0) discard;
+            vec3 N = vec3(d * 2.0, sqrt(max(0.0, 1.0 - r * r)));
+            float dif = max(dot(N, vLv), 0.0) * 0.55 + 0.45, spec = pow(max(dot(reflect(-vLv, N), vec3(0.0, 0.0, 1.0)), 0.0), 28.0);
+            col = col * (uAmb * 0.95 + uSunCol * dif * 0.55) + vec3(spec * 0.55 * a);
+            a *= smoothstep(1.0, 0.75, r);
+          } else if (mode < 3.5) {
+            vec2 f = vec2(d.x * 2.0, vUv.y); float t = uTime * 2.3 + seed * 13.0;
+            float n = fbm(vec2(f.x * 2.4, f.y * 2.6 - t * 1.7) + seed * 5.0);
+            float width = (1.0 - f.y) * 0.85 + 0.12;
+            float shape = 1.0 - smoothstep(width * 0.45, width, abs(f.x + (n - 0.5) * 0.6 * f.y));
+            shape *= smoothstep(0.0, 0.14, f.y) * (1.0 - smoothstep(0.45 + n * 0.4, 1.0, f.y));
+            float heat = shape * (1.2 - f.y * 0.85) * (0.75 + 0.5 * n);
+            col = fireRamp(clamp(heat * 1.1 * (1.0 - life * 0.45), 0.0, 1.0)) * 1.7;
+            a = clamp(heat, 0.0, 1.0) * vC.a * (1.0 - smoothstep(0.7, 1.0, life));
+          } else if (mode < 4.5) {
+            vec2 rd = mat2(0.7071, 0.7071, -0.7071, 0.7071) * d;
+            float star = max(0.0, 1.0 - abs(d.x * d.y) * 260.0) * max(0.0, 1.0 - r) + max(0.0, 1.0 - abs(rd.x * rd.y) * 520.0) * max(0.0, 1.0 - r * 1.6) * 0.6;
+            a *= clamp(star + smoothstep(0.3, 0.0, r), 0.0, 1.0) * (0.75 + 0.25 * sin(uTime * 20.0 + seed * 30.0)); col *= 1.5;
+          } else {
+            float body = smoothstep(1.0, 0.78, r + 0.09 * sin(atan(d.y, d.x) * 7.0 + uTime * 5.0 + seed * 10.0));
+            float eyes = smoothstep(0.13, 0.08, length(d - vec2(0.11, 0.08))) + smoothstep(0.13, 0.08, length(d - vec2(-0.11, 0.08)));
+            col = mix(col * (0.8 + 0.4 * (1.0 - r)), vec3(0.04, 0.08, 0.03), eyes * 0.9); a *= body;
+          }
+          if (a < 0.004) discard;
+          gl_FragColor = vec4(col, a);
+          if (uLin > 0.5) gl_FragColor.rgb = pow(max(gl_FragColor.rgb, 0.0), vec3(2.2)) * 1.087;
+        }`,
       transparent: true, depthWrite: false, blending: this.additive ? THREE.AdditiveBlending : THREE.NormalBlending,
     });
-    this.mesh = new THREE.InstancedMesh(g, mat, M); this.mesh.count = 0; this.mesh.frustumCulled = false; this.mesh.renderOrder = this.additive ? 9 : 8;
+    this.mesh = new THREE.InstancedMesh(g, mat, M); this.mesh.count = 0; this.mesh.frustumCulled = false; this.mesh.renderOrder = this.additive ? 9 : 8; this.mesh.userData.noAO = true;
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     scene.add(this.mesh);
   },
+  // m: shading mode, g: gravity (m/s²), drag (1/s), turb: curl-ish wander, rv: spin (rad/s)
   types: {
-    steam: { col: [0.96, 0.96, 0.96], a: 0.2, life: 1.5, s0: 0.02, s1: 0.13, vy: 0.32, spread: 0.06 },
-    smoke: { col: [0.33, 0.31, 0.3], a: 0.32, life: 3.2, s0: 0.03, s1: 0.26, vy: 0.2, spread: 0.05 },
-    salt: { col: [0.97, 0.97, 0.97], a: 0.95, life: 0.45, s0: 0.004, s1: 0.004, vy: -1.3, spread: 0.08 },
-    splash: { col: [0.85, 0.92, 0.98], a: 0.5, life: 0.35, s0: 0.01, s1: 0.03, vy: 0.25, spread: 0.3 },
-    spatter: { g: 4, col: [0.95, 0.85, 0.5], a: 0.8, life: 0.4, s0: 0.004, s1: 0.006, vy: 1.2, spread: 0.9 },
-    yeast: { col: [0.78, 0.66, 0.45], a: 0.95, life: 0.45, s0: 0.0035, s1: 0.0035, vy: -1.3, spread: 0.08 },
-    pepper: { col: [0.12, 0.1, 0.08], a: 0.95, life: 0.45, s0: 0.003, s1: 0.003, vy: -1.3, spread: 0.08 },
-    paprika: { col: [0.75, 0.18, 0.08], a: 0.95, life: 0.45, s0: 0.003, s1: 0.003, vy: -1.3, spread: 0.08 },
-    chili: { col: [0.8, 0.12, 0.05], a: 0.95, life: 0.45, s0: 0.004, s1: 0.004, vy: -1.3, spread: 0.08 },
-    soda: { col: [0.98, 0.98, 0.98], a: 0.7, life: 0.8, s0: 0.01, s1: 0.05, vy: -0.9, spread: 0.25 },
-    foam: { col: [0.95, 0.96, 1.0], a: 0.55, life: 0.9, s0: 0.03, s1: 0.2, vy: 0.1, spread: 0.3 },
-    flour: { col: [0.97, 0.96, 0.93], a: 0.35, life: 1.1, s0: 0.02, s1: 0.12, vy: 0.08, spread: 0.12 },
-    juice: { col: [0.62, 0.16, 0.13], a: 0.85, life: 0.7, s0: 0.004, s1: 0.003, vy: -0.1, spread: 0.02, g: 3.5 },
-    juiceClear: { col: [0.86, 0.74, 0.46], a: 0.7, life: 0.7, s0: 0.004, s1: 0.003, vy: -0.1, spread: 0.02, g: 3.5 },
+    steam: { m: 0, col: [0.97, 0.97, 0.98], a: 0.24, life: 1.7, s0: 0.025, s1: 0.17, vy: 0.32, spread: 0.06, turb: 0.25, rv: 0.6 },
+    smoke: { m: 0, col: [0.35, 0.33, 0.32], a: 0.36, life: 3.4, s0: 0.035, s1: 0.32, vy: 0.2, spread: 0.05, turb: 0.3, rv: 0.4 },
+    salt: { m: 2, col: [0.98, 0.98, 0.98], a: 0.95, life: 0.45, s0: 0.0045, s1: 0.004, vy: -1.3, spread: 0.08 },
+    splash: { m: 2, col: [0.8, 0.9, 0.98], a: 0.6, life: 0.5, s0: 0.006, s1: 0.004, vy: 0.7, spread: 0.6, g: 7 },
+    spatter: { m: 1, g: 5, col: [1.0, 0.86, 0.48], a: 0.9, life: 0.45, s0: 0.0032, s1: 0.0022, vy: 1.5, spread: 1.1 },
+    yeast: { m: 2, col: [0.78, 0.66, 0.45], a: 0.95, life: 0.45, s0: 0.004, s1: 0.0035, vy: -1.3, spread: 0.08 },
+    pepper: { m: 2, col: [0.12, 0.1, 0.08], a: 0.95, life: 0.45, s0: 0.0035, s1: 0.003, vy: -1.3, spread: 0.08 },
+    paprika: { m: 2, col: [0.75, 0.18, 0.08], a: 0.95, life: 0.45, s0: 0.0035, s1: 0.003, vy: -1.3, spread: 0.08 },
+    chili: { m: 2, col: [0.8, 0.12, 0.05], a: 0.95, life: 0.45, s0: 0.0045, s1: 0.004, vy: -1.3, spread: 0.08 },
+    soda: { m: 0, col: [0.98, 0.98, 0.98], a: 0.7, life: 0.9, s0: 0.012, s1: 0.06, vy: -0.9, spread: 0.25, turb: 0.2 },
+    foam: { m: 0, col: [0.95, 0.96, 1.0], a: 0.6, life: 1.0, s0: 0.03, s1: 0.2, vy: 0.1, spread: 0.3, turb: 0.4, rv: 1.5 },
+    flour: { m: 0, col: [0.98, 0.97, 0.94], a: 0.42, life: 1.8, s0: 0.02, s1: 0.15, vy: 0.08, spread: 0.14, turb: 0.35, rv: 0.8, drag: 1.2 },
+    juice: { m: 2, col: [0.62, 0.16, 0.13], a: 0.9, life: 0.7, s0: 0.0045, s1: 0.0035, vy: -0.1, spread: 0.02, g: 3.5 },
+    juiceClear: { m: 2, col: [0.86, 0.74, 0.46], a: 0.75, life: 0.7, s0: 0.0045, s1: 0.0035, vy: -0.1, spread: 0.02, g: 3.5 },
+    bits: { m: 2, col: [0.9, 0.8, 0.6], a: 1.0, life: 0.55, s0: 0.004, s1: 0.0035, vy: 0.9, spread: 0.9, g: 6 },
+    mist: { m: 0, col: [0.9, 0.95, 1.0], a: 0.16, life: 0.9, s0: 0.012, s1: 0.06, vy: 0.15, spread: 0.12, turb: 0.3 },
+    confetti: { m: 2, col: [1, 1, 1], a: 1.0, life: 2.2, s0: 0.006, s1: 0.006, vy: 2.0, spread: 1.6, g: 2.2, drag: 1.4, turb: 0.6 },
     // additive (FX) types
-    fire: { col: [1.0, 0.45, 0.1], a: 0.9, life: 0.7, s0: 0.08, s1: 0.02, vy: 0.9, spread: 0.12 },
-    fireball: { col: [1.0, 0.5, 0.12], a: 1.0, life: 1.1, s0: 0.25, s1: 0.05, vy: 1.8, spread: 0.9 },
-    ember: { col: [1.0, 0.55, 0.15], a: 1.0, life: 1.4, s0: 0.006, s1: 0.002, vy: 0.5, spread: 0.2 },
-    germ: { col: [0.45, 0.95, 0.4], a: 0.75, life: 1.4, s0: 0.004, s1: 0.007, vy: 0.04, spread: 0.05 },
-    sparkle: { col: [1.0, 0.9, 0.55], a: 0.9, life: 0.8, s0: 0.012, s1: 0.0, vy: 0.3, spread: 0.3 },
+    fire: { m: 3, col: [1.0, 0.45, 0.1], a: 1.0, life: 0.6, s0: 0.075, s1: 0.035, vy: 0.75, spread: 0.12, turb: 0.5, drag: 0.6 },
+    fireball: { m: 3, col: [1.0, 0.5, 0.12], a: 1.0, life: 1.1, s0: 0.24, s1: 0.07, vy: 1.7, spread: 0.9, turb: 0.8, drag: 0.5 },
+    ember: { m: 1, col: [1.0, 0.5, 0.12], a: 1.0, life: 1.6, s0: 0.0035, s1: 0.002, vy: 0.55, spread: 0.25, turb: 1.4, g: -0.15 },
+    spark: { m: 1, col: [0.85, 0.92, 1.0], a: 1.0, life: 0.18, s0: 0.0025, s1: 0.0015, vy: 0.4, spread: 1.2 },
+    germ: { m: 5, col: [0.45, 0.95, 0.4], a: 0.85, life: 1.4, s0: 0.006, s1: 0.009, vy: 0.04, spread: 0.05, turb: 0.2 },
+    sparkle: { m: 4, col: [1.0, 0.9, 0.55], a: 0.95, life: 0.9, s0: 0.018, s1: 0.0, vy: 0.3, spread: 0.3, rv: 2 },
   },
   emitV(type, x, y, z, vx, vy, vz) { const i = this.n; this.emit(type, x, y, z); if (this.n > i) { this.vel[i * 3] = vx; this.vel[i * 3 + 1] = vy; this.vel[i * 3 + 2] = vz; } },
+  // Same, tinted (chop debris takes the food's colour; confetti is random).
+  emitC(type, x, y, z, r, g, b) { const i = this.n; this.emit(type, x, y, z); if (this.n > i) { this.col[i * 4] = r; this.col[i * 4 + 1] = g; this.col[i * 4 + 2] = b; } },
   cap: 1, // adaptive quality thins particles (1 = all)
   emit(type, x, y, z) {
     if (!this.pos || this.n >= this.max || (this.cap < 1 && Math.random() > this.cap)) return;
-    const T = this.types[type], i = this.n++;
+    const T = this.types[type] || this.types.steam, i = this.n++;
     this.pos[i * 3] = x; this.pos[i * 3 + 1] = y; this.pos[i * 3 + 2] = z;
     this.vel[i * 3] = (Math.random() - 0.5) * T.spread; this.vel[i * 3 + 1] = T.vy * (0.7 + Math.random() * 0.6); this.vel[i * 3 + 2] = (Math.random() - 0.5) * T.spread;
-    this.life[i] = 0; this.maxLife[i] = T.life * (0.75 + Math.random() * 0.5); this.s0[i] = T.s0; this.s1[i] = T.s1 * (0.8 + Math.random() * 0.4);
+    this.life[i] = 0; this.maxLife[i] = T.life * (0.75 + Math.random() * 0.5); this.s0[i] = T.s0 * (0.85 + Math.random() * 0.3); this.s1[i] = T.s1 * (0.8 + Math.random() * 0.4);
     this.col[i * 4] = T.col[0]; this.col[i * 4 + 1] = T.col[1]; this.col[i * 4 + 2] = T.col[2]; this.a0[i] = T.a; this.gr[i] = T.g || 0;
+    this.mode[i] = T.m || 0; this.drag[i] = T.drag ?? 0.3; this.turb[i] = T.turb || 0; this.seed[i] = Math.random();
+    this.rot[i] = Math.random() * 6.283; this.rotV[i] = (Math.random() - 0.5) * 2 * (T.rv || 0);
+    if (type === 'confetti') { const h = Math.random(); _c1.setHSL(h, 0.85, 0.6); this.col[i * 4] = _c1.r; this.col[i * 4 + 1] = _c1.g; this.col[i * 4 + 2] = _c1.b; }
   },
   update(dt) {
     let i = 0;
-    const P = this.pos, V = this.vel, L = this.life, ML = this.maxLife, C = this.col, ic = this.iCol.array;
+    const P = this.pos, V = this.vel, L = this.life, ML = this.maxLife, C = this.col, ic = this.iCol.array, im = this.iMisc.array, iv = this.iVel.array, t0 = Sim.clock;
+    this.uniforms.uTime.value = t0;
     while (i < this.n) {
       L[i] += dt;
       if (L[i] >= ML[i]) { // swap-remove
         const j = --this.n;
         P[i * 3] = P[j * 3]; P[i * 3 + 1] = P[j * 3 + 1]; P[i * 3 + 2] = P[j * 3 + 2]; V[i * 3] = V[j * 3]; V[i * 3 + 1] = V[j * 3 + 1]; V[i * 3 + 2] = V[j * 3 + 2];
         L[i] = L[j]; ML[i] = ML[j]; this.gr[i] = this.gr[j]; this.s0[i] = this.s0[j]; this.s1[i] = this.s1[j]; this.a0[i] = this.a0[j];
+        this.rot[i] = this.rot[j]; this.rotV[i] = this.rotV[j]; this.seed[i] = this.seed[j]; this.mode[i] = this.mode[j]; this.drag[i] = this.drag[j]; this.turb[i] = this.turb[j];
         C[i * 4] = C[j * 4]; C[i * 4 + 1] = C[j * 4 + 1]; C[i * 4 + 2] = C[j * 4 + 2]; continue;
       }
-      const t = L[i] / ML[i];
-      V[i * 3] += (Math.sin(L[i] * 3 + i) * 0.04) * dt; V[i * 3 + 2] += (Math.cos(L[i] * 2.7 + i) * 0.04) * dt; V[i * 3 + 1] *= 1 - dt * 0.3; V[i * 3 + 1] -= this.gr[i] * dt;
+      const t = L[i] / ML[i], sd = this.seed[i] * 40, tu = this.turb[i], dr = 1 - dt * this.drag[i];
+      // wander: smoothly varying swirl, stronger as the puff spreads
+      if (tu > 0) { const k = tu * (0.3 + t) * dt; V[i * 3] += Math.sin(t0 * 1.7 + sd + P[i * 3 + 1] * 9) * k; V[i * 3 + 2] += Math.cos(t0 * 1.3 + sd * 1.3 + P[i * 3] * 9) * k; V[i * 3 + 1] += Math.sin(t0 * 2.1 + sd * 0.7) * k * 0.3; }
+      V[i * 3] *= dr; V[i * 3 + 1] *= dr; V[i * 3 + 2] *= dr; V[i * 3 + 1] -= this.gr[i] * dt;
       P[i * 3] += V[i * 3] * dt; P[i * 3 + 1] += V[i * 3 + 1] * dt; P[i * 3 + 2] += V[i * 3 + 2] * dt;
-      const s = lerp(this.s0[i], this.s1[i], Math.sqrt(t));
+      this.rot[i] += this.rotV[i] * dt;
+      const m = this.mode[i], s = lerp(this.s0[i], this.s1[i], m === 0 ? Math.sqrt(t) : t);
       _m1.makeScale(s, s, s); _m1.setPosition(P[i * 3], P[i * 3 + 1], P[i * 3 + 2]); this.mesh.setMatrixAt(i, _m1);
-      ic[i * 4] = C[i * 4]; ic[i * 4 + 1] = C[i * 4 + 1]; ic[i * 4 + 2] = C[i * 4 + 2]; ic[i * 4 + 3] = this.a0[i] * smoothstep(0, 0.12, t) * (1 - smoothstep(0.55, 1, t));
+      const env = m === 0 ? smoothstep(0, 0.1, t) * (1 - smoothstep(0.5, 1, t)) : m === 1 ? 1 - smoothstep(0.6, 1, t) : m === 3 ? smoothstep(0, 0.06, t) : smoothstep(0, 0.05, t) * (1 - smoothstep(0.75, 1, t));
+      ic[i * 4] = C[i * 4]; ic[i * 4 + 1] = C[i * 4 + 1]; ic[i * 4 + 2] = C[i * 4 + 2]; ic[i * 4 + 3] = this.a0[i] * env;
+      if (m === 1) { const cool = 1 - t * 0.55; ic[i * 4 + 1] *= cool; ic[i * 4 + 2] *= cool * cool; } // embers cool from yellow to deep red
+      im[i * 4] = this.rot[i]; im[i * 4 + 1] = this.seed[i]; im[i * 4 + 2] = m; im[i * 4 + 3] = t;
+      iv[i * 3] = V[i * 3]; iv[i * 3 + 1] = V[i * 3 + 1]; iv[i * 3 + 2] = V[i * 3 + 2];
       i++;
     }
-    this.mesh.count = this.n; this.mesh.instanceMatrix.needsUpdate = true; this.iCol.needsUpdate = true;
+    this.mesh.count = this.n; this.mesh.instanceMatrix.needsUpdate = true; this.iCol.needsUpdate = true; this.iMisc.needsUpdate = true; this.iVel.needsUpdate = true;
   },
 };
+const _c1 = new THREE.Color();
 
 /* ===================================== [CHEF'S EYE] ================================= */
 // X-ray overlay: hovering food shows core/surface temperature, moisture and browning per face + the node profile.
@@ -5720,7 +5965,43 @@ const LIQ_VIS = {
   butter: [0.96, 0.74, 0.26, 0.72], noisette: [0.62, 0.36, 0.12, 0.85], burnt: [0.16, 0.09, 0.05, 0.97],
   rice: [0.93, 0.91, 0.84, 1.0], riceCooked: [0.98, 0.97, 0.94, 1.0], scorch: [0.42, 0.28, 0.14, 1.0],
   flour: [0.97, 0.96, 0.93, 1.0], crumbs: [0.86, 0.72, 0.45, 1.0], egg: [0.98, 0.80, 0.32, 0.9],
+  milk: [0.97, 0.96, 0.93, 0.97], cream: [0.98, 0.95, 0.86, 0.98], eggWhite: [0.93, 0.93, 0.84, 0.42], yolk: [1.0, 0.70, 0.16, 0.96],
+  sugar: [0.98, 0.98, 0.97, 1.0], salt: [0.97, 0.97, 0.97, 1.0], yeast: [0.84, 0.74, 0.54, 1.0], milkSolids: [0.96, 0.9, 0.74, 0.9],
+  butterSolid: [0.98, 0.9, 0.55, 1.0], vinegar: [0.9, 0.86, 0.68, 0.32], cheese: [0.98, 0.84, 0.42, 0.97], tomato: [0.74, 0.12, 0.06, 0.97],
+  honey: [0.86, 0.52, 0.1, 0.82], soy: [0.2, 0.08, 0.03, 0.94], stock: [0.8, 0.6, 0.26, 0.65], lemon: [0.98, 0.95, 0.62, 0.4],
+  vanilla: [0.3, 0.15, 0.05, 0.92], caramel: [0.7, 0.36, 0.07, 0.94], syrup: [0.97, 0.9, 0.7, 0.8],
 };
+// Pour flow factor per component (× water). Fats pour slower, honey barely; dry goods slide out as a granular stream.
+const FLOW = { water: 1, oil: 0.72, butterfat: 0.65, milkSolids: 0.65, salt: 1, riceDry: 0.45, riceWater: 0.45, butterSolid: 0,
+  flour: 0.42, crumbs: 0.45, egg: 0.6, milk: 0.95, cream: 0.72, eggWhite: 0.5, sugar: 0.6, vinegar: 1, cheese: 0.12, tomato: 0.5,
+  honey: 0.1, soy: 0.95, stock: 1, yolk: 0.42, lemon: 1, yeast: 0.45, vanilla: 0.9 };
+const DRY = { flour: 1, crumbs: 1, sugar: 1, salt: 1, riceDry: 1, yeast: 1 };
+// Tint strength: concentrated pigments (tomato, soy, the stock base) colour far more liquid than their own volume.
+const TINT = { tomato: 25, soy: 8, stock: 25, vanilla: 8, yolk: 2 };
+const _tc = [0, 0, 0, 0];
+const WET_SPOT = [0.3, 0.33, 0.36, 0.45]; // spilt water mostly darkens what it wets and adds gloss
+// Volume-weighted RGBA of a mixture (masses `m`, state `st`: a Contents or a pour's parts). Returns the dry-goods mass share.
+function mixColor(m, st, out = _tc) {
+  let r = 0, g = 0, b = 0, a = 0, W = 0, dry = 0, M = 0;
+  for (const k in COMP) {
+    const x = m[k]; if (!(x > 0)) continue;
+    M += x; if (DRY[k]) dry += x;
+    let c = LIQ_VIS[k];
+    if (k === 'oil') c = LIQ_VIS[st.oilType] || LIQ_VIS.olive;
+    else if (k === 'butterfat' || k === 'milkSolids') c = st.burnt > 0.3 ? LIQ_VIS.burnt : st.brown > 0.35 ? LIQ_VIS.noisette : LIQ_VIS.butter;
+    else if (k === 'riceDry' || k === 'riceWater') c = st.scorch > 0.3 ? LIQ_VIS.scorch : st.riceHyd > 0.6 ? LIQ_VIS.riceCooked : LIQ_VIS.rice;
+    else if (k === 'sugar') c = st.cburn > 0.3 ? LIQ_VIS.burnt : st.caramel > 0.3 ? LIQ_VIS.caramel : st.caramel > 0.03 || (st.T > 150 && dry > 0.5 * M) ? LIQ_VIS.syrup : LIQ_VIS.sugar;
+    if (!c) c = LIQ_VIS.water;
+    const w = x / COMP[k].rho * (TINT[k] || 1);
+    r += c[0] * w; g += c[1] * w; b += c[2] * w; a += c[3] * w; W += w;
+  }
+  if (W <= 0) { out[0] = out[1] = out[2] = out[3] = 0; return 0; }
+  out[0] = r / W; out[1] = g / W; out[2] = b / W; out[3] = a / W;
+  if (st.set > 0.5 && m.flour > 0) { const s = clamp01((st.set - 0.5) * 2); out[0] = lerp(out[0], 0.86, s); out[1] = lerp(out[1], 0.63, s); out[2] = lerp(out[2], 0.33, s); out[3] = 1; } // set batter → golden crumb
+  return M > 0 ? dry / M : 0;
+}
+// Pours as a dry powder / grains (granular stream, dusting where it lands) rather than a liquid?
+const isDryMix = (C) => C.dryF !== undefined ? C.dryF > 0.75 : false;
 const _lp = {}; // scratch parts for transfers (reused; no per-frame allocation)
 const _lp2 = {};
 const Liquids = {
@@ -5732,16 +6013,18 @@ const Liquids = {
     this.iCol = new THREE.InstancedBufferAttribute(new Float32Array(this.maxV * 4), 4);
     this.iSurf = new THREE.InstancedBufferAttribute(new Float32Array(this.maxV * 4), 4);
     this.iExt = new THREE.InstancedBufferAttribute(new Float32Array(this.maxV * 4), 4);
-    for (const a of [this.iCol, this.iSurf, this.iExt]) a.setUsage(THREE.DynamicDrawUsage);
-    g.setAttribute('iCol', this.iCol); g.setAttribute('iSurf', this.iSurf); g.setAttribute('iExt', this.iExt);
+    this.iMat = new THREE.InstancedBufferAttribute(new Float32Array(this.maxV * 4), 4);
+    for (const a of [this.iCol, this.iSurf, this.iExt, this.iMat]) a.setUsage(THREE.DynamicDrawUsage);
+    g.setAttribute('iCol', this.iCol); g.setAttribute('iSurf', this.iSurf); g.setAttribute('iExt', this.iExt); g.setAttribute('iMat', this.iMat);
     this.mat = new THREE.ShaderMaterial({
-      uniforms: { uTime: { value: 0 } },
-      vertexShader: `attribute vec4 iCol; attribute vec4 iSurf; attribute vec4 iExt; uniform float uTime;
-        varying vec4 vC; varying vec4 vS; varying vec4 vE; varying vec3 vW; varying float vTop; varying vec3 vN;
+      uniforms: { uTime: { value: 0 }, uLin: POSTU.uLin, uEnv: LiqEnv.uEnv, uEnvOn: LiqEnv.uEnvOn },
+      vertexShader: `attribute vec4 iCol; attribute vec4 iSurf; attribute vec4 iExt; attribute vec4 iMat; uniform float uTime;
+        varying vec4 vC; varying vec4 vS; varying vec4 vE; varying vec3 vW; varying float vTop; varying vec3 vN; varying vec4 vM;
         void main(){
           mat4 M = modelMatrix * instanceMatrix;
           vec3 pos = position;
           if (iExt.w < -0.5) { float m = max(abs(pos.x), abs(pos.z)); if (m > 1e-4) pos.xz /= m; } // rectangular vessel: square the circle
+          if (position.y < 0.001 && iMat.z > 0.0) pos.xz *= iMat.z;                                  // sloped bowl: narrower at the bottom
           vec4 wp = M * vec4(pos, 1.0);
           vTop = step(0.999, position.y);
           if (vTop > 0.5) {
@@ -5750,11 +6033,12 @@ const Liquids = {
             wp.y = iSurf.x + (iExt.x * (wp.x - c.x) + iExt.y * (wp.z - c.z)) * w
                  + iSurf.y * 0.0012 * sin(wp.x * 180.0 + uTime * 13.0) * sin(wp.z * 170.0 - uTime * 11.0);
           }
-          vC = iCol; vS = iSurf; vE = iExt; vW = wp.xyz;
+          vC = iCol; vS = iSurf; vE = iExt; vM = iMat; vW = wp.xyz;
+          if (vTop > 0.5 && iMat.x > 0.5) wp.y += (fract(sin(dot(floor(wp.xz * 60.0), vec2(12.9, 78.2))) * 437.5) - 0.5) * 0.0015 * iMat.x; // heaped, uneven powder
           vN = vTop > 0.5 ? normalize(vec3(-iExt.x, 1.0, -iExt.y)) : normalize(mat3(M) * normal);
           gl_Position = projectionMatrix * viewMatrix * wp;
         }`,
-      fragmentShader: `uniform float uTime; varying vec4 vC; varying vec4 vS; varying vec4 vE; varying vec3 vW; varying float vTop; varying vec3 vN;
+      fragmentShader: `uniform float uTime; uniform float uLin; uniform samplerCube uEnv; uniform float uEnvOn; varying vec4 vC; varying vec4 vS; varying vec4 vE; varying vec3 vW; varying float vTop; varying vec3 vN; varying vec4 vM;
         float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
         float vn(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
           return mix(mix(h21(i), h21(i + vec2(1, 0)), f.x), mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), f.x), f.y); }
@@ -5776,11 +6060,20 @@ const Liquids = {
             if (vS.w > 0.01) N = normalize(N + vS.w * 0.12 * vec3(sin(vW.x * 260.0 + uTime * 9.0), 0.0, cos(vW.z * 240.0 + uTime * 7.0)));
           } else col *= 0.8;
           vec3 L = normalize(vec3(0.3, 1.0, 0.25));
+          float dry = vM.x;
+          if (dry > 0.01 && vTop > 0.5) { // powder: soft lumpy relief, matte, sugar & salt crystals glint as you move
+            vec2 pq = vW.xz * 260.0; N = normalize(N + dry * 0.5 * vec3(vn(pq) - 0.5, 0.0, vn(pq + 17.0) - 0.5));
+            col *= 1.0 - dry * 0.12 * vn(vW.xz * 90.0);
+          }
           float dif = 0.55 + 0.45 * max(dot(N, L), 0.0);
-          float sp = pow(max(dot(reflect(-V, N), L), 0.0), 90.0);
-          float fr = 0.04 + 0.96 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
-          vec3 o = col * dif * 0.85 + vec3(sp * 0.7) + vec3(0.75, 0.8, 0.85) * fr * 0.25 * (1.0 - vE.z);
+          float sp = pow(max(dot(reflect(-V, N), L), 0.0), 90.0) * (1.0 - dry);
+          float fr = (0.04 + 0.96 * pow(1.0 - max(dot(N, V), 0.0), 5.0)) * (1.0 - dry);
+          vec3 envC = vec3(0.75, 0.8, 0.85); float envK = 0.25;
+          if (uEnvOn > 0.5) { envC = pow(clamp(textureLod(uEnv, reflect(-V, N), 1.2).rgb * 1.15, 0.0, 1.0), vec3(0.4545)); envK = 0.55; } // the kitchen, mirrored in the surface
+          vec3 o = col * dif * 0.85 + vec3(sp * 0.7) + envC * fr * envK * (1.0 - vE.z);
+          if (vM.y > 0.01 && vTop > 0.5) { vec2 gc = floor(vW.xz * 700.0); float gl = h21(gc + floor(V.xz * 40.0) * 3.1); o += vec3(1.0, 0.97, 0.9) * step(0.985, gl) * vM.y * 1.6; }
           gl_FragColor = vec4(o, clamp(a + fr * 0.4 + sp, 0.0, 1.0));
+          if (uLin > 0.5) gl_FragColor.rgb = pow(max(gl_FragColor.rgb, 0.0), vec3(2.2)) * 1.087;
         }`,
       transparent: true, depthWrite: false,
     });
@@ -5791,11 +6084,62 @@ const Liquids = {
     this.segMesh = new THREE.InstancedMesh(sg, new THREE.MeshStandardMaterial({ roughness: 0.08, metalness: 0, transparent: true, opacity: 0.7, depthWrite: false }), this.maxSeg);
     this.segMesh.count = 0; this.segMesh.frustumCulled = false; this.segMesh.renderOrder = 4; this.segMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.segMesh.setColorAt(0, this._col.set(0xffffff)); scene.add(this.segMesh);
-    for (let i = 0; i < 8; i++) this.streams.push({ P0: new THREE.Vector3(), v0: new THREE.Vector3(), pts: new Float32Array(3 * 34), n: 0, r: 0.003, col: new THREE.Color(), active: false });
+    for (let i = 0; i < 8; i++) this.streams.push({ P0: new THREE.Vector3(), v0: new THREE.Vector3(), pts: new Float32Array(3 * 34), n: 0, r: 0.003, col: new THREE.Color(), active: false, dry: false, puffT: 0 });
+    // Dry-goods streams: a loose curtain of falling grains (dense core, grainy edges) instead of a glossy rope.
+    this.dustMat = new THREE.ShaderMaterial({
+      uniforms: { uTime: { value: 0 }, uLin: POSTU.uLin },
+      vertexShader: `varying vec3 vW; varying vec3 vN; varying vec3 vC;
+        void main(){ mat4 M = modelMatrix * instanceMatrix; vec4 wp = M * vec4(position, 1.0); vW = wp.xyz; vN = normalize(mat3(M) * normal);
+          #ifdef USE_INSTANCING_COLOR
+          vC = instanceColor;
+          #else
+          vC = vec3(1.0);
+          #endif
+          gl_Position = projectionMatrix * viewMatrix * wp; }`,
+      fragmentShader: `uniform float uTime; uniform float uLin; varying vec3 vW; varying vec3 vN; varying vec3 vC;
+        float h31(vec3 p){ return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+        void main(){
+          vec3 V = normalize(cameraPosition - vW), N = normalize(vN); float edge = abs(dot(N, V));
+          vec3 q = vec3(vW.x, vW.y + uTime * 1.7, vW.z) * 620.0; float g = h31(floor(q));
+          float a = max(step(0.52, g) * smoothstep(0.04, 0.45, edge) * 0.9, smoothstep(0.35, 0.95, edge) * 0.6);
+          if (a < 0.04) discard;
+          float dif = 0.62 + 0.38 * max(dot(N, normalize(vec3(0.3, 1.0, 0.25))), 0.0);
+          gl_FragColor = vec4(vC * dif * (0.86 + 0.28 * g), a);
+          if (uLin > 0.5) gl_FragColor.rgb = pow(max(gl_FragColor.rgb, 0.0), vec3(2.2)) * 1.087;
+        }`,
+      transparent: true, depthWrite: false,
+    });
+    const dg = new THREE.CylinderGeometry(1, 1, 1, 8, 1, true); dg.translate(0, 0.5, 0);
+    this.dustMesh = new THREE.InstancedMesh(dg, this.dustMat, 96); this.dustMesh.count = 0; this.dustMesh.frustumCulled = false; this.dustMesh.renderOrder = 4;
+    this.dustMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); this.dustMesh.setColorAt(0, this._col.set(0xffffff)); scene.add(this.dustMesh);
     // Puddles (decals) and Leidenfrost beads
-    const pg = new THREE.CircleGeometry(1, 20); pg.rotateX(-Math.PI / 2);
-    this.pudMesh = new THREE.InstancedMesh(pg, new THREE.MeshStandardMaterial({ roughness: 0.04, metalness: 0.1, transparent: true, opacity: 0.55, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 }), this.maxPud);
+    // Spills: glossy blobs with wandering edges; opacity per spill (water clear, oil amber, milk and sauces opaque).
+    const bc = document.createElement('canvas'); bc.width = bc.height = 128; const bx = bc.getContext('2d'), bimg = bx.createImageData(128, 128);
+    for (let y = 0; y < 128; y++) for (let x = 0; x < 128; x++) {
+      const u = (x - 63.5) / 64, v = (y - 63.5) / 64, r = Math.hypot(u, v), an = Math.atan2(v, u);
+      const edge = 0.8 + 0.1 * Math.sin(an * 3 + 0.7) + 0.06 * Math.sin(an * 7 + 2.1) + 0.03 * Math.sin(an * 13 + 0.3), a = clamp((edge - r) / 0.06, 0, 1);
+      const o = (y * 128 + x) * 4; bimg.data[o] = bimg.data[o + 1] = bimg.data[o + 2] = Math.round(255 * a); bimg.data[o + 3] = 255;
+    }
+    bx.putImageData(bimg, 0, 0); const btex = new THREE.CanvasTexture(bc);
+    const pg = new THREE.PlaneGeometry(2, 2); pg.rotateX(-Math.PI / 2);
+    this.pudA = new THREE.InstancedBufferAttribute(new Float32Array(this.maxPud).fill(0.55), 1); this.pudA.setUsage(THREE.DynamicDrawUsage); pg.setAttribute('iA', this.pudA);
+    const pm = new THREE.MeshStandardMaterial({ roughness: 0.05, metalness: 0.05, alphaMap: btex, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 });
+    pm.onBeforeCompile = (sh) => { sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nattribute float iA; varying float vIA;').replace('#include <begin_vertex>', '#include <begin_vertex>\nvIA = iA;');
+      sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying float vIA;').replace('#include <alphamap_fragment>', '#include <alphamap_fragment>\ndiffuseColor.a *= vIA;'); };
+    pm.customProgramCacheKey = () => 'puddle-v2';
+    this.pudMesh = new THREE.InstancedMesh(pg, pm, this.maxPud);
     this.pudMesh.count = 0; this.pudMesh.frustumCulled = false; this.pudMesh.setColorAt(0, this._col.set(0xffffff)); scene.add(this.pudMesh);
+    // Dustings (spilt flour, sugar, crumbs): matte, ragged-edged decals.
+    const dc = document.createElement('canvas'); dc.width = dc.height = 128; const dx = dc.getContext('2d'), dimg = dx.createImageData(128, 128);
+    for (let y = 0; y < 128; y++) for (let x = 0; x < 128; x++) {
+      const u = (x - 63.5) / 64, v = (y - 63.5) / 64, r = Math.hypot(u, v), an = Math.atan2(v, u);
+      const edge = 0.78 + 0.12 * Math.sin(an * 5 + 1.3) + 0.07 * Math.sin(an * 11 + 0.4) + 0.05 * Math.sin(an * 23);
+      const grain = Math.random(), a = clamp((edge - r) / 0.18, 0, 1) * (0.55 + 0.45 * grain) * (r > edge ? (grain > 0.93 ? 0.8 : 0) + 0 : 1);
+      const o = (y * 128 + x) * 4; dimg.data[o] = dimg.data[o + 1] = dimg.data[o + 2] = Math.round(255 * Math.max(a, r < 1 && grain > 0.985 ? 0.7 : 0)); dimg.data[o + 3] = 255;
+    }
+    dx.putImageData(dimg, 0, 0); const dtex = new THREE.CanvasTexture(dc);
+    this.dustPud = new THREE.InstancedMesh(new THREE.PlaneGeometry(2, 2).rotateX(-Math.PI / 2), new THREE.MeshStandardMaterial({ roughness: 1, metalness: 0, alphaMap: dtex, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 }), this.maxPud);
+    this.dustPud.count = 0; this.dustPud.frustumCulled = false; this.dustPud.receiveShadow = true; this.dustPud.setColorAt(0, this._col.set(0xffffff)); scene.add(this.dustPud);
     this.beadMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 8, 6), new THREE.MeshStandardMaterial({ color: 0xd8ecff, roughness: 0.03, transparent: true, opacity: 0.75 }), this.maxBead);
     this.beadMesh.count = 0; this.beadMesh.frustumCulled = false; scene.add(this.beadMesh);
     Sink.init();
@@ -5880,8 +6224,16 @@ const Liquids = {
     return null;
   },
   viscosity(C) {
-    const m = C.m, M = C.mass || 1;
-    return (m.water * 1 + m.oil * 0.72 + (m.butterfat + m.milkSolids) * 0.65 + (m.riceDry + m.riceWater) * 0.45 + m.salt) / M;
+    const m = C.m, M = C.mass; if (!(M > 0)) return 0;
+    if (C.set > 0.5) return 0;                                          // a set batter / cooked omelette slides out, it doesn't pour
+    let f = 0, dry = 0; for (const k in COMP) { const x = m[k]; if (x > 0) { f += x * FLOW[k]; if (DRY[k]) dry += x; } }
+    f /= M; C.dryF = dry / M;
+    if (dry > 0.75 * M) return m.water + m.milk > 0.12 * m.flour && m.flour > 0.3 * M ? f * 0.4 : f;   // powder / grains (damp flour clumps)
+    const wl = m.water + m.milk;
+    if (m.flour > 0.45 * M && wl < 0.8 * m.flour && wl > 0.3 * m.flour) return 0;                 // a dough: lift it out, knead it
+    if (m.sugar > 0.3 * M && m.water < 0.25 * m.sugar && C.caramel > 0.2) return C.T > 90 ? 0.15 : C.T > 60 ? 0.04 : 0; // caramel sets as it cools
+    if (C.whipFrac() > 0.5) f *= clamp(1 - C.whip * 1.1, 0.04, 1);   // soft → stiff peaks
+    return f / (1 + 5 * m.flour / M + 2 * m.sugar / M + 6 * m.cheese / M); // batter, syrup, cheese sauce are thick
   },
   // Per frame: geometry, pouring, dipping, lids, visuals, streams, faucet, beads, puddles, audio.
   update(dt) {
@@ -5904,7 +6256,7 @@ const Liquids = {
       if (!s.opaque && L.vol > 1e-7 && n < this.maxV) this.writeInstance(v, n++);
     }
     this.mesh.count = n; this.mesh.instanceMatrix.needsUpdate = true;
-    this.iCol.needsUpdate = true; this.iSurf.needsUpdate = true; this.iExt.needsUpdate = true;
+    this.iCol.needsUpdate = true; this.iSurf.needsUpdate = true; this.iExt.needsUpdate = true; this.iMat.needsUpdate = true; this.dustMat.uniforms.uTime.value = Sim.clock;
     this.lidCheck(dt);
     Sink.update(dt);
     this.updateBeads(dt);
@@ -5914,30 +6266,29 @@ const Liquids = {
   },
   writeInstance(v, i) {
     const L = v.lq, C = v.contents, s = v.vspec, m = C.m;
-    // Colour: volume-weighted blend of the components (water is clear, fats golden → brown, rice opaque white).
-    const vw = m.water / 1000, vo = m.oil / 915, vb = (m.butterfat + m.milkSolids) / 911, vr = (m.riceDry + m.riceWater) / 850;
-    const vf = m.flour / 600, vc = m.crumbs / 250, ve = m.egg / 1030, V = vw + vo + vb + vr + vf + vc + ve + 1e-12;
-    let r = 0, g = 0, b = 0, a = 0;
-    const add = (c, w) => { r += c[0] * w; g += c[1] * w; b += c[2] * w; a += c[3] * w; };
-    add(LIQ_VIS.water, vw / V); add(LIQ_VIS[C.oilType] || LIQ_VIS.olive, vo / V);
-    if (vb > 0) { const bc = C.burnt > 0.3 ? LIQ_VIS.burnt : C.brown > 0.35 ? LIQ_VIS.noisette : LIQ_VIS.butter; add(bc, vb / V); }
-    if (vr > 0) add(C.scorch > 0.3 ? LIQ_VIS.scorch : C.riceHyd > 0.6 ? LIQ_VIS.riceCooked : LIQ_VIS.rice, vr / V);
-    if (vf > 0) add(LIQ_VIS.flour, vf / V); if (vc > 0) add(LIQ_VIS.crumbs, vc / V); if (ve > 0) add(LIQ_VIS.egg, ve / V);
-    const ic = this.iCol.array; ic[i * 4] = r; ic[i * 4 + 1] = g; ic[i * 4 + 2] = b; ic[i * 4 + 3] = a;
-    const boil = v.bubble !== undefined ? v.bubble : C.m.water > 1e-5 ? Math.max(C.boiling, C.T > 88 ? clamp((C.T - 88) / 12, 0, 1) * 0.35 : 0) : (C.fatFrac() > 0.5 && C.T > 110 && C.m.water > 0 ? 0.5 : 0);
+    // Colour: volume-weighted blend of every component (water clear, fats golden → brown, milk white, tomato red …).
+    const dryF = mixColor(m, C, _tc), wet = C.isLiquid(), dryLook = wet ? 0 : smoothstep(0.55, 0.85, dryF);
+    const ic = this.iCol.array; ic[i * 4] = _tc[0]; ic[i * 4 + 1] = _tc[1]; ic[i * 4 + 2] = _tc[2]; ic[i * 4 + 3] = _tc[3];
+    const vr = (m.riceDry + m.riceWater) / 850, vc = m.crumbs / 250, V = Math.max(1e-12, C.volume());
+    const M = C.mass, im = this.iMat.array; im[i * 4] = dryLook; im[i * 4 + 1] = dryLook > 0.5 && C.caramel < 0.03 && M > 0 ? (m.sugar + m.salt) / M : 0; im[i * 4 + 3] = 0;
+    let boil = v.bubble !== undefined ? v.bubble : C.m.water > 1e-5 ? Math.max(C.boiling, C.T > 88 ? clamp((C.T - 88) / 12, 0, 1) * 0.35 : 0) : (C.fatFrac() > 0.5 && C.T > 110 && C.m.water > 0 ? 0.5 : 0);
+    if (v.sizzle > 0.2 && C.fatFrac() > 0.5) boil = Math.max(boil, clamp(v.sizzle, 0, 1) * 0.7); // fat froths around frying food
     const shimmer = m.oil > 0 ? clamp((C.T - (OILS[C.oilType].smoke - 45)) / 45, 0, 1) : 0;
     const is = this.iSurf.array; is[i * 4] = L.surfY; is[i * 4 + 1] = boil; is[i * 4 + 2] = Math.max(C.foam, C.boiling > 0.7 ? 0.25 : 0); is[i * 4 + 3] = shimmer;
     const ie = this.iExt.array; ie[i * 4] = L.wx; ie[i * 4 + 1] = L.wz; ie[i * 4 + 2] = (vr + vc) / V; ie[i * 4 + 3] = s.rect ? -1 - L.seed : L.seed;
     // Thin films pool in the middle of a wide pan (partial coverage).
     const cov = Math.sqrt(Math.max(0.12, C.coverage(s.area))), h = Math.max(0.0016, L.level);
-    const sx = (s.rect ? s.rect[0] / 2 : s.r) * cov * 0.985, sz = (s.rect ? s.rect[1] / 2 : s.r) * cov * 0.985;
+    let rad = s.r; im[i * 4 + 2] = 0;
+    if (s.slope) { rad = lerp(s.slope[0], s.slope[1], clamp(L.level / s.h, 0, 1)); im[i * 4 + 2] = s.slope[0] / rad; } // fill follows a sloped bowl's walls
+    const sx = (s.rect ? s.rect[0] / 2 : rad) * cov * 0.985, sz = (s.rect ? s.rect[1] / 2 : rad) * cov * 0.985;
     this._pv.set(sx, h, sz); _m1.compose(L.B, v.renderQuat, this._pv); this.mesh.setMatrixAt(i, _m1);
   },
   // Tilted past the lip: weir-law outflow Q = k·w·√(2g)·H^1.5 (k folds in viscosity), traced as a stream.
   pour(v, dt) {
-    const L = v.lq, C = v.contents, s = v.vspec, H = Math.min(L.head, 0.04);
+    const L = v.lq, C = v.contents, s = v.vspec, k0 = this.viscosity(C), dry = isDryMix(C), H = Math.min(L.head - (dry ? 0.01 : 0), 0.04);
+    if (H <= 0 || k0 <= 0) return;
     const w = s.neck ? 2 * s.neck : Math.min(0.05, L.rLip * 0.6 + 0.01);
-    const Q = this.viscosity(C) * 0.4 * w * 4.43 * Math.pow(H, 1.5);
+    const Q = k0 * 0.4 * w * 4.43 * Math.pow(H, 1.5);
     const got = C.takeInto(Math.min(L.vol, Q * dt), _lp); if (got <= 0) return;
     const st = this.streams.find((x) => !x.active); if (!st) { this.deposit(L.lip, _lp, v); return; }
     st.active = true; st.P0.copy(L.lip);
@@ -5945,18 +6296,18 @@ const Liquids = {
     const sp = Math.sqrt(2 * 9.81 * H) * 0.8; st.v0.set(L.u.x, 0, L.u.z);
     if (st.v0.lengthSq() < 0.01) st.v0.set(L.g.x, 0, L.g.z);
     if (st.v0.lengthSq() > 1e-6) st.v0.normalize(); st.v0.multiplyScalar(sp);
-    st.r = clamp(Math.sqrt(Q / (Math.PI * Math.max(0.6, sp + 0.5))), 0.0012, 0.012);
-    this.colorOf(C, st.col);
+    st.r = clamp(Math.sqrt(Q / (Math.PI * Math.max(0.6, sp + 0.5))), 0.0012, 0.012) * (dry ? 1.3 : 1);
+    this.colorOf(C, st.col); st.dry = dry; v.pourDry = dry;
     this.trace(st, v.body, _lp, v);
+    if (dry && (_lp.flour || 0) + (_lp.crumbs || 0) > 0.3 * got * 600 && (st.puffT -= dt) < 0 && st.n > 1) { // flour clouds where it lands
+      st.puffT = 0.05; const j = (st.n - 1) * 3; Particles.emit('flour', st.pts[j], st.pts[j + 1] + 0.01, st.pts[j + 2]); }
     // for PourAudio: flow rate, where it lands, and whether it lands in liquid
     const k = (st.n - 1) * 3; v.pourQ = Q; v.pourT = Sim.clock; (v.pourAt || (v.pourAt = new THREE.Vector3())).set(st.pts[k], st.pts[k + 1], st.pts[k + 2]); v.pourWet = !!this.liquidAt(_v2.copy(v.pourAt).add(_v1.set(0, -0.01, 0)));
   },
   colorOf(C, out) {
-    const m = C.m;
-    if (m.riceDry + m.riceWater > m.water + m.oil) out.setRGB(0.95, 0.93, 0.86);
-    else if (m.oil + m.butterfat > m.water) { const c = m.butterfat > m.oil ? (C.brown > 0.35 ? LIQ_VIS.noisette : LIQ_VIS.butter) : LIQ_VIS[C.oilType] || LIQ_VIS.olive; out.setRGB(c[0], c[1], c[2]); }
-    else out.setRGB(0.78, 0.88, 0.95);
-    return out;
+    mixColor(C.m, C, _tc);
+    // A clear stream reads paler than the same liquid sitting in a pot; opaque ones keep their colour.
+    const t = 1 - _tc[3]; return out.setRGB(lerp(_tc[0], 0.8, t * 0.6), lerp(_tc[1], 0.89, t * 0.6), lerp(_tc[2], 0.95, t * 0.6));
   },
   // March the parabola; ray-cast each segment (source vessel excluded) and deliver the parts where it lands.
   trace(st, exclBody, parts, src) {
@@ -5997,6 +6348,7 @@ const Liquids = {
     if (wat > 0 && face.area > 0) { face.wet = Math.min(0.1, face.wet + wat * 0.3 / face.area); f.washedAt = Sim.time; }
     if (fat > 0) f.basted = (f.basted || 0) + fat;
     if (parts.salt) th.salt += parts.salt * 0.3;
+    if (parts.flour > 0 && th.coat && face.area > 0) { th.coat.flour = Math.min(1, th.coat.flour + parts.flour * 0.4 / face.area * 0.01); face.wet *= 0.9; }
     const dst = f.inLiquid ? f.inLiquid.contents : f.inPan ? f.inPan.contents : null, Tout = T - J / Cp;
     if (dst) dst.add(parts, Tout); else this.deposit(f.renderPos, parts, null, Tout);
   },
@@ -6004,16 +6356,19 @@ const Liquids = {
   deposit(p, parts, src, T = parts.T) {
     const K = Kitchen.sink;
     if (p.x > K.x0 && p.x < K.x1 && p.z > K.z0 && p.z < K.z1 && p.y < CONFIG.kitchen.counterTop + 0.02) return; // down the drain
-    const vol = (parts.water || 0) / 1000 + (parts.oil || 0) / 915 + ((parts.butterfat || 0) + (parts.milkSolids || 0)) / 911 + ((parts.riceDry || 0) + (parts.riceWater || 0)) / 850;
+    let vol = 0; for (const k in COMP) if (parts[k] > 0) vol += parts[k] / COMP[k].rho;
     if (vol <= 0) return;
     if (parts.water > 0) for (const f of Fire.list) if (!f.src.contents && Math.hypot(f.pos.x - p.x, f.pos.z - p.z) < 0.25) f.water += parts.water;
     // Settle onto the surface below the landing point.
     this._pv.copy(p); this._pv.y += 0.02;
     const hit = Phys.castRay(this._pv, this._dn, 2.5, GROUPS.qStatic, this._pv, null); if (!hit) return;
-    const kind = (parts.riceDry || 0) + (parts.riceWater || 0) > vol * 400 ? 'rice' : (parts.oil || 0) + (parts.butterfat || 0) > (parts.water || 0) ? ((parts.butterfat || 0) > (parts.oil || 0) ? 'butter' : 'oil') : 'water';
-    for (const d of this.puddles) if (d.kind === kind && Math.abs(d.y - this._pv.y) < 0.02 && Math.hypot(d.x - this._pv.x, d.z - this._pv.z) < Math.max(0.05, d.r * 0.8)) { d.vol += vol; return; }
+    const dryF = mixColor(parts, parts, _tc), fat = (parts.oil || 0) + (parts.butterfat || 0), wat = (parts.water || 0) + (parts.milk || 0) + (parts.stock || 0);
+    const kind = dryF > 0.75 ? ((parts.riceDry || 0) > 0.5 * ((parts.flour || 0) + (parts.sugar || 0) + (parts.crumbs || 0) + (parts.riceDry || 0)) ? 'rice' : 'dust')
+      : fat > wat ? ((parts.butterfat || 0) > (parts.oil || 0) ? 'butter' : 'oil') : (parts.water || 0) > 0.85 * (vol * 1000) && _tc[3] < 0.5 ? 'water' : 'mess';
+    for (const d of this.puddles) if (d.kind === kind && Math.abs(d.y - this._pv.y) < 0.02 && Math.hypot(d.x - this._pv.x, d.z - this._pv.z) < Math.max(0.05, d.r * 0.8)) {
+      const w = vol / (d.vol + vol); for (let c = 0; c < 4; c++) d.col[c] += (_tc[c] - d.col[c]) * w; d.vol += vol; return; }
     if (this.puddles.length >= this.maxPud) this.puddles.shift();
-    this.puddles.push({ x: this._pv.x, y: this._pv.y + 0.0015, z: this._pv.z, vol, kind, r: 0 });
+    this.puddles.push({ x: this._pv.x, y: this._pv.y + 0.0015, z: this._pv.z, vol, kind, r: 0, col: [_tc[0], _tc[1], _tc[2], _tc[3]], rot: Math.random() * 6.28 });
   },
   // Spoon / ladle: dipping the bowl below another vessel's surface fills it (tilted shallow pans pool at the low edge).
   dip(v, dt) {
@@ -6118,31 +6473,39 @@ const Liquids = {
   hiss(d, T) { this._pv.set(d.x, d.y, d.z); for (let k = 0; k < 3; k++) AudioSys.pop(this._pv, 0.5); Particles.emit('steam', d.x, d.y + 0.01, d.z); },
   spatter(d, T) { this._pv.set(d.x, d.y, d.z); for (let k = 0; k < 6; k++) AudioSys.pop(this._pv, 0.9); for (let k = 0; k < 4; k++) Particles.emit('spatter', d.x, d.y + 0.01, d.z); },
   drawStreams() {
-    let n = 0;
-    const seg = (x0, y0, z0, x1, y1, z1, r, col) => {
-      if (n >= this.maxSeg) return;
+    let n = 0, nd = 0;
+    const seg = (x0, y0, z0, x1, y1, z1, r, col, dry) => {
+      if (dry ? nd >= 96 : n >= this.maxSeg) return;
       const dx = x1 - x0, dy = y1 - y0, dz = z1 - z0, len = Math.hypot(dx, dy, dz); if (len < 1e-4) return;
       this._pv.set(dx / len, dy / len, dz / len); this._pq.setFromUnitVectors(UP, this._pv);
       _v8.set(x0, y0, z0); this._sc.set(r, len, r); _m1.compose(_v8, this._pq, this._sc);
-      this.segMesh.setMatrixAt(n, _m1); this.segMesh.setColorAt(n, col); n++;
+      if (dry) { this.dustMesh.setMatrixAt(nd, _m1); this.dustMesh.setColorAt(nd, col); nd++; } else { this.segMesh.setMatrixAt(n, _m1); this.segMesh.setColorAt(n, col); n++; }
     };
     for (const st of this.streams) {
       if (!st.active) continue; const P = st.pts;
-      for (let k = 0; k + 1 < st.n; k++) seg(P[k * 3], P[k * 3 + 1], P[k * 3 + 2], P[k * 3 + 3], P[k * 3 + 4], P[k * 3 + 5], st.r * (1 - 0.35 * k / st.n), st.col);
+      // grains fan out as they fall; liquid ropes neck down as they accelerate
+      for (let k = 0; k + 1 < st.n; k++) seg(P[k * 3], P[k * 3 + 1], P[k * 3 + 2], P[k * 3 + 3], P[k * 3 + 4], P[k * 3 + 5], st.r * (st.dry ? 1 + 0.6 * k / st.n : 1 - 0.35 * k / st.n), st.col, st.dry);
     }
+    this.dustMesh.count = nd; this.dustMesh.instanceMatrix.needsUpdate = true; if (this.dustMesh.instanceColor) this.dustMesh.instanceColor.needsUpdate = true;
     if (Sink.flow > 0.02) { const S = Sink.spout; seg(S.x, Sink.hitY, S.z, S.x, S.y, S.z, 0.002 + 0.004 * Sink.flow, this._col.setRGB(0.8, 0.9, 0.97)); }
     this.segMesh.count = n; this.segMesh.instanceMatrix.needsUpdate = true; if (this.segMesh.instanceColor) this.segMesh.instanceColor.needsUpdate = true;
   },
   _sc: new THREE.Vector3(),
   drawPuddles() {
-    let n = 0;
+    let n = 0, nd = 0;
     for (const d of this.puddles) {
+      const c = d.kind === 'water' ? WET_SPOT : d.col || LIQ_VIS[d.kind === 'butter' ? 'butter' : d.kind === 'oil' ? 'olive' : d.kind] || LIQ_VIS.water;
+      if (d.kind === 'dust' || d.kind === 'rice') { // a dusting spreads thinner and wider than a liquid of the same volume
+        d.r = clamp(Math.sqrt(d.vol / (Math.PI * 0.0009)), 0.02, 0.3);
+        this._pq.setFromAxisAngle(UP, d.rot || 0); this._sc.set(d.r, 1, d.r); _v8.set(d.x, d.y, d.z); _m1.compose(_v8, this._pq, this._sc);
+        this.dustPud.setMatrixAt(nd, _m1); this.dustPud.setColorAt(nd, this._col.setRGB(c[0], c[1], c[2])); nd++; continue;
+      }
       d.r = clamp(Math.sqrt(d.vol / (Math.PI * 0.0015)), 0.012, 0.32);
-      _m1.makeScale(d.r, 1, d.r); _m1.setPosition(d.x, d.y, d.z); this.pudMesh.setMatrixAt(n, _m1);
-      const c = d.kind === 'water' ? LIQ_VIS.water : d.kind === 'rice' ? LIQ_VIS.rice : d.kind === 'butter' ? LIQ_VIS.butter : LIQ_VIS.olive;
-      this.pudMesh.setColorAt(n, this._col.setRGB(c[0], c[1], c[2])); n++;
+      this._pq.setFromAxisAngle(UP, d.rot || 0); this._sc.set(d.r, 1, d.r); _v8.set(d.x, d.y, d.z); _m1.compose(_v8, this._pq, this._sc); this.pudMesh.setMatrixAt(n, _m1);
+      this.pudMesh.setColorAt(n, this._col.setRGB(c[0], c[1], c[2])); this.pudA.array[n] = clamp(0.25 + (c[3] ?? 0.5) * 0.7, 0.3, 0.92); n++;
     }
-    this.pudMesh.count = n; this.pudMesh.instanceMatrix.needsUpdate = true; if (this.pudMesh.instanceColor) this.pudMesh.instanceColor.needsUpdate = true;
+    this.pudMesh.count = n; this.pudMesh.instanceMatrix.needsUpdate = true; this.pudA.needsUpdate = true; if (this.pudMesh.instanceColor) this.pudMesh.instanceColor.needsUpdate = true;
+    this.dustPud.count = nd; this.dustPud.instanceMatrix.needsUpdate = true; if (this.dustPud.instanceColor) this.dustPud.instanceColor.needsUpdate = true;
   },
 };
 
@@ -6427,7 +6790,7 @@ const Fire = {
   simTick(dt) {
     // Ignition: hot oil in vessels; oil puddles on a lit burner.
     for (const v of Liquids.vessels) { if (v.fire || !v.lq) continue; if (oilIgnites(v.contents, this.nearFlame(v.lq.B) && v.lq.u.y < 0.9)) this.ignite(v, v.contents.m.oil + v.contents.m.butterfat, v.lq.rimC); }
-    for (const d of Liquids.puddles) { if (d.fire || d.kind === 'water' || d.kind === 'rice') continue; this._v.set(d.x, d.y, d.z); if (this.nearFlame(this._v)) this.ignite(d, d.vol * 915, this._v); }
+    for (const d of Liquids.puddles) { if (d.fire || (d.kind !== 'oil' && d.kind !== 'butter')) continue; this._v.set(d.x, d.y, d.z); if (this.nearFlame(this._v)) this.ignite(d, d.vol * 915, this._v); }
     for (let i = this.list.length - 1; i >= 0; i--) {
       const f = this.list[i], s = f.sim, src = f.src, before = s.flare;
       if (src.lq) f.pos.copy(src.lq.rimC);
@@ -6437,7 +6800,7 @@ const Fire = {
       // Burning consumes the fuel and heats the pan; nearby spilled oil catches.
       if (src.contents) { const C = src.contents; C.m.oil = Math.max(0, C.m.oil - dt * FIRE.burn * s.I); if (src.thermo) src.thermo.T += dt * 25 * s.I; C.T = Math.max(C.T, 300); }
       else src.vol = Math.max(0, src.vol - dt * FIRE.burn * s.I / 915);
-      if (s.flare > 0.5) for (const d of Liquids.puddles) if (!d.fire && d.kind !== 'water' && Math.hypot(d.x - f.pos.x, d.z - f.pos.z) < 0.6) { this._v.set(d.x, d.y, d.z); this.ignite(d, d.vol * 915, this._v); }
+      if (s.flare > 0.5) for (const d of Liquids.puddles) if (!d.fire && (d.kind === 'oil' || d.kind === 'butter') && Math.hypot(d.x - f.pos.x, d.z - f.pos.z) < 0.6) { this._v.set(d.x, d.y, d.z); this.ignite(d, d.vol * 915, this._v); }
       if (s.out) { this.stopVoice(f); src.fire = null; if (src.contents) src.contents.T = Math.min(src.contents.T, 250); this.list.splice(i, 1); AudioSys.flameOff(f.pos); for (let k = 0; k < 20; k++) Particles.emit('smoke', f.pos.x, f.pos.y, f.pos.z); }
     }
   },
@@ -6691,9 +7054,9 @@ const TasteCard = {
 const Reaction = {
   t: 0, dur: 1, col: new THREE.Color(),
   init() {
-    this.mat = new THREE.ShaderMaterial({ uniforms: { uCol: { value: new THREE.Color() }, uA: { value: 0 } }, transparent: true, depthTest: false, depthWrite: false, side: THREE.BackSide,
+    this.mat = new THREE.ShaderMaterial({ uniforms: { uCol: { value: new THREE.Color() }, uA: { value: 0 }, uLin: POSTU.uLin }, transparent: true, depthTest: false, depthWrite: false, side: THREE.BackSide,
       vertexShader: 'varying vec3 vN; void main(){ vN = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-      fragmentShader: 'uniform vec3 uCol; uniform float uA; varying vec3 vN; void main(){ float e = smoothstep(0.55, 1.0, 1.0 - max(0.0, -vN.z)); gl_FragColor = vec4(uCol, uA * (0.25 + 0.75 * e)); }' });
+      fragmentShader: 'uniform vec3 uCol; uniform float uA; uniform float uLin; varying vec3 vN; void main(){ float e = smoothstep(0.55, 1.0, 1.0 - max(0.0, -vN.z)); gl_FragColor = vec4(uCol, uA * (0.25 + 0.75 * e)); if (uLin > 0.5) gl_FragColor.rgb = pow(max(gl_FragColor.rgb, 0.0), vec3(2.2)) * 1.087; }' });
     this.mesh = new THREE.Mesh(new THREE.SphereGeometry(0.2, 16, 12), this.mat); this.mesh.renderOrder = 1000; this.mesh.visible = false; camera.add(this.mesh);
   },
   flash(hex, dur) { this.mat.uniforms.uCol.value.setHex(hex); this.t = dur; this.dur = dur; this.mesh.visible = true; },
@@ -8266,6 +8629,8 @@ const UI = {
     y += 78;
     this.label('Render scale', X, y + 24, 24, this.C.muted);
     this.segment('rs', X + 170, y, half - 170, 48, [0.8, 0.9, 1.0].map((v) => ({ v, l: v.toFixed(1) + '×' })), s.renderScale, (v) => { this.set('renderScale', v); toast('Applies next time you enter VR', 1500); }, 20);
+    this.label('Graphics', X2, y + 24, 24, this.C.muted);
+    this.segment('gfx', X2 + 120, y, half - 120, 48, [['low', 'Low'], ['medium', 'Med'], ['high', 'High'], ['ultra', 'Ultra']].map(([v, l]) => ({ v, l })), s.gfx, (v) => { this.set('gfx', v); Post.apply(); }, 20);
     y += 64;
     this.label('Glove colour', X, y + 24, 26, this.C.muted);
     GLOVE_COLORS.forEach((col, i) => {
@@ -8330,7 +8695,7 @@ const UI = {
       ['Cut', 'Hold a knife, push the edge down through food on the board. Saw for skins.'],
       ['Stove', 'Grip a knob and twist your wrist: click-click lights it, then set the flame.'],
       ['Doors', 'Grip a handle and pull: oven, fridge, microwave. Faucet: lift the lever.'],
-      ['Pour', 'Tilt a pan, bottle or pot past its rim. Shake salt by turning it over.'],
+      ['Pour', 'Tilt a pan, bottle, bag or carton past its rim (flour and sugar pour too). Shake salt by turning it over. Wipe spills with a paper towel.'],
       ['Cook', 'Check temps with the thermometer or Chef\'s Eye (menu → Settings).'],
       ['Eat', 'Hold food to your mouth for a bite. Taste card shows doneness & seasoning.'],
       ['Move', 'Left stick: walk. Right stick: push to teleport, flick to turn (Comfort tab).'],
@@ -8341,7 +8706,7 @@ const UI = {
       ['Use (RMB)', 'Knife: chop where you aim (Shift = crush). Tongs: grab food you aim at.'],
       ['', 'Salt / pepper / spices: season what you aim at. Thermometer: hold to probe.'],
       ['Knobs & doors', 'LMB-drag a knob to twist it; LMB-drag a door handle to open it.'],
-      ['Pour', 'Hold R and move the mouse to tilt the held pan/bottle. Wheel: hold nearer/farther.'],
+      ['Pour', 'Hold R and move the mouse to tilt what you hold (bottles, bags, cartons, pans). Wheel: hold nearer/farther.'],
       ['Tools', '1–9 grab a tool instantly (1 knife, 5 spatula, 6 tongs…), 0 empties your hand.'],
       ['Check', 'X: Chef\'s Eye X-ray (temps, browning). B: take a bite of the held food.'],
       ['Menu', 'M or Tab opens this menu. P toggles the performance HUD.'],
@@ -9009,7 +9374,7 @@ const Challenge = {
     if (!plates.length) { toast('Plate the food on the pass first', 1400); return; }
     const res = this.judge(t, plates);
     t.done = true; t.result = res; this.results.push(res);
-    Pass.drawBoard(res); Mentor.say('served', true);
+    Pass.drawBoard(res); Mentor.say('served', true); Remaster.celebrate(plates[0].v.renderPos, starsFor(res.total));
     toast(`Ticket #${t.id}: ${res.total}/100 ${'★'.repeat(starsFor(res.total))}`, 2500);
     // Clear the pass: served food goes out, plates come back clean.
     for (const pl of plates) { for (const c of pl.comps) if (c.piece.alive) Props.remove(c.piece); if (pl.v.contents) { pl.v.contents = new Contents(); } if (pl.v.spawned) Props.remove(pl.v); else pl.v.teleport(pl.v.homePos, pl.v.homeQuat); }
@@ -9099,14 +9464,14 @@ const Shimmer = {
   N: 4, quads: [], _acc: 0,
   init() {
     this.mat = new THREE.ShaderMaterial({
-      uniforms: { uT: { value: 0 } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+      uniforms: { uT: { value: 0 }, uLin: POSTU.uLin }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
       vertexShader: `uniform float uT; attribute float aI; varying vec2 vUv; varying float vI;
         void main(){ vUv = uv; vI = aI; vec3 p = position; p.x += sin(uv.y * 9.0 + uT * 7.0) * 0.006 * uv.y;
           vec4 c = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0); c.xy += p.xy; gl_Position = projectionMatrix * c; }`,
-      fragmentShader: `uniform float uT; varying vec2 vUv; varying float vI;
+      fragmentShader: `uniform float uT; uniform float uLin; varying vec2 vUv; varying float vI;
         void main(){ float s = sin(vUv.x * 40.0 + sin(vUv.y * 13.0 - uT * 9.0) * 3.0 + uT * 2.0);
           float a = (0.5 + 0.5 * s) * smoothstep(0.0, 0.25, vUv.y) * (1.0 - smoothstep(0.55, 1.0, vUv.y)) * (1.0 - abs(vUv.x - 0.5) * 2.0);
-          gl_FragColor = vec4(vec3(1.0, 0.97, 0.9) * a * 0.05 * vI, 1.0); }`,
+          gl_FragColor = vec4(vec3(1.0, 0.97, 0.9) * a * 0.05 * vI, 1.0); if (uLin > 0.5) gl_FragColor.rgb = pow(max(gl_FragColor.rgb, 0.0), vec3(2.2)) * 1.087; }`,
     });
     const g = new THREE.PlaneGeometry(0.26, 0.3); g.translate(0, 0.15, 0); g.setAttribute('aI', new THREE.Float32BufferAttribute(new Float32Array(g.attributes.position.count).fill(1), 1));
     for (let i = 0; i < this.N; i++) { const m = new THREE.Mesh(g, this.mat); m.visible = false; m.renderOrder = 7; m.frustumCulled = false; scene.add(m); this.quads.push(m); }
@@ -9250,12 +9615,354 @@ const PourAudio = {
         src.connect(bp); bp.connect(g); g.connect(pan); pan.connect(A.sfx); src.start(0, Math.random()); vo = { src, bp, g, pan, lfo, lg, glugT: 0 }; this.voices.set(v, vo);
       }
       const lvl = on ? clamp(Math.sqrt(v.pourQ / 2e-5), 0.15, 1) : 0;
-      vo.g.gain.setTargetAtTime(lvl * 0.22, t, on ? 0.03 : 0.12); vo.lg.gain.setTargetAtTime(lvl * (v.pourWet ? 0.12 : 0.04), t, 0.05);
-      vo.bp.frequency.setTargetAtTime(v.pourWet ? 650 + lvl * 400 : 1800 + lvl * 900, t, 0.05); vo.lfo.frequency.value = v.pourWet ? 11 : 23;
+      const dry = !!v.pourDry;
+      vo.g.gain.setTargetAtTime(lvl * (dry ? 0.13 : 0.22), t, on ? 0.03 : 0.12); vo.lg.gain.setTargetAtTime(lvl * (dry ? 0.07 : v.pourWet ? 0.12 : 0.04), t, 0.05);
+      vo.bp.frequency.setTargetAtTime(dry ? 4200 + lvl * 1500 : v.pourWet ? 650 + lvl * 400 : 1800 + lvl * 900, t, 0.05); vo.bp.Q.value = dry ? 0.6 : 1.1; vo.lfo.frequency.value = dry ? 37 : v.pourWet ? 11 : 23;
+      if (on && dry && Math.random() < dt * 30) { const gv = A.voice(v.pourAt, 0.03, 0.12); if (gv) A.burst(gv, t, 0.012, 0.25, 'highpass', 3000 + Math.random() * 3000, 1); } // grains ticking
       if (on) { vo.pan.positionX.setTargetAtTime(v.pourAt.x, t, 0.02); vo.pan.positionY.setTargetAtTime(v.pourAt.y, t, 0.02); vo.pan.positionZ.setTargetAtTime(v.pourAt.z, t, 0.02);
-        vo.glugT -= dt; if (v.vspec && v.vspec.neck && vo.glugT <= 0) { vo.glugT = 0.12 + Math.random() * 0.16; const gv = A.voice(v.lq ? v.lq.lip : v.renderPos, 0.2, 0.3); if (gv) { const f = 170 + Math.random() * 90; A.osc(gv, 'sine', f, t, 0.09, 0.4, 0.08, f * 0.7); A.burst(gv, t, 0.05, 0.15, 'bandpass', 600, 2); } } }
+        vo.glugT -= dt; if (v.vspec && v.vspec.neck && !dry && vo.glugT <= 0) { vo.glugT = 0.12 + Math.random() * 0.16; const gv = A.voice(v.lq ? v.lq.lip : v.renderPos, 0.2, 0.3); if (gv) { const f = 170 + Math.random() * 90; A.osc(gv, 'sine', f, t, 0.09, 0.4, 0.08, f * 0.7); A.burst(gv, t, 0.05, 0.15, 'bandpass', 600, 2); } } }
       if (!on && vo.idle === undefined) vo.idle = 0; if (!on) { vo.idle += dt; if (vo.idle > 1) { try { vo.src.stop(); vo.lfo.stop(); vo.pan.disconnect(); } catch (e) { /* gone */ } this.voices.delete(v); } } else vo.idle = 0;
     }
+  },
+};
+
+/* ===================================== [REMASTER] =================================== */
+// Rendering remaster. A reflection probe of the kitchen itself (cube capture → PMREM, two bounces) replaces the
+// generic studio environment, so steel, glaze and liquids reflect this room. Sunlight through the window becomes
+// visible shafts with drifting dust; everything you can pick up sits on a soft contact shadow; grease fires and
+// grill flare-ups light the room. Desktop adds a post stack: MSAA HDR → GTAO ambient occlusion → heat haze →
+// bloom → Neutral tone map → grade (vignette, grain, edge fringing). In VR the post stack is skipped.
+
+/* ---------- reflection probe ---------- */
+const Probe = {
+  pos: new THREE.Vector3(-0.15, 1.42, -0.55), rt: null, cam: null, env: null, cube: null,
+  capture(bounces = 2) {
+    if (!this.rt) {
+      this.rt = new THREE.WebGLCubeRenderTarget(256, { type: THREE.HalfFloatType, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter });
+      this.cam = new THREE.CubeCamera(0.05, 40, this.rt);
+    }
+    this.cam.position.copy(this.pos); scene.add(this.cam);
+    const hide = [rig, Liquids.mesh, Liquids.segMesh, Liquids.dustMesh, Particles.mesh, FX.mesh, Shafts.group, Shafts.dust, Blobs.mesh, Stove.flames, Stove.glow, UI.mesh];
+    const was = hide.map((o) => o && o.visible); hide.forEach((o) => { if (o) o.visible = false; });
+    const pm = new THREE.PMREMGenerator(renderer);
+    for (let b = 0; b < bounces; b++) {
+      this.cam.update(renderer, scene);
+      const env = pm.fromCubemap(this.rt.texture).texture;
+      if (this.env) this.env.dispose();
+      this.env = env; scene.environment = env;
+      if (b === 0) { scene.environmentIntensity = 0.62; hemi.intensity = 0.5; } // the probe already carries the room's bounce light
+    }
+    pm.dispose();
+    hide.forEach((o, i) => { if (o) o.visible = was[i]; });
+    scene.remove(this.cam);
+    this.cube = this.rt.texture; LiqEnv.uEnv.value = this.cube; LiqEnv.uEnvOn.value = 1;
+  },
+};
+// Shared by the liquid shaders: the probe's raw cube (with mips) for real reflections on water, oil and milk.
+const LiqEnv = { uEnv: { value: null }, uEnvOn: { value: 0 } };
+
+/* ---------- window light shafts + dust motes ---------- */
+const Shafts = {
+  group: null, dust: null, mat: null, dmat: null,
+  init() {
+    const HX = CONFIG.kitchen.halfX, z0 = -1.35, z1 = 0.15, y0 = 1.08, y1 = 2.12, x = -HX + 0.005, L = 3.3;
+    const d = new THREE.Vector3().subVectors(sun.target.position, sun.position).normalize(); this.dir = d;
+    const pos = [], uv = [], seed = [], aw = [], idx = [];
+    const quad = (A, B, C, D, s, U = [0, 1, 0, 0, 1, 0, 1, 1], W = [0.5, 0.5, 0.5, 0.5]) => { const o = pos.length / 3; pos.push(...A, ...B, ...C, ...D); uv.push(...U); seed.push(s, s, s, s); aw.push(...W); idx.push(o, o + 1, o + 2, o, o + 2, o + 3); };
+    const add = (P, k) => [P[0] + d.x * k, P[1] + d.y * k, P[2] + d.z * k];
+    const fz = (z0 + z1) / 2;
+    // Vertical sheets across the opening (skipping the mullion's shadow) …
+    for (let i = 0; i < 8; i++) {
+      const z = lerp(z0 + 0.05, z1 - 0.05, (i + 0.5) / 8) + (Math.random() - 0.5) * 0.04; if (Math.abs(z - fz) < 0.05) continue;
+      const A = [x, y1, z], B = [x, y0, z]; quad(A, B, add(B, L), add(A, L), i * 1.7);
+    }
+    // … crossed with sheets stacked through its height, so the beam reads from every angle.
+    for (let i = 0; i < 6; i++) {
+      const y = lerp(y0 + 0.04, y1 - 0.04, (i + 0.5) / 6), A = [x, y, z1], B = [x, y, z0]; quad(A, B, add(B, L), add(A, L), 20 + i * 2.3);
+    }
+    // … and slices across it (the window rectangle carried along the ray), so it also reads when you look down the beam.
+    for (let i = 0; i < 9; i++) {
+      const k = (i + 0.6) / 9 * L * 0.85, u = k / L;
+      quad(add([x, y1, z0], k), add([x, y0, z0], k), add([x, y0, z1], k), add([x, y1, z1], k), 40 + i * 1.9, [u, 1, u, 0, u, 0, u, 1], [0, 0, 1, 1]);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    g.setAttribute('aSeed', new THREE.Float32BufferAttribute(seed, 1)); g.setAttribute('aW', new THREE.Float32BufferAttribute(aw, 1)); g.setIndex(idx);
+    this.mat = new THREE.ShaderMaterial({
+      uniforms: { uTime: { value: 0 }, uCol: { value: new THREE.Color(1.0, 0.8, 0.58) }, uI: { value: 0.05 }, uBar: { value: (1.7 - y0) / (y1 - y0) }, uLin: POSTU.uLin },
+      vertexShader: `attribute float aSeed; attribute float aW; varying vec2 vUv; varying vec3 vW; varying float vSeed; varying float vAw;
+        void main(){ vUv = uv; vSeed = aSeed; vAw = aW; vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+      fragmentShader: `uniform float uTime; uniform vec3 uCol; uniform float uI; uniform float uBar; uniform float uLin; varying vec2 vUv; varying vec3 vW; varying float vSeed; varying float vAw;
+        float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+        float vn(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f); return mix(mix(h21(i), h21(i + vec2(1, 0)), f.x), mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), f.x), f.y); }
+        void main(){
+          float u = vUv.x, v = vUv.y;
+          float fall = smoothstep(0.0, 0.05, u) * pow(1.0 - u, 1.7);
+          float edge = smoothstep(0.0, 0.14, v) * smoothstep(1.0, 0.86, v);
+          float bar = 1.0 - 0.7 * smoothstep(0.03, 0.0, abs(v - uBar)) * (1.0 - step(19.0, vSeed) * step(vSeed, 39.0));
+          float side = smoothstep(0.0, 0.1, vAw) * smoothstep(1.0, 0.9, vAw) * (1.0 - 0.7 * smoothstep(0.025, 0.0, abs(vAw - 0.5)) * step(39.0, vSeed));
+          float n = vn(vec2(u * 7.0 - uTime * 0.06, v * 3.0 + vSeed)) * 0.6 + vn(vec2(u * 19.0 + uTime * 0.04, v * 11.0 - vSeed)) * 0.4;
+          float cam = smoothstep(0.3, 1.1, distance(cameraPosition, vW));
+          float a = fall * edge * side * bar * (0.45 + 0.55 * n) * cam * uI * (vSeed > 39.0 ? 0.7 : 1.0);
+          vec3 c = uCol * a; if (uLin > 0.5) c = pow(c, vec3(2.2)) * 1.6;
+          gl_FragColor = vec4(c, 1.0);
+        }`,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    });
+    this.group = new THREE.Mesh(g, this.mat); this.group.frustumCulled = false; this.group.renderOrder = 10; this.group.userData.noAO = true; scene.add(this.group);
+    // Dust motes drifting inside the beam (masked to it in the shader, so they wink out as they drift into shade).
+    const N = 520, dp = new Float32Array(N * 3), ds = new Float32Array(N);
+    for (let i = 0; i < N; i++) { const k = Math.random() * 2.7, yy = lerp(y0, y1, Math.random()), zz = lerp(z0, z1, Math.random()); dp[i * 3] = x + d.x * k; dp[i * 3 + 1] = yy + d.y * k; dp[i * 3 + 2] = zz + d.z * k; ds[i] = Math.random(); }
+    const dg = new THREE.BufferGeometry(); dg.setAttribute('position', new THREE.BufferAttribute(dp, 3)); dg.setAttribute('aSeed', new THREE.BufferAttribute(ds, 1));
+    this.dmat = new THREE.ShaderMaterial({
+      uniforms: { uTime: { value: 0 }, uPx: { value: 600 }, uD: { value: d }, uWin: { value: new THREE.Vector4(z0, z1, y0, y1) }, uX: { value: x }, uLin: POSTU.uLin },
+      vertexShader: `attribute float aSeed; uniform float uTime; uniform float uPx; uniform vec3 uD; uniform vec4 uWin; uniform float uX; varying float vA;
+        void main(){
+          vec3 p = position; float t = uTime, s = aSeed * 40.0;
+          p += vec3(sin(t * 0.13 + s) * 0.06, sin(t * 0.09 + s * 1.7) * 0.05 - 0.02 * sin(t * 0.05 + s), cos(t * 0.11 + s * 0.7) * 0.06);
+          float k = (p.x - uX) / uD.x; vec3 w = p - uD * k;                     // back along the sun ray to the window plane
+          float inB = smoothstep(0.0, 0.05, w.z - uWin.x) * smoothstep(0.0, 0.05, uWin.y - w.z) * smoothstep(0.0, 0.05, w.y - uWin.z) * smoothstep(0.0, 0.05, uWin.w - w.y);
+          vec4 mv = viewMatrix * vec4(p, 1.0);
+          float tw = 0.45 + 0.55 * sin(t * (0.8 + aSeed * 2.3) + s);
+          vA = inB * tw * smoothstep(0.25, 0.9, -mv.z) * (1.0 - smoothstep(2.6, 3.0, k));
+          gl_PointSize = clamp((0.0012 + 0.0016 * fract(aSeed * 13.7)) * uPx / -mv.z, 1.0, 7.0);
+          gl_Position = projectionMatrix * mv; }`,
+      fragmentShader: `uniform float uLin; varying float vA;
+        void main(){ float r = length(gl_PointCoord - 0.5) * 2.0; float a = smoothstep(1.0, 0.0, r) * vA; if (a < 0.01) discard;
+          vec3 c = vec3(1.0, 0.86, 0.66) * a * 0.75; if (uLin > 0.5) c = pow(c, vec3(2.2)) * 2.5; gl_FragColor = vec4(c, 1.0); }`,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    this.dust = new THREE.Points(dg, this.dmat); this.dust.frustumCulled = false; this.dust.renderOrder = 10; scene.add(this.dust);
+  },
+  update() {
+    this.mat.uniforms.uTime.value = Sim.clock; this.dmat.uniforms.uTime.value = Sim.clock;
+    const h = renderer.xr.isPresenting ? 1600 : renderer.domElement.height;
+    this.dmat.uniforms.uPx.value = h / (2 * Math.tan(camera.fov * DEG / 2));
+  },
+};
+
+/* ---------- contact shadows ---------- */
+// A soft multiply-blended footprint under every prop, food piece and (in VR) hand: the projected box of the object,
+// darker and tighter in contact, fading as it lifts. Surfaces come from a downward ray (round-robin, cached).
+const Blobs = {
+  max: 200, mesh: null, k: 0, _b: new THREE.Box3(), _m: new THREE.Matrix4(), _a: [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()],
+  init() {
+    const g = new THREE.PlaneGeometry(1, 1); g.rotateX(-Math.PI / 2);
+    this.iA = new THREE.InstancedBufferAttribute(new Float32Array(this.max), 1); this.iA.setUsage(THREE.DynamicDrawUsage); g.setAttribute('iA', this.iA);
+    const mat = new THREE.ShaderMaterial({
+      vertexShader: `attribute float iA; varying vec2 vUv; varying float vA; void main(){ vUv = uv; vA = iA; gl_Position = projectionMatrix * viewMatrix * modelMatrix * instanceMatrix * vec4(position, 1.0); }`,
+      fragmentShader: `varying vec2 vUv; varying float vA; void main(){ vec2 d = (vUv - 0.5) * 2.0; float r = length(d); float s = vA * pow(clamp(1.0 - r, 0.0, 1.0), 1.5); if (s < 0.004) discard; gl_FragColor = vec4(vec3(1.0 - s), 1.0); }`,
+      transparent: true, depthWrite: false, blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.ZeroFactor, blendDst: THREE.SrcColorFactor,
+      polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3,
+    });
+    this.mesh = new THREE.InstancedMesh(g, mat, this.max); this.mesh.count = 0; this.mesh.frustumCulled = false; this.mesh.renderOrder = 2; this.mesh.userData.noAO = true;
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); scene.add(this.mesh);
+  },
+  // Local bounding box of a prop's meshes (cached per prop; food pieces have their own geometry).
+  box(p) {
+    if (p._bb) return p._bb;
+    const b = new THREE.Box3(); for (const m of p.meshes) { if (!m.geometry.boundingBox) m.geometry.computeBoundingBox(); b.union(m.geometry.boundingBox); }
+    return (p._bb = b);
+  },
+  surface(p, x, y, z) {
+    const R = Phys.ray; R.origin.x = x; R.origin.y = y; R.origin.z = z; R.dir.x = 0; R.dir.y = -1; R.dir.z = 0;
+    const hit = world.castRay(R, 1.2, true, undefined, GROUPS.qPour, undefined, p ? p.body : undefined);
+    return hit ? y - hit.timeOfImpact : -1;
+  },
+  put(n, cx, sy, cz, ax, az, bx, bz, a) {
+    const m = this._m.elements; // basis: X = major axis, Y = up, Z = minor axis (both horizontal)
+    m[0] = ax; m[1] = 0; m[2] = az; m[3] = 0; m[4] = 0; m[5] = 1; m[6] = 0; m[7] = 0; m[8] = bx; m[9] = 0; m[10] = bz; m[11] = 0; m[12] = cx; m[13] = sy + 0.0012; m[14] = cz; m[15] = 1;
+    this.mesh.setMatrixAt(n, this._m); this.iA.array[n] = a;
+  },
+  update() {
+    if (!this.mesh) return;
+    const hp = Loco.headPos, list = Props.list, A = this._a; let n = 0, k = 0; this.k++;
+    for (const p of list) {
+      if (n >= this.max - 2) break;
+      if (!p.alive || !p.group.visible) continue;
+      const P = p.renderPos; if ((P.x - hp.x) ** 2 + (P.z - hp.z) ** 2 > 30) continue;
+      const bb = this.box(p), q = p.renderQuat;
+      // world half-axes of the box and its centre
+      const hx = (bb.max.x - bb.min.x) / 2, hy = (bb.max.y - bb.min.y) / 2, hz = (bb.max.z - bb.min.z) / 2;
+      A[0].set(hx, 0, 0).applyQuaternion(q); A[1].set(0, hy, 0).applyQuaternion(q); A[2].set(0, 0, hz).applyQuaternion(q);
+      _v8.set((bb.max.x + bb.min.x) / 2, (bb.max.y + bb.min.y) / 2, (bb.max.z + bb.min.z) / 2).applyQuaternion(q).add(P);
+      const halfH = Math.abs(A[0].y) + Math.abs(A[1].y) + Math.abs(A[2].y);
+      // surface below: re-cast when it moved sideways or on its round-robin turn
+      k++;
+      if (p._sy === undefined || Math.abs(_v8.x - p._sx) + Math.abs(_v8.z - p._sz) > 0.015 || (k + this.k) % 6 === 0) { p._sy = this.surface(p, _v8.x, _v8.y, _v8.z); p._sx = _v8.x; p._sz = _v8.z; }
+      if (p._sy < 0) continue;
+      const gap = Math.max(0, _v8.y - halfH - p._sy); if (gap > 0.45) continue;
+      // footprint: the longest projected half-axis, and the spread across it
+      let best = 0, bl = -1; for (let i = 0; i < 3; i++) { const l = A[i].x * A[i].x + A[i].z * A[i].z; if (l > bl) { bl = l; best = i; } }
+      const L = Math.sqrt(bl) || 1e-3, ux = A[best].x / L, uz = A[best].z / L; let w = 0;
+      for (let i = 0; i < 3; i++) if (i !== best) w += Math.abs(-A[i].x * uz + A[i].z * ux);
+      w = Math.max(w, L * 0.25);
+      const grow = 1.25 + gap * 2.5, a = 0.5 * (1 - smoothstep(0, 0.4, gap)) * (p.isFood ? 0.85 : 1);
+      this.put(n++, _v8.x, p._sy, _v8.z, ux * L * 2 * grow, uz * L * 2 * grow, -uz * w * 2 * grow, ux * w * 2 * grow, a);
+    }
+    // VR hands hovering over the counter
+    if (renderer.xr.isPresenting) for (const h of HANDS) {
+      if (!h.active || h.held || n >= this.max) continue; const P = h.root.position;
+      const sy = this.surface(null, P.x, P.y, P.z); if (sy < 0) continue; const gap = P.y - 0.03 - sy; if (gap > 0.35) continue;
+      const s = 0.11 * (1 + gap * 2); this.put(n++, P.x, sy, P.z, s, 0, 0, s * 0.8, 0.35 * (1 - smoothstep(0, 0.35, gap)));
+    }
+    this.mesh.count = n; this.mesh.instanceMatrix.needsUpdate = true; this.iA.needsUpdate = true;
+  },
+};
+
+/* ---------- fire light ---------- */
+// One flickering point light rides the biggest fire (grease fire, flambé, grill flare-up); idle it sits at zero, so
+// the light count never changes and no shader recompiles.
+const FireLight = {
+  L: null, f: 0,
+  init() { this.L = new THREE.PointLight(0xff7a2c, 0, 3.6, 2); this.L.position.set(0, -5, 0); scene.add(this.L); },
+  update(dt) {
+    let best = null, bs = 0;
+    for (const f of Fire.list) { const s = f.sim ? (f.sim.size || f.sim.fuel || 0.5) : 0.5; if (s > bs) { bs = s; best = f.pos; } }
+    let target = 0;
+    if (best) { target = 1.5 + clamp(bs, 0, 3) * 2.2; this.L.position.set(best.x, best.y + 0.25, best.z); }
+    else if (Grill.thermo && Grill.thermo.flare > 0.08 && Grill.center) { target = Grill.thermo.flare * 4; this.L.position.set(Grill.center.x, Grill.center.y + 0.2, Grill.center.z); }
+    this.f += (target - this.f) * Math.min(1, dt * 8);
+    const t = Sim.clock; this.L.intensity = this.f * (0.78 + 0.14 * Math.sin(t * 23) + 0.08 * Math.sin(t * 57 + 1.3));
+  },
+};
+
+/* ---------- desktop post-processing ---------- */
+const HazeShader = {
+  uniforms: { tDiffuse: { value: null }, uSrc: { value: Array.from({ length: 6 }, () => new THREE.Vector4()) }, uN: { value: 0 }, uTime: { value: 0 }, uAspect: { value: 1 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: `uniform sampler2D tDiffuse; uniform vec4 uSrc[6]; uniform int uN; uniform float uTime; uniform float uAspect; varying vec2 vUv;
+    float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    float vn(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f); return mix(mix(h21(i), h21(i + vec2(1, 0)), f.x), mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), f.x), f.y); }
+    void main(){
+      vec2 off = vec2(0.0);
+      for (int i = 0; i < 6; i++) { if (i >= uN) break; vec4 s = uSrc[i];
+        vec2 d = vUv - s.xy; d.x *= uAspect; float up = d.y / s.z;
+        float m = smoothstep(-0.3, 0.4, up) * smoothstep(3.2, 0.9, up) * smoothstep(1.1 + up * 0.4, 0.15, abs(d.x) / s.z);
+        if (m <= 0.0) continue;
+        vec2 q = vec2(d.x / s.z * 3.0, up * 2.2 - uTime * 2.6);
+        off += (vec2(vn(q * 2.3), vn(q * 2.3 + 7.31)) - 0.5) * m * s.w; }
+      gl_FragColor = texture2D(tDiffuse, vUv + off * 0.0055);
+    }`,
+};
+const GradeShader = {
+  uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uRes: { value: new THREE.Vector2(1, 1) }, uVig: { value: 0.28 }, uGrain: { value: 0.018 }, uCA: { value: 0.0007 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: `uniform sampler2D tDiffuse; uniform float uTime; uniform vec2 uRes; uniform float uVig; uniform float uGrain; uniform float uCA; varying vec2 vUv;
+    void main(){
+      vec2 d = vUv - 0.5; float r2 = dot(d, d);
+      vec2 o = d * r2 * uCA * 4.0;
+      vec3 c = vec3(texture2D(tDiffuse, vUv - o).r, texture2D(tDiffuse, vUv).g, texture2D(tDiffuse, vUv + o).b);
+      float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      c = mix(c, c * vec3(1.012, 1.0, 0.985), smoothstep(0.35, 0.95, l));         // a touch of warmth in the highlights
+      c = mix(c, c * c * (3.0 - 2.0 * c), 0.14);                                   // gentle S-curve
+      c *= 1.0 - uVig * smoothstep(0.12, 0.62, r2 * 1.9);
+      float g = fract(sin(dot(floor(vUv * uRes) + fract(uTime * 7.13) * 91.7, vec2(12.9898, 78.233))) * 43758.5453) - 0.5;
+      c += g * uGrain * (1.0 - l * 0.6);
+      gl_FragColor = vec4(c, 1.0);
+    }`,
+};
+const GFX_LEVELS = { low: 0, medium: 1, high: 2, ultra: 3 };
+const Post = {
+  composer: null, level: 0, auto: 0, aoScale: 0.5,
+  init() {
+    const w = window.innerWidth, h = window.innerHeight, pr = renderer.getPixelRatio();
+    let rt;
+    try { rt = new THREE.WebGLRenderTarget(w * pr, h * pr, { type: THREE.HalfFloatType, samples: 4 }); } catch (e) { rt = undefined; }
+    const C = this.composer = new EffectComposer(renderer, rt);
+    C.addPass(new RenderPass(scene, camera));
+    const ao = this.gtao = new GTAOPass(scene, camera, w, h);
+    ao.output = GTAOPass.OUTPUT.Default; ao.blendIntensity = 0.9;
+    ao.updateGtaoMaterial({ radius: 0.32, distanceExponent: 1.6, thickness: 1.6, scale: 1.15, samples: 12 });
+    ao.updatePdMaterial({ lumaPhi: 10, depthPhi: 2, normalPhi: 3, radius: 6, rings: 2, samples: 12 });
+    // Only opaque geometry belongs in the AO G-buffer (particles, liquids, light shafts and decals would smear it).
+    const ov = ao._overrideVisibility.bind(ao);
+    ao._overrideVisibility = function () { ov(); const cache = this._visibilityCache; scene.traverse((o) => { if (o.visible && (o.userData.noAO || (o.material && !Array.isArray(o.material) && o.material.transparent))) { o.visible = false; cache.push(o); } }); };
+    const ss = ao.setSize.bind(ao); ao.setSize = (W, H) => ss(Math.max(1, Math.round(W * this.aoScale)), Math.max(1, Math.round(H * this.aoScale)));
+    C.addPass(ao);
+    this.haze = new ShaderPass(HazeShader); C.addPass(this.haze);
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.38, 0.42, 1.6); // only truly hot things bloom: flames, bulbs, embers, sun glints C.addPass(this.bloom);
+    C.addPass(new OutputPass());
+    this.grade = new ShaderPass(GradeShader); C.addPass(this.grade);
+    C.setSize(w, h);
+    const q = new URLSearchParams(location.search).get('gfx'); if (q && q in GFX_LEVELS) { settings.gfx = q; Quality.frozen = true; }
+    this.apply();
+  },
+  // settings.gfx (low/medium/high/ultra) capped by the adaptive Quality level.
+  apply() {
+    const want = GFX_LEVELS[settings.gfx] ?? 2, cap = Quality.level >= 2 ? 1 : Quality.level >= 1 ? 2 : 3;
+    const L = this.level = Math.min(want, cap);
+    if (!this.composer) return;
+    this.gtao.enabled = L >= 2; this.bloom.enabled = L >= 1; this.haze.enabled = L >= 2;
+    const s = L >= 3 ? 1 : 0.5; if (s !== this.aoScale) { this.aoScale = s; this.composer.setSize(window.innerWidth, window.innerHeight); }
+    renderer.shadowMap.type = THREE.PCFShadowMap; sun.shadow.radius = L >= 2 ? 4 : 2.5;
+    const sz = L >= 3 ? 4096 : CONFIG.render.shadowMapSize;
+    if (sun.shadow.mapSize.x !== sz) { sun.shadow.mapSize.set(sz, sz); if (sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; } }
+    Shafts.dust.visible = L >= 1 || renderer.xr.isPresenting;
+  },
+  resize() { if (this.composer) { this.composer.setPixelRatio(renderer.getPixelRatio()); this.composer.setSize(window.innerWidth, window.innerHeight); } },
+  // Heat haze sources: hot pans, lit burners with nothing on them, fires, an open hot oven.
+  hazeSources() {
+    const S = this.haze.uniforms.uSrc.value; let n = 0;
+    const add = (x, y, z, r, k) => {
+      if (n >= 6 || k <= 0.02) return; _v8.set(x, y, z).project(camera); if (_v8.z > 1 || Math.abs(_v8.x) > 1.4 || Math.abs(_v8.y) > 1.4) return;
+      const dist = Math.max(0.2, camera.getWorldPosition(_v7).distanceTo(_v6.set(x, y, z)));
+      const rr = r / (dist * Math.tan(camera.fov * DEG / 2)) * 0.5; S[n++].set((_v8.x + 1) / 2, (_v8.y + 1) / 2, Math.max(0.01, rr), k);
+    };
+    for (const p of Stove.pans) { if (!p.alive || !p.thermo || !p.lq) continue; const T = p.thermo.T; if (T > 150) add(p.lq.B.x, p.lq.B.y + 0.03, p.lq.B.z, p.def.pan.r * 1.1, clamp((T - 150) / 120, 0, 1)); }
+    for (const k of Stove.knobs) if (k.lit && k.burner >= 0 && k.burner < 4) { const b = Kitchen.burners[k.burner]; add(b.x, b.y + 0.02, b.z, 0.09, 0.45 * Stove.powerFrac(k.angle)); }
+    for (const f of Fire.list) add(f.pos.x, f.pos.y + 0.1, f.pos.z, 0.16, 1.0);
+    this.haze.uniforms.uN.value = n; this.haze.enabled = this.level >= 2 && n > 0;
+  },
+  render() {
+    if (!this.composer || this.level === 0 || renderer.xr.isPresenting) { renderer.render(scene, camera); return; }
+    const t = Sim.clock; this.grade.uniforms.uTime.value = t; this.haze.uniforms.uTime.value = t;
+    this.haze.uniforms.uAspect.value = window.innerWidth / window.innerHeight; this.grade.uniforms.uRes.value.set(window.innerWidth, window.innerHeight);
+    if (this.level >= 2) this.hazeSources();
+    POSTU.uLin.value = 1;
+    try { this.composer.render(frameDt); } finally { POSTU.uLin.value = 0; }
+  },
+};
+// Debris colours by food look (chop bits fly off the board in the food's colour).
+const BIT_COL = { tomato: [0.86, 0.2, 0.12], onion: [0.95, 0.92, 0.84], carrot: [1.0, 0.55, 0.15], potato: [0.95, 0.9, 0.7], apple: [0.98, 0.95, 0.8], lemon: [1.0, 0.94, 0.5],
+  beef: [0.72, 0.18, 0.17], chicken: [0.95, 0.8, 0.74], pork: [0.95, 0.75, 0.7], fish: [0.98, 0.65, 0.5], avocado: [0.72, 0.86, 0.36], pepper: [0.9, 0.16, 0.1], bread: [0.95, 0.84, 0.62],
+  cheese: [1.0, 0.86, 0.42], herb: [0.3, 0.64, 0.24], garlic: [0.97, 0.95, 0.88], mushroom: [0.86, 0.78, 0.66], strawberry: [0.9, 0.12, 0.15], banana: [0.98, 0.93, 0.7] };
+const Remaster = {
+  // Knife through food: a few bits and droplets kick off the board.
+  chopBits(f, at) {
+    const c = BIT_COL[f.fdef.look] || [0.9, 0.84, 0.7], n = 3 + Math.floor(Math.random() * 4);
+    for (let i = 0; i < n; i++) Particles.emitC('bits', at.x + (Math.random() - 0.5) * 0.02, at.y + 0.005, at.z + (Math.random() - 0.5) * 0.02, c[0] * (0.9 + Math.random() * 0.15), c[1] * (0.9 + Math.random() * 0.15), c[2] * (0.9 + Math.random() * 0.15));
+    if (f.fdef.water > 0.8) for (let i = 0; i < 3; i++) Particles.emitC('bits', at.x, at.y + 0.01, at.z, c[0] * 0.95 + 0.05, c[1] * 0.95 + 0.05, c[2] * 0.95 + 0.05);
+  },
+  // A dish goes out: confetti and sparkles, more for more stars.
+  celebrate(at, stars) {
+    if (!at) return;
+    for (let i = 0; i < 18 + stars * 16; i++) Particles.emit('confetti', at.x + (Math.random() - 0.5) * 0.15, at.y + 0.05, at.z + (Math.random() - 0.5) * 0.15);
+    for (let i = 0; i < 10 + stars * 8; i++) FX.emit('sparkle', at.x + (Math.random() - 0.5) * 0.25, at.y + 0.05 + Math.random() * 0.2, at.z + (Math.random() - 0.5) * 0.25);
+  },
+  // Hot fat in a sizzling pan spits droplets that streak up and fall back.
+  spatter(dt) {
+    for (const p of Stove.pans) {
+      if (!p.alive || !p.lq) continue; const z = p.sizzle || 0; if (z < 0.3) continue;
+      const C = p.contents; if (!C || C.m.oil + C.m.butterfat < 0.002 || C.T < 140) continue;
+      let k = (z - 0.25) * dt * 22 * Particles.cap; const R = (p.def.pan.r || 0.1) * 0.75, B = p.lq.B;
+      while (k > 0) { if (Math.random() < k) { const a = Math.random() * 6.283, r = Math.sqrt(Math.random()) * R, s = 0.3 + Math.random() * 0.6;
+        Particles.emitV('spatter', B.x + Math.cos(a) * r, p.lq.surfY + 0.004, B.z + Math.sin(a) * r, Math.cos(a) * s, 0.9 + Math.random() * 1.4, Math.sin(a) * s); } k -= 1; }
+    }
+  },
+  init() {
+    // The window's sky backdrop and glass sit behind a depth step; keep them out of the AO pass (no frosted halo).
+    scene.traverse((o) => { if (o.name === 'static_sky' || o.name === 'static_glass') o.userData.noAO = true; });
+    Shafts.init(); Blobs.init(); FireLight.init();
+    try { Post.init(); } catch (e) { console.warn('post-processing unavailable', e); Post.composer = null; }
+    try { Probe.capture(2); } catch (e) { console.warn('reflection probe failed', e); }
+  },
+  update(dt) {
+    Shafts.update(); Blobs.update(); FireLight.update(dt); this.spatter(dt);
+    // Headset or under load: cheaper smoke shading and no surface relief taps (desktop keeps everything).
+    const vr = renderer.xr.isPresenting, cheap = vr || Quality.level >= 1 ? 1 : 0;
+    Particles.uniforms.uCheap.value = cheap; FX.uniforms.uCheap.value = cheap;
+    RELIEF_U.uBump.value = TEX.matAtlas && !(vr && Quality.level >= 1) && Quality.level < 2 ? 0.0022 : 0;
   },
 };
 /* ======================================= [SIM] ====================================== */
@@ -9370,7 +10077,9 @@ const Desktop = {
     const dom = Hands.dominant(), off = Hands.offhand(), s = dom.sign;
     const held = !!dom.held, dist = held ? this.holdDist : CONFIG.desktop.holdRest, tuck = UI.open ? 0.22 : 0; // tuck hands away while the menu is open
     dom.targetPos.copy(hp).addScaledVector(this._fwd, dist).addScaledVector(this._right, s * (held ? 0.04 : 0.16)).addScaledVector(this._up, (held ? -0.06 : -0.17) - tuck);
-    dom.targetQuat.copy(hq).multiply(this._pitchQ);
+    // Held things stay level when you look up or down (yaw only), so a full pot or a bag of flour doesn't tip and spill.
+    dom.targetQuat.setFromAxisAngle(UP, Loco.headYaw).multiply(this._pitchQ);
+    if (held) this.supportClamp(dom);
     // Desktop chop / crush: a quick downward stroke of the held knife (flat of the blade for crush).
     if (this.chopT > 0 && dom.held && dom.held.def.knife) {
       this.chopT = Math.max(0, this.chopT - frameDt); const u = 1 - this.chopT / this.chopDur, k = dom.held.def.knife;
@@ -9460,7 +10169,7 @@ const Desktop = {
     const p = Phys.propByCollider.get(hit.collider.handle); if (!p) return;
     // Put the hand where the crosshair touches the item, then grab at that contact point.
     this.holdDist = clamp(hit.timeOfImpact, CONFIG.desktop.holdMin, CONFIG.desktop.holdMax);
-    h.targetQuat.copy(Loco.headQuat).multiply(this._pitchQ);
+    h.targetQuat.setFromAxisAngle(UP, Loco.headYaw).multiply(this._pitchQ);
     _v3.set(h.sign * 0.004, -0.008, 0).applyQuaternion(h.targetQuat);
     h.targetPos.copy(_v1).sub(_v3);
     h.snapBody(); h.resetHistory();
@@ -9496,6 +10205,19 @@ const Desktop = {
     if (p.def.use) p.def.use(p, h);
   },
   rmbUp() { const p = Hands.dominant().held; if (p && p.def.tongs) p.forceClosed = false; this.probe = null; },
+  // Never drive a held item into the surface under it: the hold pose sits below the crosshair, so looking down at a
+  // shelf or counter would otherwise push what you just picked up into it and lever it onto its side.
+  _dn: new THREE.Vector3(0, -1, 0),
+  supportClamp(h) {
+    const it = h.held, bb = Blobs.box(it), hx = (bb.max.x - bb.min.x) / 2, hy = (bb.max.y - bb.min.y) / 2, hz = (bb.max.z - bb.min.z) / 2;
+    _q3.copy(h.targetQuat).multiply(h.offQuat);
+    let halfH = Math.abs(_v5.set(hx, 0, 0).applyQuaternion(_q3).y) + Math.abs(_v5.set(0, hy, 0).applyQuaternion(_q3).y) + Math.abs(_v5.set(0, 0, hz).applyQuaternion(_q3).y);
+    _v5.set((bb.min.x + bb.max.x) / 2, (bb.min.y + bb.max.y) / 2, (bb.min.z + bb.max.z) / 2).applyQuaternion(_q3).add(_v6.copy(h.offPos).applyQuaternion(h.targetQuat)).add(h.targetPos);
+    _v7.copy(_v5); _v7.y += 0.02;
+    const hit = Phys.castRay(_v7, this._dn, 0.02 + halfH + 0.06, GROUPS.qStatic, null, null); if (!hit) return;
+    const sy = _v7.y - hit.timeOfImpact, low = _v5.y - halfH;
+    if (low < sy + 0.008) h.targetPos.y += sy + 0.008 - low;
+  },
   rotateHeld(dx, dy) {
     const h = Hands.dominant(); if (!h.held) return;
     _q2.copy(h.targetQuat).invert();
@@ -9569,13 +10291,13 @@ const Quality = {
   update(dt) {
     const budget = 1 / (renderer.xr.isPresenting ? (settings.refresh || 72) : 60);
     if (Main.timing.cpu / 1000 > budget * 0.8 || dt > budget * 1.25) { this.slow += dt; this.fast = 0; } else { this.fast += dt; this.slow = Math.max(0, this.slow - dt * 0.5); }
-    if (this.slow > 2 && this.level < 2) { this.set(this.level + 1); this.slow = 0; }
-    else if (this.fast > 6 && this.level > 0) { this.set(this.level - 1); this.fast = 0; }
+    if (!this.frozen && this.slow > 2 && this.level < 2) { this.set(this.level + 1); this.slow = 0; }
+    else if (!this.frozen && this.fast > 6 && this.level > 0) { this.set(this.level - 1); this.fast = 0; }
     // Level ≥1: refresh the shadow map on alternate frames (the sun is static; only props move).
     if (this.level >= 1 && settings.shadows) { renderer.shadowMap.autoUpdate = false; if ((++this.n & 1) === 0) renderer.shadowMap.needsUpdate = true; }
     else renderer.shadowMap.autoUpdate = true;
   },
-  set(l) { this.level = l; ShadowLOD.R = l >= 2 ? 1.2 : 1.9; for (const p of Props.list) p.shadowNear = undefined; Particles.cap = l >= 2 ? 0.5 : 1; },
+  set(l) { this.level = l; ShadowLOD.R = l >= 2 ? 1.2 : 1.9; for (const p of Props.list) p.shadowNear = undefined; Particles.cap = l >= 2 ? 0.5 : 1; if (typeof Post !== 'undefined') Post.apply(); },
 };
 
 /* ===================================== [XR SESSION] ================================= */
@@ -9694,6 +10416,7 @@ function frame() {
   const ts = performance.now(); safe('sim', U.sim, dt); T.sim += (performance.now() - ts - T.sim) * 0.1;
   safe('stove', U.stove, dt);
   safe('particles', U.particles, dt);
+  safe('remaster', U.remaster, dt);
   safe('chefsEye', U.chefsEye, dt);
   safe('clock', U.clock);
   safe('audio', U.audio, camera);
@@ -9701,7 +10424,7 @@ function frame() {
   Main.rescueT += dt; if (Main.rescueT > 1) { Main.rescueT = 0; safe('rescue', U.rescue); }
   safe('quality', U.quality, dt);
   const tr = performance.now(); T.cpu += (tr - now - T.cpu) * 0.1;
-  renderer.render(scene, camera);
+  Post.render();
   T.render += (performance.now() - tr - T.render) * 0.1;
   Main.calls = renderer.info.render.calls; Main.tris = renderer.info.render.triangles;
 }
@@ -9732,6 +10455,7 @@ async function boot() {
     Foods.initial();
     Hands.init();
     UI.init();
+    Remaster.init();
     Progress.load(); Cosmetics.init(); Bubble.init(); Ghost.init(); Safety.init(); Pass.init(); Shimmer.init();
     toastSink = (m, ms) => { if (Input.mode === 'xr') Bubble.show(m, '', ms); };
     Loco.init();
@@ -9748,7 +10472,7 @@ async function boot() {
       stove: Stove.update.bind(Stove), particles: Particles.update.bind(Particles), chefsEye: ChefEye.update.bind(ChefEye),
       oven: Oven.update.bind(Oven), liquids: Liquids.update.bind(Liquids),
       m4pre: (dt) => { Fryer.update(dt); Utensils.update(dt); Fridge.update(dt); Microwave.update(dt); Toaster.update(dt); Mixer.update(dt); Bakery.update(dt); Kitchenware.update(dt); ShadowLOD.update(); },
-      quality: Quality.update.bind(Quality),
+      quality: Quality.update.bind(Quality), remaster: Remaster.update.bind(Remaster),
       m5: (dt) => { Game.update(dt); Challenge.update(dt); RecipeBook.update(dt); Ghost.update(dt); Mentor.update(dt); Safety.update(dt); Pass.update(dt); Bubble.update(dt); Shimmer.update(dt); Mix.update(); PourAudio.update(dt); },
       m4: (dt) => { Grill.update(dt); Fire.update(dt); FX.update(dt); Seasoning.update(); Eating.update(dt); TasteCard.update(dt); Reaction.update(dt); Kettle.update(dt); },
     });
@@ -9761,7 +10485,7 @@ async function boot() {
     if (new URLSearchParams(location.search).has('test')) setTimeout(() => safe('testMode', () => TestMode.run()), 50);
     renderer.setAnimationLoop(frame);
     // Debug handle for the browser console (inspect state, tweak CONFIG live).
-    window.MEP = { THREE, RAPIER, CONFIG, resolveLayout, Nav, Phys, Main, PerfHUD, THERMO, FOOD_DEFS, PAN_DEFS, Thermo, PanThermo, simPanCook, simRest, preheat, Foods, FoodPiece, Stove, Oven, OvenThermo, Contents, GROUPS, Fryer, Grill, Fire, FireSim, Seasoning, Dredge, Eating, TasteCard, Utensils, Fridge, Microwave, Toaster, Mixer, Blender, Kettle, Bakery, BatterPuddle, Kitchenware, ambientAt, Game, Challenge, Pass, Progress, Cosmetics, Mentor, Bubble, Safety, Slots, RecipeBook, RECIPES, LEVELS, TUTORIALS, Ghost, scoreDish, DISH_SPECS, SCORE_W, W, AudioSys, Jazz, Mix, Shimmer, Quality, tasteReport, foodSafe, FryerThermo, GrillThermo, FX, Liquids, Sink, Controls, Thermometer, simPot, simPanMulti, exposeSubmerged, dropletFate, LIQ, OVEN, OILS, Cutting, Tongs, Particles, ChefEye, TestMode, settings, scene, camera, rig, renderer, world, Hands, Props, Loco, UI, Grab, Input, Desktop, Sim, Kitchen, U };
+    window.MEP = { Post, Probe, Shafts, Blobs, FireLight, Remaster, POSTU, LiqEnv, THREE, RAPIER, CONFIG, resolveLayout, Nav, Phys, Main, PerfHUD, THERMO, FOOD_DEFS, PAN_DEFS, Thermo, PanThermo, simPanCook, simRest, preheat, Foods, FoodPiece, Stove, Oven, OvenThermo, Contents, GROUPS, Fryer, Grill, Fire, FireSim, Seasoning, Dredge, Eating, TasteCard, Utensils, Fridge, Microwave, Toaster, Mixer, Blender, Kettle, Bakery, BatterPuddle, Kitchenware, ambientAt, Game, Challenge, Pass, Progress, Cosmetics, Mentor, Bubble, Safety, Slots, RecipeBook, RECIPES, LEVELS, TUTORIALS, Ghost, scoreDish, DISH_SPECS, SCORE_W, W, AudioSys, Jazz, Mix, Shimmer, Quality, tasteReport, foodSafe, FryerThermo, GrillThermo, FX, Liquids, Sink, Controls, Thermometer, simPot, simPanMulti, exposeSubmerged, dropletFate, LIQ, OVEN, OILS, Cutting, Tongs, Particles, ChefEye, TestMode, settings, scene, camera, rig, renderer, world, Hands, Props, Loco, UI, Grab, Input, Desktop, Sim, Kitchen, U };
 
     const btnVR = $('btnVR'), btnD = $('btnDesktop');
     btnD.disabled = false;

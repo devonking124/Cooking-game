@@ -165,13 +165,71 @@ This pass came out of real-input playtests that drive the game the way a player 
   - Soft wooden "tock" for UI clicks.
   - Tongs on desktop reach the target at any frame rate.
 
+## Remaster
+
+### Fixes
+
+- **Pouring works for everything.**
+  - **What was broken:** flour, sugar, milk, cream, egg, honey, soy, vinegar, stock and batters had a pour flow of zero, so they never left their containers. Many of them were also invisible inside bowls.
+  - **Dry goods:** flour, sugar, rice and crumbs now pour as a granular stream that puffs flour where it lands, hisses like sand and leaves a dusting on the counter.
+  - **Thick and set mixtures:**
+    - Batter and syrup pour thick.
+    - Whipped cream holds its peaks.
+    - Dough, a baked batter or cooled caramel won't pour.
+  - **Colour:** every ingredient has its own colour in a bowl (milk white, tomato red, soy dark, honey amber), and flour gets a matte, powdery surface.
+  - **Spills:** only fat spills can catch fire.
+- **Held items stay level on desktop.**
+  - Looking up or down no longer tips a held pot or bag.
+  - A held item is never pushed into the shelf or counter it came from. Before, grabbing the flour bag levered it onto its side and emptied it.
+- **Containers that overflowed at spawn:** the milk, cream and stock cartons and the flour, sugar and rice bags now have room for their contents.
+
+### Graphics
+
+Choose Low, Med, High or Ultra under Settings → Graphics. The setting applies to desktop; VR always skips the post-processing stack.
+
+- **Reflections and ambient light:** a reflection probe of the kitchen itself, so steel, glaze and liquids reflect this room and bounce its light.
+- **Desktop post-processing stack:**
+  - MSAA.
+  - GTAO ambient occlusion.
+  - Heat haze over hot pans, burners and fires.
+  - Bloom on flames, bulbs and embers.
+  - A filmic grade with vignette and grain.
+- **Shadows:** soft sun shadows (4K shadow map on Ultra).
+- **Window light:** sunlight through the window forms visible shafts with drifting dust.
+- **Contact shadows:** every item you can pick up has one. In VR, so do your hands over the counter.
+- **Fire light:** grease fires and grill flare-ups cast flickering orange light on the room.
+- **Surface relief:** tile grout, plank gaps, wood grain, plaster and cast iron are bump-mapped from a generated height/roughness/cavity atlas.
+- **Particles:** fully rewritten.
+  - Steam and smoke are lit, swirl and break up into wisps.
+  - Sparks and embers stretch with their motion and cool from yellow to red.
+  - Fire is made of noise-driven flame tongues.
+  - Hot oil spits streaking spatter.
+  - Chopping kicks up bits in the food's colour.
+  - Igniters throw sparks.
+  - Served dishes get confetti and sparkles.
+- **Gas burners:** a cyan inner cone, a blue-violet mantle and occasional orange flecks, with blue glow pooling on the burner.
+
+### Models
+
+- **Pans and pots:** rolled rims; tapered, riveted handles; a cast-iron hang loop, assist handle and pour lips.
+- **Knives:** ground blades that catch a highlight along the bevel, and contoured handles.
+- **Cutting board:** rounded edges and a juice groove.
+- **Range hood:** a chimney hood with a rolled lip and baffle filters.
+- **Decor:**
+  - Herbs on the window counter.
+  - A utensil crock.
+  - A magnetic knife strip.
+  - A rug at the sink.
+  - A trailing plant on the cabinets.
+  - Cookbooks.
+
 ## Code map (inside `index.html`)
 
 Search for the banner comments: `[CONFIG] [UTIL] [SAVE] [RENDERER] [TEXTURES] [AUDIO] [HAPTICS] [PHYSICS]
 [THERMAL] [KITCHEN] [PROPS] [FOOD] [STOVE] [SIZZLE] [PARTICLES] [CHEF'S EYE] [TEST MODE] [CONTROLS] [OVEN]
 [THERMOMETER] [LIQUIDS] [SINK] [BOIL AUDIO] [FRYER] [GRILL] [FIRE] [SEASONING] [DREDGE] [EATING] [UTENSILS]
 [APPLIANCES] [BAKERY] [DAIRY, FRUIT & EGGS] [SCORING] [INPUT] [HANDS] [GRAB]
-[LOCOMOTION] [UI] [SIM] [DESKTOP] [PERFHUD] [PROGRESS] [COSMETICS] [MENTOR] [SAFETY] [GAME] [PASS] [CHALLENGE] [RECIPES] [POLISH] [MIX] [AMBIENCE] [JAZZ] [XR SESSION] [MAIN]`.
+[LOCOMOTION] [UI] [SIM] [DESKTOP] [PERFHUD] [PROGRESS] [COSMETICS] [MENTOR] [SAFETY] [GAME] [PASS] [CHALLENGE] [RECIPES] [POLISH] [MIX] [AMBIENCE] [JAZZ] [REMASTER] [XR SESSION] [MAIN]`.
 
 - `[THERMAL]` is pure JS (no rendering or physics): `THERMO` constants, data-driven `FOOD_DEFS` and `PAN_DEFS`,
   the `Thermo` finite-volume food model, the two-node `PanThermo`, vessel `Contents` (water, oil, butter, salt,
