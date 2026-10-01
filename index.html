@@ -30,6 +30,7 @@
   kbd { background:#3a2c21; border:1px solid #5a4636; border-radius:4px; padding:1px 5px; font-size:12px; color:var(--cream); }
   ul.keys { columns:2; padding-left:18px; margin:8px 0; }
   ul.keys li { margin:3px 0; break-inside:avoid; }
+  #hoverName { position:fixed; left:50%; top:50%; transform:translate(-50%, 18px); pointer-events:none; z-index:5; font:600 13px system-ui, sans-serif; color:#fff6e8; text-shadow:0 1px 3px #000, 0 0 2px #000; white-space:nowrap; opacity:.92; }
   #crosshair { position:fixed; left:50%; top:50%; width:18px; height:18px; margin:-9px 0 0 -9px; pointer-events:none; z-index:5; display:none; }
   #crosshair::before, #crosshair::after { content:""; position:absolute; background:rgba(255,245,230,.85); box-shadow:0 0 2px #000; }
   #crosshair::before { left:8px; top:2px; width:2px; height:14px; }
@@ -80,6 +81,7 @@
   </div>
 </div>
 <div id="crosshair"></div>
+<div id="hoverName"></div>
 <div id="hint">WASD move &middot; LMB grab/throw &middot; RMB use/chop/probe &middot; Wheel reach &middot; R rotate &middot; 1&ndash;9 tools &middot; F force-grab &middot; T teleport &middot; Q/E turn &middot; M menu &middot; X Chef&rsquo;s Eye &middot; B bite &middot; P perf</div>
 <div id="toast"></div>
 
@@ -883,7 +885,7 @@ const AudioSys = {
     g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(peak, t0 + 0.003); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
     s.connect(fl); fl.connect(g); g.connect(dst); s.start(t0, Math.random() * 1.5); s.stop(t0 + dur + 0.02);
   },
-  uiClick() { const v = this.voice(null, 0.08, 0.25, this.ui); if (!v) return; const t = this.ctx.currentTime; this.osc(v, 'sine', 1500, t, 0.05, 0.6, 0.05); },
+  uiClick() { const v = this.voice(null, 0.12, 0.3, this.ui); if (!v) return; const t = this.ctx.currentTime; this.osc(v, 'sine', 880, t, 0.07, 0.5, 0.06, 760); this.osc(v, 'sine', 2310, t, 0.03, 0.18, 0.025); this.burst(v, t, 0.012, 0.25, 'bandpass', 3200, 1.5); }, // soft wooden tock
   uiTick() { const v = this.voice(null, 0.06, 0.12, this.ui); if (!v) return; const t = this.ctx.currentTime; this.osc(v, 'triangle', 2200, t, 0.03, 0.4, 0.03); },
   grab(pos) { const v = this.voice(pos, 0.1, 0.35); if (!v) return; const t = this.ctx.currentTime; this.burst(v, t, 0.05, 0.5, 'bandpass', 2400, 1.2); },
   whoosh() { const v = this.voice(null, 0.35, 0.22); if (!v) return; const t = this.ctx.currentTime; this.burst(v, t, 0.3, 0.8, 'bandpass', 350, 0.8, 2200); },
@@ -2527,6 +2529,13 @@ const KB = {
   },
 };
 
+// Shaker-style door: four raised rails/stiles around a recessed centre panel (merged statics → no extra draws).
+function shaker(px, py, pz, w, h, alongX, sgn, rail = 0.055) {
+  const t = 0.008, off = sgn * (0.009 + t / 2), o = { collide: false, tint: 0xf4f4f4 };
+  const bx = (cw, ch, dx, dy) => KB.box('cabinet', alongX ? cw : t, ch, alongX ? t : cw, px + (alongX ? dx : off), py + dy, pz + (alongX ? off : dx), o);
+  bx(w, rail, 0, h / 2 - rail / 2); bx(w, rail, 0, -h / 2 + rail / 2);                        // rails
+  bx(rail, h - 2 * rail, -w / 2 + rail / 2, 0); bx(rail, h - 2 * rail, w / 2 - rail / 2, 0);    // stiles
+}
 // Lower-cabinet run with toe kick, door/drawer fronts, handles and a countertop slab.
 // front: '+z' | '-z' | '+x' | '-x' — which side faces the room.
 function counterRun(x0, x1, z0, z1, front, top = 'marble', o = {}) {
@@ -2556,6 +2565,8 @@ function counterRun(x0, x1, z0, z1, front, top = 'marble', o = {}) {
     const fw = seg - gap * 2;
     const doorH = doorTop - kickH - 0.01;
     KB.box('cabinet', alongX ? fw : 0.018, doorH, alongX ? 0.018 : fw, px, kickH + 0.005 + doorH / 2, pz, { collide: false, tint: 0xf4f4f4 });
+    shaker(px, kickH + 0.005 + doorH / 2, pz, fw, doorH, alongX, sgn);
+    shaker(px, doorTop + drawerH / 2 + 0.006, pz, fw, drawerH - gap, alongX, sgn, 0.035);
     KB.box('cabinet', alongX ? fw : 0.018, drawerH - gap, alongX ? 0.018 : fw, px, doorTop + drawerH / 2 + 0.006, pz, { collide: false, tint: 0xf4f4f4 });
     const hx = alongX ? 0 : sgn * 0.022, hz = alongX ? sgn * 0.022 : 0;
     KB.box('brass', alongX ? 0.14 : 0.012, 0.012, alongX ? 0.012 : 0.14, px + hx, doorTop + drawerH / 2 + 0.006, pz + hz, { collide: false });
@@ -2699,6 +2710,7 @@ const Kitchen = {
       for (let i = 0; i < n; i++) {
         const px = x0 + s * (i + 0.5);
         KB.box('cabinet', s - 0.012, uy1 - uy0 - 0.012, 0.018, px, (uy0 + uy1) / 2, bz0 + ud + 0.009, { collide: false, tint: 0xf4f4f4 });
+        shaker(px, (uy0 + uy1) / 2, bz0 + ud + 0.009, s - 0.012, uy1 - uy0 - 0.012, true, 1);
         KB.box('brass', 0.012, 0.12, 0.012, px + (i % 2 ? -1 : 1) * (s / 2 - 0.05), uy0 + 0.1, bz0 + ud + 0.03, { collide: false });
       }
       KB.box('glow', x1 - x0 - 0.1, 0.004, 0.03, (x0 + x1) / 2, uy0 - 0.003, bz0 + 0.08, { collide: false, uv: false });
@@ -5936,6 +5948,8 @@ const Liquids = {
     st.r = clamp(Math.sqrt(Q / (Math.PI * Math.max(0.6, sp + 0.5))), 0.0012, 0.012);
     this.colorOf(C, st.col);
     this.trace(st, v.body, _lp, v);
+    // for PourAudio: flow rate, where it lands, and whether it lands in liquid
+    const k = (st.n - 1) * 3; v.pourQ = Q; v.pourT = Sim.clock; (v.pourAt || (v.pourAt = new THREE.Vector3())).set(st.pts[k], st.pts[k + 1], st.pts[k + 2]); v.pourWet = !!this.liquidAt(_v2.copy(v.pourAt).add(_v1.set(0, -0.01, 0)));
   },
   colorOf(C, out) {
     const m = C.m;
@@ -8124,6 +8138,8 @@ const UI = {
           const i = h.input;
           if (this.pointer(h.rayOrigin, h.rayDir, i.trigDown, i.trigPressed, i.trigReleased, h)) { h.uiHover = true; break; }
         }
+        // A pinned/board menu is open: show a faint guide laser so new players know to point and pull the trigger.
+        if (this.mode !== 'wrist' && ptrHand.active && !ptrHand.uiHover && !ptrHand.held) ptrHand.showLaser(ptrHand.rayOrigin, ptrHand.rayDir, 1.4, 0xffd08a, 0.22);
       }
     } else {
       this.mesh.visible = this.open;
@@ -8284,6 +8300,7 @@ const UI = {
   drawHome(y) {
     const X = 44, W = S_UI_W, C = this.C, stars = Progress.totalStars();
     if (this.homePage === 'challenge') return this.drawChallenges(y);
+    if (this.homePage === 'help') return this.drawHelp(y);
     this.label('Welcome to the line, chef.', X, y + 16, 34, C.text, 'left', 700);
     this.label(`${stars} ★`, X + W, y + 16, 34, '#ffd36a', 'right', 800);
     y += 54; const bw = (W - 20) / 2, bh = 120;
@@ -8300,7 +8317,37 @@ const UI = {
       list.forEach((c, i) => { const ok = Progress.unlocked(kind, i); this.button(`cos:${kind}:${i}`, X + 130 + i * (cw + 8), y, cw, 52, ok ? c.name : `🔒 ${c.need}★`, () => Cosmetics.equip(kind, i), { active: Progress.d.equip[kind] === i, size: 19 }); });
       y += 62;
     }
-    if (Game.mode !== 'menu') this.button('home:resume', X, y + 6, W, 56, Challenge.active ? `Resume ${Challenge.lvl.id} ${Challenge.lvl.name}` : 'Resume', () => { this.open = false; }, { size: 24 });
+    this.button('home:help', X, y + 6, Game.mode !== 'menu' ? (W - 20) / 2 : W, 56, 'How to Play', () => { this.homePage = 'help'; }, { size: 24 });
+    if (Game.mode !== 'menu') this.button('home:resume', X + (W + 20) / 2, y + 6, (W - 20) / 2, 56, Challenge.active ? `Resume ${Challenge.lvl.id} ${Challenge.lvl.name}` : 'Resume', () => { this.open = false; }, { size: 24 });
+  },
+  drawHelp(y) {
+    const X = 44, W = S_UI_W, C = this.C, xr = Input.mode === 'xr';
+    this.button('help:back', X, y, 140, 48, '‹ Back', () => { this.homePage = 'main'; }, { size: 22 });
+    this.label(xr ? 'How to play · VR' : 'How to play · Desktop', X + 170, y + 24, 30, C.text, 'left', 700); y += 70;
+    const rows = xr ? [
+      ['Grab', 'Grip button near an item (big items: two hands). Release to drop or throw.'],
+      ['Use', 'Trigger: crack egg, close tongs, squeeze lemon, toggle thermometer °C/°F.'],
+      ['Cut', 'Hold a knife, push the edge down through food on the board. Saw for skins.'],
+      ['Stove', 'Grip a knob and twist your wrist: click-click lights it, then set the flame.'],
+      ['Doors', 'Grip a handle and pull: oven, fridge, microwave. Faucet: lift the lever.'],
+      ['Pour', 'Tilt a pan, bottle or pot past its rim. Shake salt by turning it over.'],
+      ['Cook', 'Check temps with the thermometer or Chef\'s Eye (menu → Settings).'],
+      ['Eat', 'Hold food to your mouth for a bite. Taste card shows doneness & seasoning.'],
+      ['Move', 'Left stick: walk. Right stick: push to teleport, flick to turn (Comfort tab).'],
+      ['Menu', 'Turn your left palm toward your face; Y/B pins it. Point and pull the trigger.'],
+    ] : [
+      ['Look & move', 'Click to capture the mouse. WASD walks, mouse looks, Q/E turns, T teleports.'],
+      ['Grab', 'LMB on an item picks it up; release LMB to drop (flick the mouse to throw).'],
+      ['Use (RMB)', 'Knife: chop where you aim (Shift = crush). Tongs: grab food you aim at.'],
+      ['', 'Salt / pepper / spices: season what you aim at. Thermometer: hold to probe.'],
+      ['Knobs & doors', 'LMB-drag a knob to twist it; LMB-drag a door handle to open it.'],
+      ['Pour', 'Hold R and move the mouse to tilt the held pan/bottle. Wheel: hold nearer/farther.'],
+      ['Tools', '1–9 grab a tool instantly (1 knife, 5 spatula, 6 tongs…), 0 empties your hand.'],
+      ['Check', 'X: Chef\'s Eye X-ray (temps, browning). B: take a bite of the held food.'],
+      ['Menu', 'M or Tab opens this menu. P toggles the performance HUD.'],
+    ];
+    for (const [k, v] of rows) { if (k) this.label(k, X, y + 16, 23, C.accent, 'left', 700); const c = this.ctx; let fs = 21; c.font = `500 ${fs}px system-ui, sans-serif`; while (c.measureText(v).width > W - 200 && fs > 15) { fs--; c.font = `500 ${fs}px system-ui, sans-serif`; } this.label(v, X + 195, y + 16, fs, C.text, 'left', 500); y += 52; }
+    this.label('New here? Try Challenge → Tier 1: the tutorials walk you through everything.', X, y + 24, 22, C.on, 'left', 600);
   },
   drawChallenges(y) {
     const X = 44, W = S_UI_W, C = this.C;
@@ -9184,6 +9231,33 @@ const Ambience = {
     if (t > this.nextCar) { this.nextCar = t + 15 + Math.random() * 25; this.street.gain.setTargetAtTime(0.05, t, 1.2); this.street.gain.setTargetAtTime(0.015, t + 3, 1.5); }
   },
 };
+
+/* ===================================== [POUR AUDIO] ================================= */
+// Pouring: a flowing-stream voice at the landing point (burbly into liquid, splashy on hard surfaces), plus glugs
+// from narrow-necked bottles as air bubbles back in.
+const PourAudio = {
+  voices: new Map(),
+  update(dt) {
+    const A = AudioSys; if (!A.ready || !A.cook) return; const c = A.ctx, t = c.currentTime;
+    for (const v of Liquids.vessels) {
+      const on = v.pourT !== undefined && Sim.clock - v.pourT < 0.15 && v.pourQ > 0;
+      let vo = this.voices.get(v);
+      if (!vo && !on) continue;
+      if (!vo) {
+        const src = c.createBufferSource(); src.buffer = A.noise; src.loop = true; const bp = c.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.1;
+        const g = c.createGain(); g.gain.value = 0; const pan = new PannerNode(c, { panningModel: 'HRTF', refDistance: 0.4, rolloffFactor: 1.2 });
+        const lfo = c.createOscillator(); lfo.frequency.value = 9; const lg = c.createGain(); lg.gain.value = 0; lfo.connect(lg); lg.connect(g.gain); lfo.start();
+        src.connect(bp); bp.connect(g); g.connect(pan); pan.connect(A.sfx); src.start(0, Math.random()); vo = { src, bp, g, pan, lfo, lg, glugT: 0 }; this.voices.set(v, vo);
+      }
+      const lvl = on ? clamp(Math.sqrt(v.pourQ / 2e-5), 0.15, 1) : 0;
+      vo.g.gain.setTargetAtTime(lvl * 0.22, t, on ? 0.03 : 0.12); vo.lg.gain.setTargetAtTime(lvl * (v.pourWet ? 0.12 : 0.04), t, 0.05);
+      vo.bp.frequency.setTargetAtTime(v.pourWet ? 650 + lvl * 400 : 1800 + lvl * 900, t, 0.05); vo.lfo.frequency.value = v.pourWet ? 11 : 23;
+      if (on) { vo.pan.positionX.setTargetAtTime(v.pourAt.x, t, 0.02); vo.pan.positionY.setTargetAtTime(v.pourAt.y, t, 0.02); vo.pan.positionZ.setTargetAtTime(v.pourAt.z, t, 0.02);
+        vo.glugT -= dt; if (v.vspec && v.vspec.neck && vo.glugT <= 0) { vo.glugT = 0.12 + Math.random() * 0.16; const gv = A.voice(v.lq ? v.lq.lip : v.renderPos, 0.2, 0.3); if (gv) { const f = 170 + Math.random() * 90; A.osc(gv, 'sine', f, t, 0.09, 0.4, 0.08, f * 0.7); A.burst(gv, t, 0.05, 0.15, 'bandpass', 600, 2); } } }
+      if (!on && vo.idle === undefined) vo.idle = 0; if (!on) { vo.idle += dt; if (vo.idle > 1) { try { vo.src.stop(); vo.lfo.stop(); vo.pan.disconnect(); } catch (e) { /* gone */ } this.voices.delete(v); } } else vo.idle = 0;
+    }
+  },
+};
 /* ======================================= [SIM] ====================================== */
 // Fixed-step simulation clock. The thermal/cooking model (M2+) plugs in here; M1 runs timers.
 const Sim = {
@@ -9343,7 +9417,11 @@ const Desktop = {
     }
     if (hover !== this.hoverProp) { if (this.hoverProp) this.hoverProp.setHighlight(false); this.hoverProp = hover; }
     if (hover) hover.setHighlight(true);
-    const knobHot = !held && !UI.open && (!!this.knobAtCrosshair() || !!this.ctrlAtCrosshair());
+    const kh = !held && !UI.open ? this.knobAtCrosshair() : null, ch = !held && !UI.open && !kh ? this.ctrlAtCrosshair() : null, knobHot = !!kh || !!ch;
+    // Crosshair label: what you're pointing at and what the mouse does to it.
+    const label = !this.locked ? '' : kh ? (kh.oven ? 'Dial: LMB-drag to turn' : 'Burner knob: LMB-drag to twist') : ch ? `${ch.name}: LMB-drag` + (ch.click ? ' / click' : '')
+      : hover ? `${hover.fdef ? (hover.def.name || hover.fdef.name) : hover.def.name}: LMB grab` : held ? `${dom.held.def.name}${dom.held.def.knife ? ': RMB chop' : dom.held.def.tongs ? ': RMB grab food' : dom.held.key === 'thermometer' ? ': hold RMB to probe' : SHAKERS.has(dom.held.key) ? ': RMB season' : dom.held.def.use ? ': RMB use' : ''}` : '';
+    if (label !== this._label) { this._label = label; $('hoverName').textContent = label; }
     if ((!!hover || knobHot) !== this._hot) { this._hot = !!hover || knobHot; $('crosshair').classList.toggle('hot', this._hot); }
   },
   // Ray from the view centre against the stove knobs (they are not physics bodies).
@@ -9527,7 +9605,7 @@ const XRSession = {
     Input.mode = 'xr'; Main.started = true;
     if (document.pointerLockElement) document.exitPointerLock();
     camera.position.set(0, 0, 0); camera.rotation.set(0, 0, 0);
-    $('overlay').classList.add('hidden'); $('hint').style.display = 'none'; $('crosshair').style.display = 'none';
+    $('overlay').classList.add('hidden'); $('hint').style.display = 'none'; $('crosshair').style.display = 'none'; $('hoverName').textContent = '';
     for (const h of HANDS) { if (h.held) Grab.release(h, false); h.setActive(false); }
     UI.open = false; Game.onStart();
   },
@@ -9671,7 +9749,7 @@ async function boot() {
       oven: Oven.update.bind(Oven), liquids: Liquids.update.bind(Liquids),
       m4pre: (dt) => { Fryer.update(dt); Utensils.update(dt); Fridge.update(dt); Microwave.update(dt); Toaster.update(dt); Mixer.update(dt); Bakery.update(dt); Kitchenware.update(dt); ShadowLOD.update(); },
       quality: Quality.update.bind(Quality),
-      m5: (dt) => { Game.update(dt); Challenge.update(dt); RecipeBook.update(dt); Ghost.update(dt); Mentor.update(dt); Safety.update(dt); Pass.update(dt); Bubble.update(dt); Shimmer.update(dt); Mix.update(); },
+      m5: (dt) => { Game.update(dt); Challenge.update(dt); RecipeBook.update(dt); Ghost.update(dt); Mentor.update(dt); Safety.update(dt); Pass.update(dt); Bubble.update(dt); Shimmer.update(dt); Mix.update(); PourAudio.update(dt); },
       m4: (dt) => { Grill.update(dt); Fire.update(dt); FX.update(dt); Seasoning.update(); Eating.update(dt); TasteCard.update(dt); Reaction.update(dt); Kettle.update(dt); },
     });
     renderer.xr.addEventListener('sessionstart', () => XRSession.onStart());

@@ -156,6 +156,14 @@ This pass came out of real-input playtests that drive the game the way a player 
   - Sizzle with crackle grain and a bubbling layer.
   - Ambience: ticking wall clock, birds and a distant street through the window.
   - Footsteps on the plank floor.
+- **Pass 3:**
+  - New *How to Play* page in the menu with every control for desktop and VR.
+  - On desktop, the name of whatever the crosshair is on shows under it.
+  - In VR, a guide laser appears while a menu or board is open.
+  - Shaker-style cabinet doors and drawer fronts.
+  - Pouring is audible: a liquid stream at the landing point, plus glugs from bottles.
+  - Soft wooden "tock" for UI clicks.
+  - Tongs on desktop reach the target at any frame rate.
 
 ## Code map (inside `index.html`)
 
