@@ -87,7 +87,7 @@ a pass/fail table.
   streams, transfers, puddles, oils with smoke points and shimmer), butter (melt, foam, noisette, burnt,
   basting), pan crowding with pooled juices, and Leidenfrost droplets
 - [x] **M4A**:
-  - Deep fryer: 18 L, thermostat, gauge, basket with hang-to-drain, oil drop and recovery, crackle and spatter.
+  - Deep fryer: 8 L, thermostat, gauge, basket with hang-to-drain, oil drop and recovery, crackle and spatter.
   - Grill: bars plus radiant flames, per-face sear-mark stripes, fat flare-ups, embers.
   - Dredging: flour → egg → crumbs as ordered coating layers that brown and crisp.
   - Grease fires: water flare-up; lid, baking soda or extinguisher puts them out.
@@ -111,7 +111,16 @@ a pass/fail table.
   - Tier 4 adds incidents: burner failure and smoke alarm.
   - Food safety: raw chicken contaminates boards, knives and hands until they're washed at the sink. The smoke alarm penalises burnt food.
   - Chef mentor: context-aware lines with a cooldown.
-- [ ] M6: polish, particles, audio mix, performance pass
+- [x] **M6**:
+  - Perf HUD (P / Settings): fps, worst frame, draw calls, triangles, live food pieces, particles, and sim / physics / CPU / submit ms.
+  - Adaptive quality in VR: the shadow map updates every other frame, the shadow-caster radius shrinks and particles thin out, then everything recovers once there's headroom.
+  - Hot-path fixes: dredge lookup once per tick, and "thermal sleep" for idle food. With 100 food pieces (40 of them cooking) the cooking tick fell from 15.4 ms to about 2.3 ms.
+  - Appetizing shading: crust relief that builds with browning, an oily sheen from pans and the fryer, and a warm subsurface tint on raw red meat and fish.
+  - New particles: juice drips when cutting cooked meat, and flour puffs while kneading. Grease spatter now falls under gravity.
+  - Heat shimmer over very hot pans (toggleable). Render-scale setting.
+  - Audio mix: cooking, sfx, UI and music buses into a master limiter; the mentor's voice ducks the cooking bed; optional procedural jazz radio.
+  - Comfort audit: every locomotion mode on the left hand, right hand and both hands, plus all 50 L×R×dominant-hand combinations, with no stick conflicts.
+  - `?test` adds live checks for §13.4 (Challenge scorecard), §13.8 and §13.10.
 
 ## Code map (inside `index.html`)
 
@@ -119,7 +128,7 @@ Search for the banner comments: `[CONFIG] [UTIL] [SAVE] [RENDERER] [TEXTURES] [A
 [THERMAL] [KITCHEN] [PROPS] [FOOD] [STOVE] [SIZZLE] [PARTICLES] [CHEF'S EYE] [TEST MODE] [CONTROLS] [OVEN]
 [THERMOMETER] [LIQUIDS] [SINK] [BOIL AUDIO] [FRYER] [GRILL] [FIRE] [SEASONING] [DREDGE] [EATING] [UTENSILS]
 [APPLIANCES] [BAKERY] [DAIRY, FRUIT & EGGS] [SCORING] [INPUT] [HANDS] [GRAB]
-[LOCOMOTION] [UI] [SIM] [DESKTOP] [PERFHUD] [PROGRESS] [COSMETICS] [MENTOR] [SAFETY] [GAME] [PASS] [CHALLENGE] [RECIPES] [XR SESSION] [MAIN]`.
+[LOCOMOTION] [UI] [SIM] [DESKTOP] [PERFHUD] [PROGRESS] [COSMETICS] [MENTOR] [SAFETY] [GAME] [PASS] [CHALLENGE] [RECIPES] [POLISH] [MIX] [JAZZ] [XR SESSION] [MAIN]`.
 
 - `[THERMAL]` is pure JS (no rendering or physics): `THERMO` constants, data-driven `FOOD_DEFS` and `PAN_DEFS`,
   the `Thermo` finite-volume food model, the two-node `PanThermo`, vessel `Contents` (water, oil, butter, salt,
@@ -134,6 +143,6 @@ Search for the banner comments: `[CONFIG] [UTIL] [SAVE] [RENDERER] [TEXTURES] [A
   and the edge toward −Y, so snap grips need no per-tool offsets.
 - Opaque surfaces share one "uber" material: a 2048² procedural atlas plus per-vertex roughness, metalness and
   emissive. The static kitchen is 2 draw calls and each prop is 1. Food inside the shut fridge isn't drawn, and
-  only props within about 1.9 m of the player cast shadows. The M5 scene measures about 149 draws per frame
-  at the spawn point.
+  only props within about 1.9 m of the player cast shadows. Measured draw calls: 106 at the spawn point, 23–52 at the stations,
+  and 86 with 40 food pieces cooking on 3 burners plus the fryer.
 - `window.MEP` exposes the main systems for console debugging.

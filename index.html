@@ -110,7 +110,7 @@ const CONFIG = {
     hz: 10,                 // Hz — cooking / timer simulation fixed step (thermal model arrives in M2)
   },
   render: {
-    foveation: 1,           // 0..1 — fixed foveated rendering strength
+    foveation: 1,           // 0..1 — fixed foveated rendering strength (Quest: max FFR; edges are blurred by the lenses anyway)
     framebufferScale: 1.0,  // × — XR framebuffer scale factor
     shadowMapSize: 1024,    // px — single directional shadow map
     maxPixelRatio: 2,       // desktop only
@@ -179,6 +179,12 @@ const CONFIG = {
     peekOpenDelay: 0.3,     // s
     peekCloseDelay: 0.45,   // s
     laserMax: 3.0,          // m
+  },
+  mix: {                    // bus gains (linear) into the master limiter
+    cook: 0.75,             // sizzle, boil, fryer, fire
+    sfx: 0.9,               // impacts, tools, appliances
+    ui: 0.6,                // clicks, mentor voice
+    music: 0.35,            // optional jazz radio (× settings.musicVolume)
   },
   audio: {
     maxVoices: 24,          // concurrent one-shot voices
@@ -249,6 +255,11 @@ const DEFAULT_SETTINGS = {
   forceGrab: true,
   shadows: true,
   perfHud: false,
+  heatShimmer: true,
+  renderScale: 1.0,         // × XR framebuffer scale (applied when entering VR)
+  jazz: false,
+  musicVolume: 0.5,
+  smokeAlarm: false,
   refresh: 72,              // Hz — requested XR refresh rate
   glove: 0,                 // palette index
   chefsEye: false,          // X-ray food overlay
@@ -790,15 +801,15 @@ const AudioSys = {
     } else { L.setPosition(px, py, pz); L.setOrientation(fx, fy, fz, ux, uy, uz); }
   },
   // Returns an input node spatialized at pos (or non-spatial when pos is null); null if voice budget exhausted.
-  voice(pos, dur, gain = 1) {
+  voice(pos, dur, gain = 1, bus = null) {
     if (!this.ready || this.voices >= CONFIG.audio.maxVoices) return null;
     const c = this.ctx, g = c.createGain(); g.gain.value = gain;
     let out = g;
     if (pos) {
       const p = new PannerNode(c, { panningModel: 'HRTF', distanceModel: 'inverse', refDistance: 0.5, rolloffFactor: 1.1, maxDistance: 25,
         positionX: pos.x, positionY: pos.y, positionZ: pos.z });
-      g.connect(p); p.connect(this.sfx); out = p;
-    } else g.connect(this.sfx);
+      g.connect(p); p.connect(bus || this.sfx); out = p;
+    } else g.connect(bus || this.sfx);
     this.voices++;
     setTimeout(() => { this.voices--; try { g.disconnect(); if (out !== g) out.disconnect(); } catch (e) { /* already gone */ } }, (dur + 0.1) * 1000);
     return g;
@@ -817,8 +828,8 @@ const AudioSys = {
     g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(peak, t0 + 0.003); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
     s.connect(fl); fl.connect(g); g.connect(dst); s.start(t0, Math.random() * 1.5); s.stop(t0 + dur + 0.02);
   },
-  uiClick() { const v = this.voice(null, 0.08, 0.25); if (!v) return; const t = this.ctx.currentTime; this.osc(v, 'sine', 1500, t, 0.05, 0.6, 0.05); },
-  uiTick() { const v = this.voice(null, 0.06, 0.12); if (!v) return; const t = this.ctx.currentTime; this.osc(v, 'triangle', 2200, t, 0.03, 0.4, 0.03); },
+  uiClick() { const v = this.voice(null, 0.08, 0.25, this.ui); if (!v) return; const t = this.ctx.currentTime; this.osc(v, 'sine', 1500, t, 0.05, 0.6, 0.05); },
+  uiTick() { const v = this.voice(null, 0.06, 0.12, this.ui); if (!v) return; const t = this.ctx.currentTime; this.osc(v, 'triangle', 2200, t, 0.03, 0.4, 0.03); },
   grab(pos) { const v = this.voice(pos, 0.1, 0.35); if (!v) return; const t = this.ctx.currentTime; this.burst(v, t, 0.05, 0.5, 'bandpass', 2400, 1.2); },
   whoosh() { const v = this.voice(null, 0.35, 0.22); if (!v) return; const t = this.ctx.currentTime; this.burst(v, t, 0.3, 0.8, 'bandpass', 350, 0.8, 2200); },
   snap() { const v = this.voice(null, 0.08, 0.1); if (!v) return; const t = this.ctx.currentTime; this.burst(v, t, 0.05, 0.6, 'highpass', 3000, 0.7); },
@@ -3561,7 +3572,7 @@ vLoc = transformed; vFd = fd; vLN = objectNormal;`);
 uniform int uLook; uniform float uShape; uniform float uTm[8]; uniform float uN; uniform vec3 uAxO; uniform vec3 uAx; uniform float uL;
 uniform vec3 uBr; uniform vec3 uCh; uniform vec3 uWt; uniform vec4 uX; uniform mat4 uOp; uniform float uSeed; uniform float uHi;
 uniform float uTm2[8]; uniform float uN2; uniform vec3 uAxO2; uniform vec3 uAx2; uniform float uL2; uniform float uShape2; uniform float uHas2;
-uniform vec3 uCoat; uniform vec4 uMk[4]; uniform vec4 uMkP;
+uniform vec3 uCoat; uniform vec4 uMk[4]; uniform vec4 uMkP; uniform float uOil;
 varying vec4 vFd; varying vec3 vLoc; varying vec3 vLN;
 float fh31(vec3 p){ p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
 float fvn(vec3 x){ vec3 i = floor(x), f = fract(x); f = f * f * (3.0 - 2.0 * f);
@@ -3755,6 +3766,12 @@ vec3 brownCol(float b){ vec3 c = mix(vec3(0.80, 0.58, 0.30), vec3(0.52, 0.28, 0.
   col = mix(col, brownCol(br), bw);
   frough = mix(frough, 0.78, bw * 0.6);
   col = mix(col, vec3(0.05, 0.04, 0.035), smoothstep(0.05, 0.9, chr));
+  // M6 polish — crust relief that builds with browning (bumped in the normal stage below), glossy fat/oil
+  // (low roughness where oily), and a warm subsurface-like glow on raw red meat and fish.
+  float gCrust = cutFace ? 0.0 : (bw * 0.85 + chr * 0.6);
+  frough = mix(frough, mix(0.22, 0.4, bw), clamp(uOil, 0.0, 1.0) * (1.0 - smoothstep(0.2, 0.8, chr))); // oily sheen (crust stays semi-matte)
+  if ((uLook == 0 || uLook == 26 || uLook == 10 || uLook == 13 || uLook == 15) && !cutFace) femis += col * 0.035 * (1.0 - smoothstep(46.0, 62.0, tm)) * (1.0 - bw);
+  else if ((uLook == 0 || uLook == 26 || uLook == 13) && cutFace) femis += col * 0.03 * (1.0 - smoothstep(50.0, 64.0, tm));
   // Grill sear marks: dark stripes where the bars touched (per face, up to two crossing sets).
   if (!cutFace) { float mk = ad < -0.5 ? max(markStripe(uMk[0], uMkP.x, uAx), markStripe(uMk[1], uMkP.y, uAx)) : ad > 0.5 ? max(markStripe(uMk[2], uMkP.z, uAx), markStripe(uMk[3], uMkP.w, uAx)) : 0.0;
     col = mix(col, vec3(0.12, 0.055, 0.02), mk); frough = mix(frough, 0.8, mk); }
@@ -3762,6 +3779,16 @@ vec3 brownCol(float b){ vec3 c = mix(vec3(0.80, 0.58, 0.30), vec3(0.52, 0.28, 0.
   femis += vec3(1.0, 0.55, 0.2) * uHi * 0.1;
   diffuseColor = vec4(col, falpha);`)
       .replace('#include <roughnessmap_fragment>', 'float roughnessFactor = frough;')
+      .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+  { // bump-from-noise (screen-space derivatives, like three's perturbNormalArb). Derivatives must be taken in
+    // uniform control flow, so this is computed unconditionally and simply scaled to zero where there's no crust.
+    vec3 q = op * 140.0 + uSeed; float aa = 1.0 - smoothstep(0.15, 0.6, length(fwidth(q)));
+    float hb = ffbm(q) * gCrust * aa * 0.0012; // height in metres: ~1 mm of crust relief
+    vec3 dpx = dFdx(-vViewPosition), dpy = dFdy(-vViewPosition); float dhx = dFdx(hb), dhy = dFdy(hb);
+    vec3 r1 = cross(dpy, normal), r2 = cross(normal, dpx); float det = dot(dpx, r1);
+    vec3 grad = sign(det) * (dhx * r1 + dhy * r2);
+    if (abs(det) > 1e-12) normal = normalize(abs(det) * normal - grad);
+  }`)
       .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += femis;');
   },
   make(look, transparent = false) {
@@ -3771,10 +3798,10 @@ vec3 brownCol(float b){ vec3 c = mix(vec3(0.80, 0.58, 0.30), vec3(0.52, 0.28, 0.
       uAxO: { value: new THREE.Vector3() }, uAx: { value: new THREE.Vector3(0, 1, 0) }, uL: { value: 0.02 },
       uBr: { value: new THREE.Vector3() }, uCh: { value: new THREE.Vector3() }, uWt: { value: new THREE.Vector3() },
       uX: { value: new THREE.Vector4() }, uOp: { value: new THREE.Matrix4() }, uSeed: { value: Math.random() * 50 }, uHi: { value: 0 },
-      uBend: { value: 0 }, uBendMode: { value: 0 }, uCoat: { value: new THREE.Vector3() }, uMk: { value: [new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4()] }, uMkP: { value: new THREE.Vector4() }, uTm2: { value: new Float32Array(8) }, uN2: { value: 2 }, uAxO2: { value: new THREE.Vector3() }, uAx2: { value: new THREE.Vector3(0, 1, 0) }, uL2: { value: 0.02 }, uShape2: { value: 0 }, uHas2: { value: 0 },
+      uBend: { value: 0 }, uBendMode: { value: 0 }, uCoat: { value: new THREE.Vector3() }, uMk: { value: [new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4()] }, uMkP: { value: new THREE.Vector4() }, uOil: { value: 0 }, uTm2: { value: new Float32Array(8) }, uN2: { value: 2 }, uAxO2: { value: new THREE.Vector3() }, uAx2: { value: new THREE.Vector3(0, 1, 0) }, uL2: { value: 0.02 }, uShape2: { value: 0 }, uHas2: { value: 0 },
     };
     m.onBeforeCompile = (sh) => FoodVis.patch(sh, m);
-    m.customProgramCacheKey = () => 'food-v4' + (transparent ? 't' : '');
+    m.customProgramCacheKey = () => 'food-v5' + (transparent ? 't' : '');
     return m;
   },
   // Push a piece's thermal state into its material uniforms.
@@ -3791,6 +3818,7 @@ vec3 brownCol(float b){ vec3 c = mix(vec3(0.80, 0.58, 0.30), vec3(0.52, 0.28, 0.
     u.uBr.value.set(F[0].brown, F[1].brown, F[2].brown); u.uCh.value.set(F[0].char, F[1].char, F[2].char); u.uWt.value.set(F[0].wet, F[1].wet, F[2].wet);
     if (extra) u.uX.value.copy(extra);
     const co = th.coat; if (co) u.uCoat.value.set(co.flour, co.egg, co.crumbs);
+    u.uOil.value = Math.min(1, th.grease / Math.max(1e-4, th.mass) * 10 + (th.oilSheen || 0));
     if (opM) u.uOp.value.copy(opM);
   },
 };
@@ -4567,7 +4595,7 @@ const Foods = {
     // Immersed in a vessel's liquid (pasta in boiling water, food in deep oil): every face exchanges with it.
     p.inLiquid = null;
     const LV = p.holders.length ? null : Liquids.liquidAt(p.renderPos, 0.004);
-    if (LV && LV.contents.isLiquid()) { exposeSubmerged(th, LV.contents); p.inLiquid = LV; p.inPan = null; p.onGrill = false; p.downFace = -1; return; }
+    if (LV && LV.contents.isLiquid()) { if (LV.contents.m.oil > LV.contents.m.water) th.oilSheen = 0.75; exposeSubmerged(th, LV.contents); p.inLiquid = LV; p.inPan = null; p.onGrill = false; p.downFace = -1; return; }
     const up = _fv1.set(0, 1, 0);
     // Face pointing down (slab: ±axis in world vs up)
     let down = 2;
@@ -4592,6 +4620,7 @@ const Foods = {
       }
     }
     p.inPan = pan;
+    { const C = pan && pan.contents, fat = C ? C.m.oil + C.m.butterfat : 0; th.oilSheen = Math.max((th.oilSheen || 0) * 0.995, fat > 0.003 ? 0.55 : 0, pan && p.fdef.fat > 0.1 && th.T[0] > 60 ? 0.4 : 0); }
     p.onGrill = !pan && !p.holders.length && Grill.onGrate(p, lowY);
     const F = th.faces;
     // Contact area of the down face
@@ -4629,13 +4658,25 @@ const Foods = {
     }
   },
   resting(p) { const v = p.body.linvel(); return p.body.isSleeping() || (v.x * v.x + v.y * v.y + v.z * v.z) < 0.01; },
+  quiet(p) {
+    const th = p.th, Ta = Oven.contains(p.renderPos) ? Oven.env.T : ambientAt(p.renderPos);
+    for (let i = 0; i < th.N; i++) if (Math.abs(th.T[i] - Ta) > 0.3) return false;
+    return true;
+  },
   simTick(dt) {
     for (const pp of Stove.pans) { pp.contactArea = 0; pp.foodJ = 0; pp.evap = 0; }
+    Dredge.prepare();
     const all = this._all || (this._all = []); all.length = 0;
     for (const p of this.pieces) all.push(p); for (const p of this.piles) all.push(p);
     for (const p of all) {
       if (!p.alive) continue;
+      // A sleeping body that was already thermally asleep keeps its contact state: skip the physics queries too.
+      if (p.wasQuiet && p.body.isSleeping() && !p.holders.length && this.quiet(p)) { Dredge.check(p, dt); continue; }
+      p.wasQuiet = false;
       this.applyContacts(p);
+      // Thermal sleep: food sitting untouched at its surroundings' temperature (fridge / pantry stock) skips the
+      // finite-volume step entirely — ~60% of pieces in a stocked kitchen. Proofing dough never sleeps.
+      if (!p.inPan && !p.inLiquid && !p.onGrill && !p.isPuddle && !p.toasting && !p.holders.length && !p.fdef.dough && this.quiet(p)) { p.wasQuiet = true; Dredge.check(p, dt); continue; }
       if (p.isPuddle) {
         // Yolk sits on the white: warmed from below by the white, air above.
         const y = p.yolk; y.clearExposure();
@@ -4778,6 +4819,8 @@ const Cutting = {
       if (small) Foods.mince(f);
       else if (!Foods.cut(f, pts[2], bladeN)) continue;
       Safety.afterCut(f, n0);
+      // Cutting cooked meat lets juices run (pink for rare beef, golden for poultry/pork).
+      if (f.fdef.protein && f.th.coreMax > 42 && f.th.juiciness() > 0.5) { const red = f.fdef.doneness === 'beef' && f.th.coreMax < 64, n = Math.round(4 + 6 * f.th.juiciness()); for (let j = 0; j < n; j++) Particles.emitV(red ? 'juice' : 'juiceClear', pts[2].x + (Math.random() - 0.5) * 0.03, pts[2].y - 0.01, pts[2].z + (Math.random() - 0.5) * 0.03, (Math.random() - 0.5) * 0.1, -0.1, (Math.random() - 0.5) * 0.1); }
       if (pitIt) { const pit = Props.spawn('avocadoPit', f.renderPos.clone(), new THREE.Quaternion(), true); if (pit) pit.body.setLinvel({ x: 0, y: 0.5, z: 0 }, true); }
       st.cool = CONFIG.cut.cooldown;
       AudioSys.chop(pts[2], hardness);
@@ -4961,7 +5004,7 @@ const Sizzle = {
     const pk = c.createBiquadFilter(); pk.type = 'peaking'; pk.frequency.value = 4200; pk.Q.value = 0.8; pk.gain.value = 6;
     const g = c.createGain(); g.gain.value = 0;
     const pan = new PannerNode(c, { panningModel: 'HRTF', distanceModel: 'inverse', refDistance: 0.5, rolloffFactor: 1.1 });
-    src.connect(hp); hp.connect(pk); pk.connect(g); g.connect(pan); pan.connect(AudioSys.sfx); src.start(0, Math.random());
+    src.connect(hp); hp.connect(pk); pk.connect(g); g.connect(pan); pan.connect(AudioSys.cook || AudioSys.sfx); src.start(0, Math.random());
     v = { src, hp, pk, g, pan, level: 0, popT: 0 }; this.voices.set(p, v); return v;
   },
   update(dt) {
@@ -4993,7 +5036,7 @@ const Particles = {
   init() {
     const M = this.maxN || CONFIG.particles.max;
     this.max = M; this.pos = new Float32Array(M * 3); this.vel = new Float32Array(M * 3); this.life = new Float32Array(M); this.maxLife = new Float32Array(M);
-    this.s0 = new Float32Array(M); this.s1 = new Float32Array(M); this.col = new Float32Array(M * 4); this.a0 = new Float32Array(M);
+    this.s0 = new Float32Array(M); this.s1 = new Float32Array(M); this.col = new Float32Array(M * 4); this.a0 = new Float32Array(M); this.gr = new Float32Array(M);
     const g = new THREE.PlaneGeometry(1, 1);
     this.iCol = new THREE.InstancedBufferAttribute(new Float32Array(M * 4), 4); this.iCol.setUsage(THREE.DynamicDrawUsage);
     g.setAttribute('iCol', this.iCol);
@@ -5015,7 +5058,7 @@ const Particles = {
     smoke: { col: [0.33, 0.31, 0.3], a: 0.32, life: 3.2, s0: 0.03, s1: 0.26, vy: 0.2, spread: 0.05 },
     salt: { col: [0.97, 0.97, 0.97], a: 0.95, life: 0.45, s0: 0.004, s1: 0.004, vy: -1.3, spread: 0.08 },
     splash: { col: [0.85, 0.92, 0.98], a: 0.5, life: 0.35, s0: 0.01, s1: 0.03, vy: 0.25, spread: 0.3 },
-    spatter: { col: [0.95, 0.85, 0.5], a: 0.8, life: 0.4, s0: 0.004, s1: 0.006, vy: 1.2, spread: 0.9 },
+    spatter: { g: 4, col: [0.95, 0.85, 0.5], a: 0.8, life: 0.4, s0: 0.004, s1: 0.006, vy: 1.2, spread: 0.9 },
     yeast: { col: [0.78, 0.66, 0.45], a: 0.95, life: 0.45, s0: 0.0035, s1: 0.0035, vy: -1.3, spread: 0.08 },
     pepper: { col: [0.12, 0.1, 0.08], a: 0.95, life: 0.45, s0: 0.003, s1: 0.003, vy: -1.3, spread: 0.08 },
     paprika: { col: [0.75, 0.18, 0.08], a: 0.95, life: 0.45, s0: 0.003, s1: 0.003, vy: -1.3, spread: 0.08 },
@@ -5023,6 +5066,8 @@ const Particles = {
     soda: { col: [0.98, 0.98, 0.98], a: 0.7, life: 0.8, s0: 0.01, s1: 0.05, vy: -0.9, spread: 0.25 },
     foam: { col: [0.95, 0.96, 1.0], a: 0.55, life: 0.9, s0: 0.03, s1: 0.2, vy: 0.1, spread: 0.3 },
     flour: { col: [0.97, 0.96, 0.93], a: 0.35, life: 1.1, s0: 0.02, s1: 0.12, vy: 0.08, spread: 0.12 },
+    juice: { col: [0.62, 0.16, 0.13], a: 0.85, life: 0.7, s0: 0.004, s1: 0.003, vy: -0.1, spread: 0.02, g: 3.5 },
+    juiceClear: { col: [0.86, 0.74, 0.46], a: 0.7, life: 0.7, s0: 0.004, s1: 0.003, vy: -0.1, spread: 0.02, g: 3.5 },
     // additive (FX) types
     fire: { col: [1.0, 0.45, 0.1], a: 0.9, life: 0.7, s0: 0.08, s1: 0.02, vy: 0.9, spread: 0.12 },
     fireball: { col: [1.0, 0.5, 0.12], a: 1.0, life: 1.1, s0: 0.25, s1: 0.05, vy: 1.8, spread: 0.9 },
@@ -5031,13 +5076,14 @@ const Particles = {
     sparkle: { col: [1.0, 0.9, 0.55], a: 0.9, life: 0.8, s0: 0.012, s1: 0.0, vy: 0.3, spread: 0.3 },
   },
   emitV(type, x, y, z, vx, vy, vz) { const i = this.n; this.emit(type, x, y, z); if (this.n > i) { this.vel[i * 3] = vx; this.vel[i * 3 + 1] = vy; this.vel[i * 3 + 2] = vz; } },
+  cap: 1, // adaptive quality thins particles (1 = all)
   emit(type, x, y, z) {
-    if (!this.pos || this.n >= this.max) return;
+    if (!this.pos || this.n >= this.max || (this.cap < 1 && Math.random() > this.cap)) return;
     const T = this.types[type], i = this.n++;
     this.pos[i * 3] = x; this.pos[i * 3 + 1] = y; this.pos[i * 3 + 2] = z;
     this.vel[i * 3] = (Math.random() - 0.5) * T.spread; this.vel[i * 3 + 1] = T.vy * (0.7 + Math.random() * 0.6); this.vel[i * 3 + 2] = (Math.random() - 0.5) * T.spread;
     this.life[i] = 0; this.maxLife[i] = T.life * (0.75 + Math.random() * 0.5); this.s0[i] = T.s0; this.s1[i] = T.s1 * (0.8 + Math.random() * 0.4);
-    this.col[i * 4] = T.col[0]; this.col[i * 4 + 1] = T.col[1]; this.col[i * 4 + 2] = T.col[2]; this.a0[i] = T.a;
+    this.col[i * 4] = T.col[0]; this.col[i * 4 + 1] = T.col[1]; this.col[i * 4 + 2] = T.col[2]; this.a0[i] = T.a; this.gr[i] = T.g || 0;
   },
   update(dt) {
     let i = 0;
@@ -5047,11 +5093,11 @@ const Particles = {
       if (L[i] >= ML[i]) { // swap-remove
         const j = --this.n;
         P[i * 3] = P[j * 3]; P[i * 3 + 1] = P[j * 3 + 1]; P[i * 3 + 2] = P[j * 3 + 2]; V[i * 3] = V[j * 3]; V[i * 3 + 1] = V[j * 3 + 1]; V[i * 3 + 2] = V[j * 3 + 2];
-        L[i] = L[j]; ML[i] = ML[j]; this.s0[i] = this.s0[j]; this.s1[i] = this.s1[j]; this.a0[i] = this.a0[j];
+        L[i] = L[j]; ML[i] = ML[j]; this.gr[i] = this.gr[j]; this.s0[i] = this.s0[j]; this.s1[i] = this.s1[j]; this.a0[i] = this.a0[j];
         C[i * 4] = C[j * 4]; C[i * 4 + 1] = C[j * 4 + 1]; C[i * 4 + 2] = C[j * 4 + 2]; continue;
       }
       const t = L[i] / ML[i];
-      V[i * 3] += (Math.sin(L[i] * 3 + i) * 0.04) * dt; V[i * 3 + 2] += (Math.cos(L[i] * 2.7 + i) * 0.04) * dt; V[i * 3 + 1] *= 1 - dt * 0.3;
+      V[i * 3] += (Math.sin(L[i] * 3 + i) * 0.04) * dt; V[i * 3 + 2] += (Math.cos(L[i] * 2.7 + i) * 0.04) * dt; V[i * 3 + 1] *= 1 - dt * 0.3; V[i * 3 + 1] -= this.gr[i] * dt;
       P[i * 3] += V[i * 3] * dt; P[i * 3 + 1] += V[i * 3 + 1] * dt; P[i * 3 + 2] += V[i * 3 + 2] * dt;
       const s = lerp(this.s0[i], this.s1[i], Math.sqrt(t));
       _m1.makeScale(s, s, s); _m1.setPosition(P[i * 3], P[i * 3 + 1], P[i * 3 + 2]); this.mesh.setMatrixAt(i, _m1);
@@ -5232,12 +5278,45 @@ const TestMode = {
     return res;
   },
   runtime(el, res) {
-    const rows = [this.biteTest()];
+    const rows = [this.biteTest(), this.challengeTest(), this.locoTest(), this.loadTest()];
+    Challenge.quit(true); Props.resetKitchen(); Game.mode = 'menu';
     for (const r of rows) res.push(r);
     const pass = res.filter((r) => r.pass).length, h = el.querySelector('h2 span'); if (h) { h.textContent = `${pass}/${res.length} passed`; h.style.color = pass === res.length ? '#8f8' : '#f77'; }
     const tb = el.querySelector('table');
     for (const r of rows) tb.insertAdjacentHTML('beforeend', `<tr style="border-top:1px solid #3d2f24"><td style="padding:8px;font-weight:800;color:${r.pass ? '#8f8' : '#f77'}">${r.pass ? 'PASS' : 'FAIL'}</td><td style="padding:8px;white-space:nowrap;color:#e0a458">${r.id}</td><td style="padding:8px"><b>${r.name}</b><br><span style="color:#b7a58f">${r.detail}</span></td><td style="padding:8px;color:#b7a58f">${r.ms.toFixed(0)} ms</td></tr>`);
     window.MEP_TEST_DONE = true;
+  },
+  // §13.4 through the real Challenge pipeline: level 1-5 ticket, chicken plated on the pass, judged by the bell logic.
+  challengeTest() {
+    const t0 = performance.now(), out = [];
+    for (const core of [65, 74]) {
+      Challenge.start('1-5'); const t = Challenge.tickets[0]; t.printed = true; t.id = 1;
+      const plate = Props.list.find((p) => p.key === 'plate'), ch = Foods.spawn('chickenBreast', new THREE.Vector3(-2.65, 1.0, 0.5), new THREE.Quaternion(), true, 4), th = ch.th;
+      th.T.fill(core); th.Tmax.fill(core); th.salt = th.mass * 0.008; for (const f of th.faces) if (f.area > 0) { f.brown = 0.6; f.wet = 0; }
+      const r = Challenge.judge(t, [{ v: plate, comps: [{ key: 'chickenBreast', th, piece: ch }], stage: null }]); out.push(r); Props.remove(ch);
+    }
+    return { id: 'rt:13.4', name: 'Challenge mode: chicken at 65°C fails food safety, at 74°C passes (live scorecard)', pass: out[0].total === 0 && out[0].dishes[0].failed && out[1].total >= 60,
+      detail: `65°C → ${out[0].total}/100 (${out[0].dishes[0].notes[0]}); 74°C → ${out[1].total}/100`, ms: performance.now() - t0 };
+  },
+  // §13.8: every locomotion function on the left only, right only, and both hands resolves to non-conflicting axes.
+  locoTest() {
+    const t0 = performance.now(), F = ['move', 'teleport', 'turn', 'teleturn', 'none']; let n = 0; const bad = [];
+    for (const a of F) for (const b of F) for (const dominant of ['left', 'right']) {
+      const L = resolveLayout({ stickL: a, stickR: b, dominant }); n++;
+      for (const r of [L.left, L.right]) if ((r.move === 'xy' && r.turn) || (r.move && r.teleport)) bad.push(`${a}/${b}`);
+      if (a === b && a === 'move' && !(L.left.turn || L.right.turn)) bad.push('no turn with move/move');
+    }
+    return { id: 'rt:13.8', name: 'Locomotion: every mode on left / right / both hands without stick conflicts', pass: !bad.length, detail: `${n} combinations (L × R × dominant hand) resolved; conflicts: ${bad.length ? bad.join(', ') : 'none'} (live stick tests: comfort.js)`, ms: performance.now() - t0 };
+  },
+  // §13.10 budget check: 40 extra pieces cooking in the pans; time the cooking tick (10 Hz) on this device.
+  loadTest() {
+    const t0 = performance.now(), added = [], pans = Stove.pans.filter((p) => p.lq).slice(0, 4);
+    for (let i = 0; i < 40; i++) { const pan = pans[i % pans.length]; const p = Foods.spawn('mushroom', pan.lq.B.clone().add(new THREE.Vector3(Math.cos(i) * 0.06, 0.02, Math.sin(i) * 0.06)), new THREE.Quaternion(), true, 4); p.th.T.fill(60); added.push(p); }
+    for (const p of Stove.pans) p.thermo.T = 200;
+    const t1 = performance.now(); for (let i = 0; i < 10; i++) { Foods.simTick(0.1); Stove.simTick(0.1); Liquids.simTick(0.1); Fryer.simTick(0.1); } const tick = (performance.now() - t1) / 10;
+    for (const p of added) Props.remove(p);
+    const perFrame = tick * CONFIG.sim.hz / 72;
+    return { id: 'rt:13.10', name: 'Load: +40 food pieces cooking — cooking-tick CPU cost vs the 72 Hz budget', pass: tick < 8, detail: `cooking tick ${tick.toFixed(2)} ms at ${Foods.pieces.length + 40} pieces (≈${perFrame.toFixed(2)} ms/frame amortised of 13.9); last frame ${Main.calls} draw calls`, ms: performance.now() - t0 };
   },
   // §13.9: bite several foods until they are gone; the taste card must report each one's real state.
   biteTest() {
@@ -6013,7 +6092,7 @@ const BoilAudio = {
         const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 420; lp.Q.value = 3;
         const g = c.createGain(); g.gain.value = 0;
         const pan = new PannerNode(c, { panningModel: 'HRTF', distanceModel: 'inverse', refDistance: 0.5, rolloffFactor: 1.1 });
-        src.connect(lp); lp.connect(g); g.connect(pan); pan.connect(AudioSys.sfx); src.start(0, Math.random());
+        src.connect(lp); lp.connect(g); g.connect(pan); pan.connect(AudioSys.cook || AudioSys.sfx); src.start(0, Math.random());
         voice = { src, g, lp, pan }; this.voices.set(v, voice);
       }
       const bub = lvl * (0.55 + 0.45 * Math.random());
@@ -6118,7 +6197,7 @@ const Fryer = {
       const hp = c.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 2500;
       const g = c.createGain(); g.gain.value = 0;
       const pan = new PannerNode(c, { panningModel: 'HRTF', distanceModel: 'inverse', refDistance: 0.6, rolloffFactor: 1.1, positionX: this.vessel.renderPos.x, positionY: CONFIG.kitchen.counterTop, positionZ: this.vessel.renderPos.z });
-      src.connect(hp); hp.connect(g); g.connect(pan); pan.connect(AudioSys.sfx); src.start();
+      src.connect(hp); hp.connect(g); g.connect(pan); pan.connect(AudioSys.cook || AudioSys.sfx); src.start();
       this.voice = { g };
     }
     this.voice.g.gain.setTargetAtTime(level * 0.4 * (0.6 + 0.4 * Math.random()), t, 0.03);
@@ -6238,7 +6317,7 @@ const Fire = {
       const src = c.createBufferSource(); src.buffer = AudioSys.noise; src.loop = true;
       const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 600; const g = c.createGain(); g.gain.value = 0;
       const pan = new PannerNode(c, { panningModel: 'HRTF', distanceModel: 'inverse', refDistance: 0.8, rolloffFactor: 1, positionX: f.pos.x, positionY: f.pos.y, positionZ: f.pos.z });
-      src.connect(lp); lp.connect(g); g.connect(pan); pan.connect(AudioSys.sfx); src.start(); f.voice = { src, g, lp };
+      src.connect(lp); lp.connect(g); g.connect(pan); pan.connect(AudioSys.cook || AudioSys.sfx); src.start(); f.voice = { src, g, lp };
     }
     f.voice.g.gain.setTargetAtTime(Math.min(0.8, sz * 0.35), c.currentTime, 0.05); f.voice.lp.frequency.setTargetAtTime(400 + sz * 500, c.currentTime, 0.1);
   },
@@ -6302,13 +6381,21 @@ const Seasoning = {
 // Dredging station: dipping food into flour, then egg wash, then breadcrumbs builds ordered coating layers on its
 // thermal state. Flour dries the surface, egg wets it (so crumbs stick), crumbs brown fast and fry up crisp.
 const Dredge = {
-  kinds: ['flour', 'egg', 'crumbs'],
-  check(p, dt) {
-    if (!p.th || p.isPile) return;
+  kinds: ['flour', 'egg', 'crumbs'], vs: [], ks: [],
+  // Once per cooking tick: which vessels currently hold a dredge (flour / egg wash / crumbs). Scanning every vessel
+  // (and summing its contents) per food piece cost ~13 ms per tick with 100 pieces.
+  prepare() {
+    this.vs.length = 0; this.ks.length = 0;
     for (const v of Liquids.vessels) {
-      const C = v.contents; if (!v.lq || C.mass < 0.01) continue;
-      let kind = null; for (const k of this.kinds) if (C.m[k] > 0.5 * C.mass) kind = k;
-      if (!kind || !Liquids.inside(v, p.renderPos, 0.01) || p.renderPos.y > v.lq.surfY + 0.02) continue;
+      const C = v.contents; if (!v.lq) continue; const M = C.mass; if (M < 0.01) continue;
+      for (const k of this.kinds) if (C.m[k] > 0.5 * M) { this.vs.push(v); this.ks.push(k); break; }
+    }
+  },
+  check(p, dt) {
+    if (!p.th || p.isPile || !this.vs.length) return;
+    for (let i = 0; i < this.vs.length; i++) {
+      const v = this.vs[i], C = v.contents, kind = this.ks[i];
+      if (!Liquids.inside(v, p.renderPos, 0.01) || p.renderPos.y > v.lq.surfY + 0.02) continue;
       const co = p.th.coat, order = p.coatOrder || (p.coatOrder = []);
       const cap = kind === 'crumbs' ? (co.egg > 0.5 ? 1 : 0.3) : 1, before = co[kind];
       co[kind] = Math.min(cap, co[kind] + dt * 2.5);
@@ -6803,6 +6890,7 @@ const Bakery = {
   },
   knead(p) {
     const c = p.th.cook; c.gluten = Math.min(1, (c.gluten || 0) + 0.035); p.kneads = (p.kneads || 0) + 1; this.squish(p, 1);
+    for (let i = 0; i < 4; i++) Particles.emit('flour', p.renderPos.x + (Math.random() - 0.5) * 0.08, p.renderPos.y, p.renderPos.z + (Math.random() - 0.5) * 0.08); // flour puffs
     AudioSys.burst && this.thud(p); for (const h of p.holders) if (h.side) haptic(h.side, 0.3, 40);
     if (p.kneads === 8) toast('Knead until smooth and springy (Chef\'s Eye shows gluten)', 1800);
   },
@@ -6918,7 +7006,7 @@ const Kitchenware = {
     for (const g of Props.list) {
       if (g.key !== 'grater' || !g.alive) continue;
       for (const h of HANDS) {
-        const c = h.held; if (!c || !c.fdef || !c.fdef.cheese || c.renderPos.distanceTo(g.renderPos.clone().add(_v1.set(0, 0.11, 0))) > 0.09) continue;
+        const c = h.held; if (!c || !c.fdef || !c.fdef.cheese || c.renderPos.distanceTo(_v2.copy(g.renderPos).add(_v1.set(0, 0.11, 0))) > 0.09) continue;
         if (h.vel.y < -0.25) {
           c.gAcc = (c.gAcc || 0) + dt * -h.vel.y; if (c.gAcc < 0.05) continue; c.gAcc = 0;
           const dv = Math.min(c.volume * 0.08, 1.2e-6); c.volume -= dv; c.th.mass *= 1 - dv / (c.volume + dv); c.meshes[0].scale.multiplyScalar(Math.cbrt(1 - dv / (c.volume + dv)));
@@ -8002,7 +8090,16 @@ const UI = {
     this.toggle('chefsEye', X, y, half, "Chef's Eye (X-ray)", s.chefsEye, (v) => this.set('chefsEye', v));
     this.label('Units', X2, y + 28, 26, this.C.muted);
     this.segment('unit', X2 + 120, y + 4, half - 120, 48, [{ v: 'C', l: '°C' }, { v: 'F', l: '°F' }], s.tempUnit, (v) => this.set('tempUnit', v));
-    y += 74;
+    y += 68;
+    this.toggle('shimmer', X, y, half, 'Heat shimmer', s.heatShimmer, (v) => this.set('heatShimmer', v));
+    this.toggle('jazz', X2, y, half, 'Jazz radio', s.jazz, (v) => this.set('jazz', v));
+    y += 72;
+    this.slider('musicVol', X, y - 6, half, 'Music volume', s.musicVolume, 0, 1, 0.05, (v) => Math.round(v * 100) + '%', (v) => this.set('musicVolume', v));
+    this.toggle('alarmSb', X2, y, half, 'Smoke alarm (Sandbox)', s.smokeAlarm, (v) => this.set('smokeAlarm', v));
+    y += 78;
+    this.label('Render scale', X, y + 24, 24, this.C.muted);
+    this.segment('rs', X + 170, y, half - 170, 48, [0.8, 0.9, 1.0].map((v) => ({ v, l: v.toFixed(1) + '×' })), s.renderScale, (v) => { this.set('renderScale', v); toast('Applies next time you enter VR', 1500); }, 20);
+    y += 64;
     this.label('Glove colour', X, y + 24, 26, this.C.muted);
     GLOVE_COLORS.forEach((col, i) => {
       const bx = X + 200 + i * 86, id = 'glove' + i;
@@ -8012,14 +8109,9 @@ const UI = {
     });
     y += 84;
     this.button('resetSettings', X, y, 300, 58, 'Reset settings', () => { Object.assign(settings, DEFAULT_SETTINGS); Loco.relayout(); settingsChanged(); }, { size: 24 });
-    y += 80;
+    y += 72;
     this.label('Controls', X, y, 26, this.C.accent, 'left', 700);
-    const lines = ['Grip: grab. Trigger: use held item (peel onion, crack egg, close tongs) / click UI.',
-      'Cut: push a knife edge down through food. Flat of the blade crushes garlic.',
-      'Stove: grip a knob and twist your wrist (off → HI → LO). Oven: dials left & right, pull the door handle.',
-      'Faucet: lift the lever (swing it for hot/cold). Tilt any vessel to pour. Flick wet hands to throw droplets.',
-      'Eat: hold food at your mouth. Salt cellar: trigger near it for a pinch, release to sprinkle. Grill & fryer knobs twist.',
-      'Point + grip + flick = force grab. Palm to face opens this menu; Y/B pins it.'];
+    const lines = ['Grip grabs · trigger uses the held item / clicks UI · knife edge down to cut · twist knobs.', 'Palm to face opens this menu; Y/B pins it. Full controls: README.'];
     lines.forEach((t, i) => this.label(t, X, y + 36 + i * 32, 20, this.C.muted, 'left', 500));
   },
   drawSpawn(y) {
@@ -8300,7 +8392,7 @@ const Mentor = {
   // Procedural "voice": one formant-filtered chirp per syllable-ish chunk.
   blip(line) {
     if (!AudioSys.ready) return; const n = Math.min(10, Math.max(2, Math.round(line.length / 6)));
-    const v = AudioSys.voice(null, n * 0.085 + 0.2, 0.35); if (!v) return;
+    const v = AudioSys.voice(null, n * 0.085 + 0.2, 0.5, AudioSys.ui); if (!v) return; Mix.duck(n * 0.085 + 0.3);
     const c = AudioSys.ctx, t0 = c.currentTime, f = c.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 900; f.Q.value = 2.2; f.connect(v);
     for (let i = 0; i < n; i++) { const t = t0 + i * 0.085, p = 150 + Math.random() * 90 + (i === n - 1 ? -30 : 0); AudioSys.osc(f, 'sawtooth', p, t, 0.075, 0.5, 0.07, p * (0.9 + Math.random() * 0.25)); f.frequency.setValueAtTime(600 + Math.random() * 1400, t); }
   },
@@ -8353,7 +8445,9 @@ const Safety = {
     this.led = new THREE.Mesh(new THREE.SphereGeometry(0.008, 8, 6), new THREE.MeshBasicMaterial({ color: 0x330000 })); this.led.position.copy(pos).add(_v1.set(0.02, 0.025, 0)); scene.add(this.led);
     this.ctrl = Controls.add({ name: 'Smoke alarm hush', r: 0.12, grabPos: pos.clone().add(_v1.set(0.03, 0, 0)), begin: () => this.hush(), drag: () => {}, end: () => {}, mouse: () => this.hush() });
   },
-  isRTE(p) { const d = p.fdef; return !d.safeT && !d.protein && !d.dough && !d.pasta && !d.rawDough || (d.safeT && p.th.coreMax >= d.safeT); },
+  // Ready-to-eat: salad, fruit, bread, cheese — or anything already cooked to a safe temperature.
+  RTE: new Set(['leaf', 'tomato', 'avocado', 'banana', 'appleF', 'strawberry', 'citrus', 'cheese', 'bread', 'tortilla', 'cake', 'pepper']),
+  isRTE(p) { const d = p.fdef; return this.RTE.has(d.look) || (d.protein && p.th.coreMax >= (d.safeT || 63)); },
   isRawPoultry(p) { return p.fdef.doneness === 'poultry' && p.th.coreMax < 60; },
   flag(p, why) {
     if (p.contam) return; p.contam = 1;
@@ -8472,7 +8566,7 @@ const Pass = {
       if (!h.active || h.held) continue; const gp = h.grabPoint(_v1);
       if (Math.hypot(gp.x - bell.renderPos.x, gp.z - bell.renderPos.z) < 0.05 && gp.y - bell.renderPos.y < 0.075 && gp.y - bell.renderPos.y > 0.02 && h.vel.y < -0.25) { PROP_DEFS.serviceBell.use(bell, h); this.bellCd = 1; haptic(h.side, 0.5, 30); }
     }
-    this.drawRail();
+    this._rt = (this._rt || 0) + dt; if (this._rt > 0.5) { this._rt = 0; this.drawRail(); }
   },
   // Plates/bowls on the pass and what is on each.
   collect() {
@@ -8669,7 +8763,7 @@ const Challenge = {
   start(id) {
     const lvl = LEVELS.find((l) => l.id === id); if (!lvl) return;
     UI.closeBoard(); Game.mode = 'challenge'; Game.setTimeScale(1); Game.setGravity(1); Game.noHazards = false; Mentor.enabled = true;
-    Props.resetKitchen(); Cosmetics.apply(); Safety.stop();
+    Props.resetKitchen(); Cosmetics.apply(); Safety.stop(); for (const h of HANDS) h.contam = 0;
     this.lvl = lvl; this.active = true; this.done = false; this.t = 0; this.penalties = []; this.results = []; this.tutStep = 0; this.nextId = 101 + Math.floor(Math.random() * 50);
     this.tickets = lvl.tickets.map((t) => ({ ...t, id: 0, printed: false, done: false, left: t.limit }));
     const P = lvl.prep || {};
@@ -8693,8 +8787,9 @@ const Challenge = {
     }
     for (const inc of this.incidents) if (!inc.fired && this.t > inc.at) { inc.fired = true; this.incident(inc.kind); }
     // Tutorial steps (tier 1): ghost hint the next tool, advance when its check passes.
-    if (this.lvl.tut && !this.done) {
-      const steps = TUTORIALS[this.lvl.tut], s = steps[this.tutStep];
+    this._tk = (this._tk || 0) + dt;
+    if (this.lvl.tut && !this.done && this._tk > 0.25) {
+      this._tk = 0; const steps = TUTORIALS[this.lvl.tut], s = steps[this.tutStep];
       if (s) { let tg = null; try { tg = s.hint(); } catch (e) { tg = null; } Ghost.set(tg); let ok = false; try { ok = s.done(); } catch (e) { ok = false; } if (ok) { this.tutStep++; AudioSys.uiTick(); UI.dirty = true; const n = steps[this.tutStep]; if (n) Bubble.show(n.t, 'chef', 4500); } }
       if (this.tutHintT === undefined || this.t - this.tutHintT > 20) { this.tutHintT = this.t; if (s) { Bubble.show(s.t, 'chef', 4500); domToast('👨‍🍳 ' + s.t, 4000); } }
     }
@@ -8788,12 +8883,106 @@ const RECIPES = [
 const RecipeBook = {
   cur: null, step: 0,
   open(k) { this.cur = RECIPES.find((r) => r.k === k) || null; this.step = 0; UI.dirty = true; },
-  update() {
+  _acc: 0,
+  update(dt) {
     if (!this.cur || Challenge.active) return;
+    this._acc += dt; if (this._acc < 0.25) return; this._acc = 0;
     const s = this.cur.steps[this.step]; if (!s) { Ghost.set(null); return; }
     let tg = null; try { tg = s.hint(); } catch (e) { tg = null; } Ghost.set(tg);
     let ok = false; try { ok = s.done(); } catch (e) { ok = false; }
     if (ok) { this.step++; AudioSys.uiTick(); UI.dirty = true; const n = this.cur.steps[this.step]; if (n) Bubble.show(n.t, 'chef', 4000); else Bubble.show(`${this.cur.name}: done! Plate it and ring the bell for a scorecard.`, 'chef', 4000); }
+  },
+};
+
+/* ====================================== [POLISH] ==================================== */
+// Heat shimmer: a few cheap billboarded quads with animated "refraction" streaks rising over ripping-hot pans
+// (no screen grab — just a faint additive wobble). Toggle in Settings for performance.
+const Shimmer = {
+  N: 4, quads: [], _acc: 0,
+  init() {
+    this.mat = new THREE.ShaderMaterial({
+      uniforms: { uT: { value: 0 } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+      vertexShader: `uniform float uT; attribute float aI; varying vec2 vUv; varying float vI;
+        void main(){ vUv = uv; vI = aI; vec3 p = position; p.x += sin(uv.y * 9.0 + uT * 7.0) * 0.006 * uv.y;
+          vec4 c = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0); c.xy += p.xy; gl_Position = projectionMatrix * c; }`,
+      fragmentShader: `uniform float uT; varying vec2 vUv; varying float vI;
+        void main(){ float s = sin(vUv.x * 40.0 + sin(vUv.y * 13.0 - uT * 9.0) * 3.0 + uT * 2.0);
+          float a = (0.5 + 0.5 * s) * smoothstep(0.0, 0.25, vUv.y) * (1.0 - smoothstep(0.55, 1.0, vUv.y)) * (1.0 - abs(vUv.x - 0.5) * 2.0);
+          gl_FragColor = vec4(vec3(1.0, 0.97, 0.9) * a * 0.05 * vI, 1.0); }`,
+    });
+    const g = new THREE.PlaneGeometry(0.26, 0.3); g.translate(0, 0.15, 0); g.setAttribute('aI', new THREE.Float32BufferAttribute(new Float32Array(g.attributes.position.count).fill(1), 1));
+    for (let i = 0; i < this.N; i++) { const m = new THREE.Mesh(g, this.mat); m.visible = false; m.renderOrder = 7; m.frustumCulled = false; scene.add(m); this.quads.push(m); }
+  },
+  update(dt) {
+    this.mat.uniforms.uT.value = Sim.clock;
+    let k = 0;
+    if (settings.heatShimmer && Quality.level < 2) for (const p of Stove.pans) {
+      if (k >= this.N) break; if (!p.alive || !p.thermo || p.thermo.T < 200 || !p.lq) continue;
+      const q = this.quads[k++]; q.position.copy(p.lq.B); q.position.y += 0.01; q.visible = true;
+      q.scale.setScalar(clamp((p.thermo.T - 180) / 80, 0.4, 1.2));
+    }
+    for (; k < this.N; k++) this.quads[k].visible = false;
+  },
+};
+
+/* ======================================= [MIX] ====================================== */
+// Audio mix: buses (cooking / sfx / ui / music / ambience) into a gentle master limiter, with the mentor's voice
+// ducking the cooking bed so lines are always intelligible.
+const Mix = {
+  init() {
+    const A = AudioSys; if (!A.ready || A.cook) return;
+    const c = A.ctx;
+    // Re-wire: master → limiter → destination
+    A.master.disconnect(); this.lim = c.createDynamicsCompressor();
+    this.lim.threshold.value = -10; this.lim.knee.value = 8; this.lim.ratio.value = 6; this.lim.attack.value = 0.004; this.lim.release.value = 0.25;
+    A.master.connect(this.lim); this.lim.connect(c.destination);
+    A.cook = c.createGain(); A.cook.gain.value = CONFIG.mix.cook; A.cook.connect(A.master);
+    A.ui = c.createGain(); A.ui.gain.value = CONFIG.mix.ui; A.ui.connect(A.master);
+    A.music = c.createGain(); A.music.gain.value = 0; A.music.connect(A.master);
+    A.sfx.gain.value = CONFIG.mix.sfx;
+  },
+  duck(sec) { const A = AudioSys; if (!A.cook) return; const t = A.ctx.currentTime; A.cook.gain.cancelScheduledValues(t); A.cook.gain.setTargetAtTime(CONFIG.mix.cook * 0.55, t, 0.05); A.cook.gain.setTargetAtTime(CONFIG.mix.cook, t + sec, 0.4); },
+  update() {
+    const A = AudioSys; if (!A.ready) return; if (!A.cook) this.init();
+    if (A.music) A.music.gain.setTargetAtTime(settings.jazz ? settings.musicVolume * CONFIG.mix.music : 0, A.ctx.currentTime, 0.3);
+    if (settings.jazz) Jazz.update();
+  },
+};
+
+/* ====================================== [JAZZ] ====================================== */
+// Optional procedural kitchen-radio jazz: swung ride, walking bass and soft electric-piano comping over ii–V–I
+// changes, scheduled ~0.25 s ahead on the audio clock (no assets, no timers).
+const Jazz = {
+  bpm: 112, beat: 0, next: 0, bar: 0,
+  // ii–V–I–VI in a few keys (semitones from C3 = MIDI 48): chord roots and qualities
+  prog: [[2, 'm7'], [7, '7'], [0, 'maj7'], [9, '7'], [5, 'maj7'], [4, 'm7'], [9, '7'], [2, 'm7'], [7, '7'], [0, 'maj7'], [0, 'maj7'], [7, '7']],
+  Q: { m7: [0, 3, 7, 10], '7': [0, 4, 7, 10], maj7: [0, 4, 7, 11] },
+  hz: (m) => 440 * Math.pow(2, (m - 69) / 12),
+  update() {
+    const A = AudioSys, c = A.ctx; if (!A.music) return;
+    if (this.next < c.currentTime) this.next = c.currentTime + 0.05;
+    const spb = 60 / this.bpm;
+    while (this.next < c.currentTime + 0.25) {
+      const b = this.beat % 4, ch = this.prog[this.bar % this.prog.length], root = 36 + ch[0], tones = this.Q[ch[1]];
+      const t = this.next, sw = spb * 0.66; // swing the off-beat
+      // Ride: ding on every beat + swung skip note on 2 and 4
+      this.hat(t, 0.16); if (b === 1 || b === 3) this.hat(t + sw, 0.09);
+      if (b === 1 || b === 3) this.hat(t, 0.05, 3000); // brushed snare-ish
+      // Walking bass: chord tones / approach notes
+      const walk = [0, tones[1], tones[2], b === 3 ? 11 : tones[3]][b] + (b === 3 ? -12 : 0);
+      this.bass(t, this.hz(root + walk + (b === 3 ? 13 : 0)), spb * 0.9);
+      // Comp: Charleston rhythm (1 and the "and" of 2)
+      if (b === 0 || (b === 1 && Math.random() < 0.6)) this.chord(b === 0 ? t : t + sw, root + 12, tones, spb * (b === 0 ? 1.2 : 0.5));
+      this.beat++; if (this.beat % 4 === 0) this.bar++;
+      this.next += spb;
+    }
+  },
+  hat(t, g, f = 7000) { const A = AudioSys; A.burst(A.music, t, 0.12, g, 'highpass', f, 0.7); },
+  bass(t, f, d) { const A = AudioSys; A.osc(A.music, 'triangle', f, t, d, 0.35, d * 0.9); A.osc(A.music, 'sine', f * 2, t, 0.06, 0.08, 0.05); },
+  chord(t, root, tones, d) {
+    const A = AudioSys, c = A.ctx, lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1400; lp.connect(A.music);
+    setTimeout(() => { try { lp.disconnect(); } catch (e) { /* gone */ } }, (t - c.currentTime + d + 0.5) * 1000);
+    for (const n of tones.slice(1)) { const f = this.hz(root + n); A.osc(lp, 'sine', f, t, d, 0.07, d); A.osc(lp, 'triangle', f * 2.001, t, d * 0.5, 0.02, d * 0.4); }
   },
 };
 /* ======================================= [SIM] ====================================== */
@@ -9034,11 +9223,12 @@ const Desktop = {
 
 /* ===================================== [PERFHUD] ==================================== */
 const PerfHUD = {
+  // fps · worst frame · draw calls · triangles · live food pieces · particles · CPU ms per subsystem · quality level
   init() {
-    this.canvas = Tex.canvas(256, 128); this.ctx = this.canvas.getContext('2d');
+    this.canvas = Tex.canvas(320, 200); this.ctx = this.canvas.getContext('2d');
     this.tex = Tex.finish(this.canvas); this.tex.wrapS = this.tex.wrapT = THREE.ClampToEdgeWrapping;
-    this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.16, 0.08), new THREE.MeshBasicMaterial({ map: this.tex, transparent: true, depthTest: false, toneMapped: false }));
-    this.mesh.position.set(-0.13, -0.1, -0.5); this.mesh.renderOrder = 1001; this.mesh.visible = settings.perfHud;
+    this.mesh = new THREE.Mesh(new THREE.PlaneGeometry(0.2, 0.125), new THREE.MeshBasicMaterial({ map: this.tex, transparent: true, depthTest: false, toneMapped: false }));
+    this.mesh.position.set(-0.14, -0.1, -0.5); this.mesh.renderOrder = 1001; this.mesh.visible = settings.perfHud;
     camera.add(this.mesh);
     this.t = 0; this.frames = 0; this.worst = 0;
   },
@@ -9046,17 +9236,35 @@ const PerfHUD = {
   update(dt) {
     this.frames++; this.t += dt; this.worst = Math.max(this.worst, dt);
     if (this.t < 0.5 || !this.mesh.visible) { if (this.t >= 0.5) { this.t = 0; this.frames = 0; this.worst = 0; } return; }
-    const fps = this.frames / this.t, c = this.ctx;
-    c.clearRect(0, 0, 256, 128); c.fillStyle = 'rgba(15,10,8,0.78)'; c.beginPath(); c.roundRect(0, 0, 256, 128, 14); c.fill();
+    const fps = this.frames / this.t, c = this.ctx, T = Main.timing;
+    let food = 0; for (let i = 0; i < Foods.pieces.length; i++) if (Foods.pieces[i].alive) food++;
+    c.clearRect(0, 0, 320, 200); c.fillStyle = 'rgba(15,10,8,0.8)'; c.beginPath(); c.roundRect(0, 0, 320, 200, 14); c.fill();
     c.font = 'bold 30px ui-monospace, monospace'; c.fillStyle = fps >= 71 ? '#8f8' : fps >= 60 ? '#fd6' : '#f77'; c.fillText(`${fps.toFixed(0)} fps`, 12, 36);
-    c.font = '18px ui-monospace, monospace'; c.fillStyle = '#eee';
-    c.fillText(`worst ${(this.worst * 1000).toFixed(1)} ms`, 140, 34);
-    c.fillText(`draws ${Main.calls}  tris ${(Main.tris / 1000).toFixed(0)}k`, 12, 68);
-    c.fillText(`props ${Props.list.length}  bodies ${world.bodies.len()}`, 12, 96);
-    c.fillText(`phys ${CONFIG.physics.hz}Hz  sim ${CONFIG.sim.hz}Hz`, 12, 120);
+    c.font = '17px ui-monospace, monospace'; c.fillStyle = '#eee';
+    c.fillText(`worst ${(this.worst * 1000).toFixed(1)} ms`, 168, 32);
+    c.fillText(`draws ${Main.calls}  tris ${(Main.tris / 1000).toFixed(0)}k`, 12, 66);
+    c.fillText(`food ${food}+${Foods.piles.length}  fx ${Particles.n + FX.n}`, 12, 92);
+    c.fillText(`sim ${T.sim.toFixed(2)}  phys ${T.phys.toFixed(2)} ms`, 12, 118);
+    c.fillText(`cpu ${T.cpu.toFixed(1)}  submit ${T.render.toFixed(1)} ms`, 12, 144);
+    c.fillStyle = '#b7a58f'; c.fillText(`quality ${Quality.level} · fov ${renderer.xr.getFoveation?.() ?? CONFIG.render.foveation} · props ${Props.list.length}`, 12, 172);
     this.tex.needsUpdate = true;
     this.t = 0; this.frames = 0; this.worst = 0;
   },
+};
+// Adaptive quality (XR): if frames run long for ~2 s, step down (shadow map every other frame → fewer shadow
+// casters + thinner particles); step back up after ~6 s of headroom. Keeps 72 Hz without a visible pop.
+const Quality = {
+  level: 0, slow: 0, fast: 0, n: 0,
+  update(dt) {
+    const budget = 1 / (renderer.xr.isPresenting ? (settings.refresh || 72) : 60);
+    if (Main.timing.cpu / 1000 > budget * 0.8 || dt > budget * 1.25) { this.slow += dt; this.fast = 0; } else { this.fast += dt; this.slow = Math.max(0, this.slow - dt * 0.5); }
+    if (this.slow > 2 && this.level < 2) { this.set(this.level + 1); this.slow = 0; }
+    else if (this.fast > 6 && this.level > 0) { this.set(this.level - 1); this.fast = 0; }
+    // Level ≥1: refresh the shadow map on alternate frames (the sun is static; only props move).
+    if (this.level >= 1 && settings.shadows) { renderer.shadowMap.autoUpdate = false; if ((++this.n & 1) === 0) renderer.shadowMap.needsUpdate = true; }
+    else renderer.shadowMap.autoUpdate = true;
+  },
+  set(l) { this.level = l; ShadowLOD.R = l >= 2 ? 1.2 : 1.9; for (const p of Props.list) p.shadowNear = undefined; Particles.cap = l >= 2 ? 0.5 : 1; },
 };
 
 /* ===================================== [XR SESSION] ================================= */
@@ -9065,6 +9273,7 @@ const XRSession = {
   async enter() {
     AudioSys.init();
     try {
+      renderer.xr.setFramebufferScaleFactor(settings.renderScale || CONFIG.render.framebufferScale); // must be set before the session starts
       const session = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking', 'layers'] });
       this.session = session;
       await renderer.xr.setSession(session);
@@ -9099,7 +9308,7 @@ const XRSession = {
 };
 
 /* ====================================== [MAIN] ====================================== */
-const Main = { last: performance.now(), physAcc: 0, started: false, calls: 0, tris: 0, stepIndex: 0, rescueT: 0, impacts: [] };
+const Main = { last: performance.now(), physAcc: 0, started: false, calls: 0, tris: 0, stepIndex: 0, rescueT: 0, impacts: [], timing: { cpu: 0, sim: 0, phys: 0, render: 0 } };
 const PHYS_DT = 1 / CONFIG.physics.hz;
 
 function onContactForce(e) {
@@ -9141,7 +9350,7 @@ function physicsStep(dt) {
 // Bound subsystem updates (no per-frame closure allocation; each is guarded by safe()).
 const U = {};
 function frame() {
-  const now = performance.now();
+  const now = performance.now(), T = Main.timing;
   let dt = (now - Main.last) / 1000; Main.last = now;
   if (!(dt > 0)) dt = 1 / 72; if (dt > 0.1) dt = 0.1;
   Sim.clock += dt; frameDt = dt;
@@ -9159,7 +9368,9 @@ function frame() {
   safe('oven', U.oven, dt);
   safe('m4pre', U.m4pre, dt);
   const step = PHYS_DT; Main.physAcc += dt; let n = 0;
+  const tp = performance.now();
   while (Main.physAcc >= step && n < CONFIG.physics.maxSubSteps) { safe('physics', physicsStep, step); Main.physAcc -= step; n++; }
+  T.phys += (performance.now() - tp - T.phys) * 0.1;
   if (Main.physAcc > step) Main.physAcc = step * 0.5;
   const alpha = Main.physAcc / step;
   safe('propsRender', U.propsRender, alpha);
@@ -9169,7 +9380,7 @@ function frame() {
   safe('liquids', U.liquids, dt);
   safe('m4', U.m4, dt);
   safe('m5', U.m5, dt);
-  safe('sim', U.sim, dt);
+  const ts = performance.now(); safe('sim', U.sim, dt); T.sim += (performance.now() - ts - T.sim) * 0.1;
   safe('stove', U.stove, dt);
   safe('particles', U.particles, dt);
   safe('chefsEye', U.chefsEye, dt);
@@ -9177,7 +9388,10 @@ function frame() {
   safe('audio', U.audio, camera);
   safe('hud', U.hud, dt);
   Main.rescueT += dt; if (Main.rescueT > 1) { Main.rescueT = 0; safe('rescue', U.rescue); }
+  safe('quality', U.quality, dt);
+  const tr = performance.now(); T.cpu += (tr - now - T.cpu) * 0.1;
   renderer.render(scene, camera);
+  T.render += (performance.now() - tr - T.render) * 0.1;
   Main.calls = renderer.info.render.calls; Main.tris = renderer.info.render.triangles;
 }
 
@@ -9207,7 +9421,7 @@ async function boot() {
     Foods.initial();
     Hands.init();
     UI.init();
-    Progress.load(); Cosmetics.init(); Bubble.init(); Ghost.init(); Safety.init(); Pass.init();
+    Progress.load(); Cosmetics.init(); Bubble.init(); Ghost.init(); Safety.init(); Pass.init(); Shimmer.init();
     toastSink = (m, ms) => { if (Input.mode === 'xr') Bubble.show(m, '', ms); };
     Loco.init();
     PerfHUD.init();
@@ -9223,7 +9437,8 @@ async function boot() {
       stove: Stove.update.bind(Stove), particles: Particles.update.bind(Particles), chefsEye: ChefEye.update.bind(ChefEye),
       oven: Oven.update.bind(Oven), liquids: Liquids.update.bind(Liquids),
       m4pre: (dt) => { Fryer.update(dt); Utensils.update(dt); Fridge.update(dt); Microwave.update(dt); Toaster.update(dt); Mixer.update(dt); Bakery.update(dt); Kitchenware.update(dt); ShadowLOD.update(); },
-      m5: (dt) => { Game.update(dt); Challenge.update(dt); RecipeBook.update(); Ghost.update(dt); Mentor.update(dt); Safety.update(dt); Pass.update(dt); Bubble.update(dt); },
+      quality: Quality.update.bind(Quality),
+      m5: (dt) => { Game.update(dt); Challenge.update(dt); RecipeBook.update(dt); Ghost.update(dt); Mentor.update(dt); Safety.update(dt); Pass.update(dt); Bubble.update(dt); Shimmer.update(dt); Mix.update(); },
       m4: (dt) => { Grill.update(dt); Fire.update(dt); FX.update(dt); Seasoning.update(); Eating.update(dt); TasteCard.update(dt); Reaction.update(dt); Kettle.update(dt); },
     });
     renderer.xr.addEventListener('sessionstart', () => XRSession.onStart());
@@ -9235,7 +9450,7 @@ async function boot() {
     if (new URLSearchParams(location.search).has('test')) setTimeout(() => safe('testMode', () => TestMode.run()), 50);
     renderer.setAnimationLoop(frame);
     // Debug handle for the browser console (inspect state, tweak CONFIG live).
-    window.MEP = { THREE, RAPIER, CONFIG, resolveLayout, Nav, Phys, Main, PerfHUD, THERMO, FOOD_DEFS, PAN_DEFS, Thermo, PanThermo, simPanCook, simRest, preheat, Foods, FoodPiece, Stove, Oven, OvenThermo, Contents, GROUPS, Fryer, Grill, Fire, FireSim, Seasoning, Dredge, Eating, TasteCard, Utensils, Fridge, Microwave, Toaster, Mixer, Blender, Kettle, Bakery, BatterPuddle, Kitchenware, ambientAt, Game, Challenge, Pass, Progress, Cosmetics, Mentor, Bubble, Safety, Slots, RecipeBook, RECIPES, LEVELS, TUTORIALS, Ghost, scoreDish, DISH_SPECS, SCORE_W, W, tasteReport, foodSafe, FryerThermo, GrillThermo, FX, Liquids, Sink, Controls, Thermometer, simPot, simPanMulti, exposeSubmerged, dropletFate, LIQ, OVEN, OILS, Cutting, Tongs, Particles, ChefEye, TestMode, settings, scene, camera, rig, renderer, world, Hands, Props, Loco, UI, Grab, Input, Desktop, Sim, Kitchen, U };
+    window.MEP = { THREE, RAPIER, CONFIG, resolveLayout, Nav, Phys, Main, PerfHUD, THERMO, FOOD_DEFS, PAN_DEFS, Thermo, PanThermo, simPanCook, simRest, preheat, Foods, FoodPiece, Stove, Oven, OvenThermo, Contents, GROUPS, Fryer, Grill, Fire, FireSim, Seasoning, Dredge, Eating, TasteCard, Utensils, Fridge, Microwave, Toaster, Mixer, Blender, Kettle, Bakery, BatterPuddle, Kitchenware, ambientAt, Game, Challenge, Pass, Progress, Cosmetics, Mentor, Bubble, Safety, Slots, RecipeBook, RECIPES, LEVELS, TUTORIALS, Ghost, scoreDish, DISH_SPECS, SCORE_W, W, AudioSys, Jazz, Mix, Shimmer, Quality, tasteReport, foodSafe, FryerThermo, GrillThermo, FX, Liquids, Sink, Controls, Thermometer, simPot, simPanMulti, exposeSubmerged, dropletFate, LIQ, OVEN, OILS, Cutting, Tongs, Particles, ChefEye, TestMode, settings, scene, camera, rig, renderer, world, Hands, Props, Loco, UI, Grab, Input, Desktop, Sim, Kitchen, U };
 
     const btnVR = $('btnVR'), btnD = $('btnDesktop');
     btnD.disabled = false;
